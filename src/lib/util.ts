@@ -85,9 +85,11 @@ export function parseJSON<T = any>(s: string | null | undefined, fallback: T): T
   }
 }
 
+const ZERO_DECIMAL = new Set(['jpy', 'krw', 'vnd', 'clp', 'isk', 'huf', 'twd', 'ugx', 'xaf', 'xof']);
 export function money(cents: number, currency = 'usd'): string {
   try {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format((cents || 0) / 100);
+    const div = ZERO_DECIMAL.has(currency.toLowerCase()) ? 1 : 100;
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format((cents || 0) / div);
   } catch {
     return `$${((cents || 0) / 100).toFixed(2)}`;
   }
