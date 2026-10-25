@@ -5,7 +5,7 @@ import { one, all, run, insert } from '../../lib/db';
 import { requirePerm, audit } from '../../lib/auth';
 import { siteUrl, settings } from '../../lib/pub';
 import { WEBHOOK_EVENTS } from '../../lib/events';
-import { attemptDelivery } from '../../lib/webhooks';
+import { attemptDelivery, createTestDelivery, buildPayload, WEBHOOK_VERSIONS, LATEST_WEBHOOK_VERSION, isWebhookVersion } from '../../lib/webhooks';
 import { PROVIDERS } from '../../lib/integrations';
 import { id, now, token, sha256, form, str, ago, fmtDateTime, parseJSON } from '../../lib/util';
 import { Card, Field, Input, Select, Btn, ActionForm, Table, Badge, Status, Modal, OpenBtn, Grid, Help, Copy, Code, Toggle, back } from '../../ui/components';
@@ -205,14 +205,16 @@ export function registerDevelopers(dash: Hono<AppEnv>) {
             cols={[
               { h: 'URL', r: (h: any) => <><a href={`/app/settings/webhooks/${h.id}`} class="mono small">{h.url}</a>{h.description && <div class="muted small">{h.description}</div>}</> },
               { h: 'Events', r: (h: any) => { const ev = parseJSON<string[]>(h.events, ['*']); return ev.includes('*') ? <Badge tone="purple">all events</Badge> : <span class="muted small">{ev.length} events</span>; } },
+              { h: 'Version', r: (h: any) => <><code class="small">{h.version}</code>{h.version !== LATEST_WEBHOOK_VERSION && <> <Badge tone="amber">upgrade available</Badge></>}</> },
               { h: 'Status', r: (h: any) => (h.active ? <Badge tone="green">enabled</Badge> : <Badge>disabled</Badge>) },
               { h: 'Failed', r: (h: any) => (h.failed ? <Badge tone="red">{h.failed}</Badge> : <span class="muted">0</span>) },
               { h: 'Last delivery', r: (h: any) => <span class="muted">{ago(h.last)}</span> },
             ]}
           />
         </Card>
+        <VersionsCard />
         <Card title="Verifying signatures">
-          <p>Every request has <code>openhive-signature: t=&lt;unix&gt;,v1=&lt;hex&gt;</code> where <code>v1 = HMAC_SHA256(secret, t + "." + rawBody)</code>, plus <code>openhive-event</code> and <code>openhive-delivery</code> headers. Payloads are versioned (<code>"version"</code> field). Failed deliveries are retried with backoff for ~2 days.</p>
+          <p>Every request has <code>openhive-signature: t=&lt;unix&gt;,v1=&lt;hex&gt;</code> where <code>v1 = HMAC_SHA256(secret, t + "." + rawBody)</code>, plus <code>openhive-event</code>, <code>openhive-delivery</code> and <code>openhive-version</code> headers. Failed deliveries are retried with backoff for ~2 days.</p>
           <Code>{`import crypto from 'node:crypto';\nfunction verify(secret, header, rawBody) {\n  const { t, v1 } = Object.fromEntries(header.split(',').map((p) => p.split('=')));\n  const expected = crypto.createHmac('sha256', secret).update(t + '.' + rawBody).digest('hex');\n  return Math.abs(Date.now() / 1000 - t) < 300 && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1));\n}`}</Code>
         </Card>
         <Modal id="newhook" title="Add webhook endpoint" wide><HookForm action="/app/settings/webhooks" /></Modal>
@@ -237,8 +239,19 @@ export function registerDevelopers(dash: Hono<AppEnv>) {
     if (!h) return back(c, '/app/settings/webhooks', 'Not found', 'err');
     const filter = c.req.query('status') || '';
     const deliveries = await all<any>(c.env, `SELECT * FROM webhook_deliveries WHERE webhook_id = ? ${filter ? 'AND status = ?' : ''} ORDER BY created_at DESC LIMIT 100`, h.id, ...(filter ? [filter] : []));
+    const attempts = deliveries.length
+      ? await all<any>(c.env, `SELECT * FROM webhook_delivery_attempts WHERE delivery_id IN (${deliveries.map(() => '?').join(',')}) ORDER BY attempt, created_at`, ...deliveries.map((d) => d.id))
+      : [];
+    const attemptsOf = (did: string) => attempts.filter((a) => a.delivery_id === did);
+    const outdated = h.version !== LATEST_WEBHOOK_VERSION;
     return page(c, 'webhooks', 'Webhook endpoint', (
       <>
+        {outdated && (
+          <div class="callout warn row">
+            <span class="grow">This endpoint is pinned to payload version <code>{h.version}</code>. Version <code>{LATEST_WEBHOOK_VERSION}</code> is available — compare the payloads below, update your receiver, then upgrade. You can switch back any time.</span>
+            <ActionForm action={`/app/settings/webhooks/${h.id}/version`} fields={{ version: LATEST_WEBHOOK_VERSION }} label={`Upgrade to ${LATEST_WEBHOOK_VERSION}`} kind="primary" confirm={`Upgrade this endpoint to ${LATEST_WEBHOOK_VERSION}? New deliveries will use the new payload shape.`} />
+          </div>
+        )}
         <Card title={<span class="mono small">{h.url}</span>} actions={<div class="row">
           <ActionForm action={`/app/settings/webhooks/${h.id}/test`} label="Send test event" kind="primary" />
           <ActionForm action={`/app/settings/webhooks/${h.id}/toggle`} label={h.active ? 'Disable' : 'Enable'} />
@@ -259,14 +272,39 @@ export function registerDevelopers(dash: Hono<AppEnv>) {
               { h: 'When', r: (d: any) => <span class="nowrap">{fmtDateTime(d.created_at, pub.timezone)}</span> },
               { h: 'Event', r: (d: any) => <code class="small">{d.event}</code> },
               { h: 'Status', r: (d: any) => <><Status s={d.status} /> {d.response_code ? <code class="small">HTTP {d.response_code}</code> : null}</> },
+              { h: 'Version', r: (d: any) => <code class="small">{parseJSON<any>(d.payload, {}).version || '—'}</code> },
               { h: 'Attempts', r: (d: any) => d.attempts },
-              { h: 'Details', r: (d: any) => <details><summary class="muted small">payload & response</summary><pre class="small" style="white-space:pre-wrap;max-width:520px">{JSON.stringify(parseJSON(d.payload, {}), null, 2)}</pre><div class="muted small">Response:</div><pre class="small" style="white-space:pre-wrap;max-width:520px">{d.response_body || '—'}</pre></details> },
+              { h: 'Details', r: (d: any) => (
+                <details><summary class="muted small">payload & attempts</summary>
+                  <pre class="small" style="white-space:pre-wrap;max-width:520px">{JSON.stringify(parseJSON(d.payload, {}), null, 2)}</pre>
+                  <div class="muted small">Attempts:</div>
+                  {attemptsOf(d.id).length ? (
+                    <ol class="small" style="max-width:520px;padding-left:18px">
+                      {attemptsOf(d.id).map((a) => (
+                        <li style="margin-bottom:6px">
+                          <span class="nowrap">{fmtDateTime(a.created_at, pub.timezone)}</span> · {a.response_code ? <code>HTTP {a.response_code}</code> : <code>no response</code>} · {a.duration_ms} ms{a.manual ? ' · manual' : ''}
+                          <pre class="small" style="white-space:pre-wrap;margin:2px 0 0">{a.error || a.response_body || '—'}</pre>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : <pre class="small" style="white-space:pre-wrap;max-width:520px">{d.response_body || '—'}</pre>}
+                </details>
+              ) },
               { h: '', class: 'right', r: (d: any) => (d.status === 'success' ? null : <ActionForm action={`/app/settings/webhooks/${h.id}/retry/${d.id}`} label="Retry now" />) },
             ]}
           />
         </Card>
+        <VersionsCard current={h.version} />
       </>
     ));
+  });
+
+  dash.post('/webhooks/:id/version', requirePerm('admin'), async (c) => {
+    const f = await form(c.req);
+    if (!isWebhookVersion(f.version)) return back(c, `/app/settings/webhooks/${c.req.param('id')}`, 'Unknown payload version', 'err');
+    await run(c.env, 'UPDATE webhooks SET version = ? WHERE id = ? AND pub_id = ?', f.version, c.req.param('id'), c.get('pub').id);
+    await audit(c, 'webhooks.version_changed', c.req.param('id'), { version: f.version });
+    return back(c, `/app/settings/webhooks/${c.req.param('id')}`, `Endpoint now receives version ${f.version} payloads`);
   });
 
   dash.post('/webhooks/:id', requirePerm('admin'), async (c) => {
@@ -299,9 +337,7 @@ export function registerDevelopers(dash: Hono<AppEnv>) {
     const pub = c.get('pub');
     const h = await one<any>(c.env, 'SELECT * FROM webhooks WHERE id = ? AND pub_id = ?', c.req.param('id'), pub.id);
     if (!h) return back(c, '/app/settings/webhooks', 'Not found', 'err');
-    const did = id();
-    const payload = JSON.stringify({ id: did, type: 'webhook.test', version: h.version, created: Math.floor(now() / 1000), publication_id: pub.id, data: { message: 'This is a test event from OpenHive', subscriber: { id: 'sub_test', email: 'reader@example.com', name: 'Test Reader', status: 'active', tier: 'free' } } });
-    await insert(c.env, 'webhook_deliveries', { id: did, webhook_id: h.id, pub_id: pub.id, event: 'webhook.test', payload, status: 'pending', attempts: 0, created_at: now(), updated_at: now() });
+    const did = await createTestDelivery(c.env, h);
     const ok = await attemptDelivery(c.env, did, true);
     return back(c, `/app/settings/webhooks/${h.id}`, ok ? 'Test event delivered ✓' : 'Test delivery failed — see the log below', ok ? 'ok' : 'err');
   });
@@ -325,8 +361,25 @@ function hookInput(f: Record<string, any>): { url: string; description: string; 
   }
   const events: string[] = f.all_events ? ['*'] : (f.events || []).filter((e: string) => (WEBHOOK_EVENTS as readonly string[]).includes(e));
   if (!events.length) return 'Choose at least one event (or all events).';
-  return { url, description: str(f.description, 200), events, version: ['2026-10-01'].includes(f.version) ? f.version : '2026-10-01' };
+  return { url, description: str(f.description, 200), events, version: isWebhookVersion(f.version) ? f.version : LATEST_WEBHOOK_VERSION };
 }
+
+/** Available payload versions, their changelog, and a sample payload in each shape. */
+const VersionsCard = (p: { current?: string }) => {
+  const sample = { id: 'evt_sample', type: 'subscription.created', pubId: 'pub_123', createdMs: Date.UTC(2026, 10, 1, 12), data: { subscriber: { id: 'sub_123', email: 'reader@example.com', name: 'Ada', status: 'active', tier: 'free', source: 'website', utm_source: 'x', utm_medium: 'social', utm_campaign: 'launch', referral_code: 'ADA1', custom: { role: 'founder' }, created_at: Date.UTC(2026, 10, 1, 12) } } };
+  return (
+    <Card title="Payload versions & changelog">
+      <Help>Each endpoint is pinned to a payload version, so new fields or renamed keys never break a receiver. New endpoints get the latest version; upgrade an older endpoint from its page once your receiver handles the new shape.</Help>
+      {[...WEBHOOK_VERSIONS].reverse().map((v) => (
+        <div style="margin-top:14px">
+          <div class="row"><strong class="mono">{v.version}</strong>{v.version === LATEST_WEBHOOK_VERSION && <Badge tone="green">latest</Badge>}{p.current === v.version && <Badge tone="blue">this endpoint</Badge>}<span class="muted small">{v.summary}</span></div>
+          <ul class="small" style="margin:6px 0 0 18px">{v.changes.map((x) => <li>{x}</li>)}</ul>
+          <details><summary class="muted small">Sample subscription.created payload</summary><pre class="small" style="white-space:pre-wrap">{JSON.stringify(buildPayload(v.version, sample), null, 2)}</pre></details>
+        </div>
+      ))}
+    </Card>
+  );
+};
 
 const HookForm = (p: { action: string; h?: any }) => {
   const ev = parseJSON<string[]>(p.h?.events, ['*']);
@@ -336,7 +389,7 @@ const HookForm = (p: { action: string; h?: any }) => {
     <form method="post" action={p.action} class="stack">
       <Field label="Endpoint URL"><Input name="url" value={p.h?.url} required placeholder="https://example.com/webhooks/openhive" /></Field>
       <Field label="Description"><Input name="description" value={p.h?.description} /></Field>
-      <Field label="Payload version"><Select name="version" value={p.h?.version || '2026-10-01'} options={[['2026-10-01', '2026-10-01 (current)']]} /></Field>
+      <Field label="Payload version" hint="See “Payload versions & changelog” for what changed between versions."><Select name="version" value={p.h?.version || LATEST_WEBHOOK_VERSION} options={[...WEBHOOK_VERSIONS].reverse().map((v) => [v.version, `${v.version}${v.version === LATEST_WEBHOOK_VERSION ? ' (latest)' : ''}`] as [string, string])} /></Field>
       <Toggle name="all_events" checked={ev.includes('*')} label="Send all events" hint="Including events added in the future." />
       <fieldset class="grid g3">
         {Object.entries(groups).map(([g, list]) => (

@@ -16,6 +16,21 @@ const app = new Hono<AppEnv>();
 const KINDS: Array<[string, string]> = [['short', 'Short text'], ['long', 'Long text'], ['single', 'Single choice'], ['multi', 'Multiple choice'], ['dropdown', 'Dropdown'], ['rating', 'Rating (1–5)'], ['nps', 'NPS (0–10)'], ['date', 'Date']];
 const STOP = new Set('the a an and or but to of in on for with is are was were be been it this that i you we they my your our their me us them at as by from so if not no yes do does did have has had just very really more most much can could would should will what which who how when where why about into than then there here its also get got like'.split(' '));
 
+// Live results: poll results.json every 4 s while the tab is visible (30 s once the survey is closed). Unchanged polls
+// cost one COUNT query; when the response count moves, the question cards are swapped for freshly rendered ones.
+const LIVE_JS = `(function(){var el=document.getElementById('survey-live');if(!el)return;var busy=false,fails=0;
+function set(k,v){document.querySelectorAll('[data-live="'+k+'"]').forEach(function(n){n.textContent=v;});}
+function tick(){if(busy||document.hidden)return;busy=true;
+fetch(el.dataset.src+'?html=1&since='+encodeURIComponent(el.dataset.total)+'&latest='+encodeURIComponent(el.dataset.latest||''),{headers:{accept:'application/json'},credentials:'same-origin'})
+.then(function(r){if(!r.ok)throw new Error(r.status);return r.json();}).then(function(j){fails=0;el.dataset.active=j.status==='active'?'1':'0';
+if(j.changed){el.dataset.total=String(j.total);el.dataset.latest=j.latest==null?'':String(j.latest);if(j.html!=null)el.innerHTML=j.html;
+set('total',Number(j.total).toLocaleString());set('linked',Number(j.linked).toLocaleString());set('linked_pct',j.linked_pct);
+el.classList.remove('live-flash');void el.offsetWidth;el.classList.add('live-flash');}
+set('state',j.status==='active'?'live · updated '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'closed');})
+.catch(function(){fails++;}).finally(function(){busy=false;});}
+function loop(){tick();setTimeout(loop,(el.dataset.active==='1'?4000:30000)*Math.min(8,1+fails));}
+setTimeout(loop,4000);document.addEventListener('visibilitychange',function(){if(!document.hidden)tick();});})();`;
+
 async function loadSurvey(c: Ctx) {
   return one<any>(c.env, 'SELECT * FROM surveys WHERE id = ? AND pub_id = ?', c.req.param('id'), c.get('pub').id);
 }
@@ -156,32 +171,35 @@ function topTerms(texts: string[], n = 12): Array<{ term: string; count: number 
   return [...counts.entries()].filter(([, v]) => v > 1).sort((a, b) => b[1] - a[1]).slice(0, n).map(([term, count]) => ({ term, count }));
 }
 
-app.get('/surveys/:id', async (c) => {
-  const pub = c.get('pub');
-  const s = await loadSurvey(c);
-  if (!s) return back(c, '/app/audience/surveys', 'Survey not found', 'err');
+/** Load responses + aggregates for the results page and its live JSON endpoint. */
+async function surveyData(c: Ctx, s: any) {
   const qs = parseJSON<SurveyQ[]>(s.questions, []);
-  const resp = await all<any>(c.env, 'SELECT answers, subscriber_id FROM survey_responses WHERE survey_id = ? ORDER BY created_at DESC LIMIT 20000', s.id);
+  const resp = await all<any>(c.env, 'SELECT answers, subscriber_id, created_at FROM survey_responses WHERE survey_id = ? ORDER BY created_at DESC LIMIT 20000', s.id);
   const answers = resp.map((r) => parseJSON<Record<string, any>>(r.answers, {}));
   const linked = resp.filter((r) => r.subscriber_id).length;
-  const textAll: string[] = [];
-  return page(c, {
-    title: s.title, sub: 'surveys', crumbs: [['/app/audience/surveys', 'Surveys']],
-    actions: <>
-      <LinkBtn small href={`/app/audience/surveys/${s.id}/responses`}>Browse responses</LinkBtn>
-      <LinkBtn small href={`/app/audience/surveys/${s.id}/export`}>Export CSV</LinkBtn>
-      <LinkBtn small href={`/app/audience/surveys/${s.id}/edit`} kind="primary">Edit survey</LinkBtn>
-      <ActionForm action={`/app/audience/surveys/${s.id}/duplicate`} label="Duplicate" />
-      <ActionForm action={`/app/audience/surveys/${s.id}/delete`} label="Delete" kind="danger" confirm="Delete this survey and all its responses?" />
-    </>,
-  }, <>
-    <Stats>
-      <Stat label="Responses" value={num(resp.length)} />
-      <Stat label="Tied to subscribers" value={pct(linked, resp.length || 1, 0)} sub={`${num(linked)} identified`} />
-      <Stat label="Status" value={<Status s={s.status === 'active' ? 'active' : 'ended'} />} />
-    </Stats>
-    <Card title="Share link"><Copy value={`${siteUrl(c.env, pub)}/survey/${s.id}`} /></Card>
-    {qs.map((qq, qi) => {
+  return { qs, resp, answers, linked, latest: resp[0]?.created_at ?? null };
+}
+
+/** Per-question aggregates (same shape as GET /api/v2/…/surveys/:id). */
+function aggregate(qs: SurveyQ[], answers: Array<Record<string, any>>) {
+  return qs.map((q) => {
+    const vals = answers.map((a) => a[q.id]).filter((v) => v !== undefined && v !== '' && v !== null);
+    if (['single', 'multi', 'dropdown', 'rating', 'nps'].includes(q.kind)) {
+      const counts: Record<string, number> = {};
+      for (const o of q.options || []) counts[o] = 0;
+      for (const v of vals) for (const x of Array.isArray(v) ? v : [v]) counts[String(x)] = (counts[String(x)] || 0) + 1;
+      const nums = vals.map(Number).filter((n) => !isNaN(n));
+      const extra = q.kind === 'rating' || q.kind === 'nps' ? { average: nums.length ? Math.round((nums.reduce((a, b) => a + b, 0) / nums.length) * 100) / 100 : null, ...(q.kind === 'nps' && nums.length ? { nps: Math.round(((nums.filter((x) => x >= 9).length - nums.filter((x) => x <= 6).length) / nums.length) * 100) } : {}) } : {};
+      return { id: q.id, label: q.label, kind: q.kind, responses: vals.length, counts, ...extra };
+    }
+    return { id: q.id, label: q.label, kind: q.kind, responses: vals.length, samples: vals.slice(0, 15).map(String) };
+  });
+}
+
+/** The per-question result cards (server-rendered; also re-rendered for live updates). */
+function QuestionResults(p: { s: any; qs: SurveyQ[]; answers: Array<Record<string, any>> }) {
+  const { s, qs, answers } = p;
+  return <>{qs.map((qq, qi) => {
       const vals = answers.map((a) => a[qq.id]).filter((v) => v !== undefined && v !== '');
       let body: any;
       if (['single', 'multi', 'dropdown'].includes(qq.kind)) {
@@ -203,7 +221,6 @@ app.get('/surveys/:id', async (c) => {
         </>;
       } else {
         const texts = vals.map(String);
-        textAll.push(...texts);
         const terms = topTerms(texts);
         body = <>
           {terms.length > 0 && <div class="row" style="margin-bottom:10px">{terms.map((t) => <Badge tone="blue">{t.term} · {t.count}</Badge>)}</div>}
@@ -212,7 +229,52 @@ app.get('/surveys/:id', async (c) => {
         </>;
       }
       return <Card title={<>{qi + 1}. {qq.label}</>} actions={<Muted>{num(vals.length)} answers · {KINDS.find(([k]) => k === qq.kind)?.[1]}</Muted>}>{vals.length ? body : <Help>No answers yet.</Help>}</Card>;
-    })}
+    })}</>;
+}
+
+// Live results: the page polls this every few seconds. Cheap when nothing changed (one COUNT + MAX); when the response
+// count moves it returns fresh aggregates plus the re-rendered question cards.
+app.get('/surveys/:id/results.json', async (c) => {
+  const s = await loadSurvey(c);
+  if (!s) return c.json({ error: 'not_found' }, 404);
+  const head = await one<{ n: number; latest: number | null }>(c.env, 'SELECT COUNT(*) AS n, MAX(created_at) AS latest FROM survey_responses WHERE survey_id = ?', s.id);
+  const total = head?.n || 0;
+  const since = c.req.query('since');
+  const sinceLatest = c.req.query('latest');
+  c.header('cache-control', 'no-store');
+  if (since !== undefined && Number(since) === total && String(head?.latest ?? '') === (sinceLatest ?? '')) return c.json({ changed: false, total, latest: head?.latest ?? null, status: s.status });
+  const d = await surveyData(c, s);
+  const html = c.req.query('html') === '1' ? String(await (<QuestionResults s={s} qs={d.qs} answers={d.answers} /> as any).toString()) : undefined;
+  return c.json({ changed: true, total: d.resp.length, linked: d.linked, linked_pct: pct(d.linked, d.resp.length || 1, 0), latest: d.latest, status: s.status, questions: aggregate(d.qs, d.answers), html });
+});
+
+app.get('/surveys/:id', async (c) => {
+  const pub = c.get('pub');
+  const s = await loadSurvey(c);
+  if (!s) return back(c, '/app/audience/surveys', 'Survey not found', 'err');
+  const { qs, resp, answers, linked, latest } = await surveyData(c, s);
+  // open-ended answers (computed here: JSX components render lazily, after this handler builds the page)
+  const textAll = qs.filter((q) => !['single', 'multi', 'dropdown', 'rating', 'nps'].includes(q.kind)).flatMap((q) => answers.map((a) => a[q.id]).filter((v) => v !== undefined && v !== '').map(String));
+  const cards = <QuestionResults s={s} qs={qs} answers={answers} />;
+  return page(c, {
+    title: s.title, sub: 'surveys', crumbs: [['/app/audience/surveys', 'Surveys']],
+    actions: <>
+      <LinkBtn small href={`/app/audience/surveys/${s.id}/responses`}>Browse responses</LinkBtn>
+      <LinkBtn small href={`/app/audience/surveys/${s.id}/export`}>Export CSV</LinkBtn>
+      <LinkBtn small href={`/app/audience/surveys/${s.id}/edit`} kind="primary">Edit survey</LinkBtn>
+      <ActionForm action={`/app/audience/surveys/${s.id}/duplicate`} label="Duplicate" />
+      <ActionForm action={`/app/audience/surveys/${s.id}/delete`} label="Delete" kind="danger" confirm="Delete this survey and all its responses?" />
+    </>,
+  }, <>
+    <Stats>
+      <Stat label="Responses" value={<span data-live="total">{num(resp.length)}</span>} sub={<span data-live="state">{s.status === 'active' ? 'live · updates automatically' : 'closed'}</span>} />
+      <Stat label="Tied to subscribers" value={<span data-live="linked_pct">{pct(linked, resp.length || 1, 0)}</span>} sub={<span><span data-live="linked">{num(linked)}</span> identified</span>} />
+      <Stat label="Status" value={<Status s={s.status === 'active' ? 'active' : 'ended'} />} />
+    </Stats>
+    <Card title="Share link"><Copy value={`${siteUrl(c.env, pub)}/survey/${s.id}`} /></Card>
+    <div id="survey-live" data-src={`/app/audience/surveys/${s.id}/results.json`} data-total={String(resp.length)} data-latest={latest == null ? '' : String(latest)} data-active={s.status === 'active' ? '1' : '0'}>{cards}</div>
+    <style dangerouslySetInnerHTML={{ __html: '@keyframes oh-live{from{background:color-mix(in srgb,#facc15 18%,transparent)}to{background:transparent}}#survey-live.live-flash .bar-f{transition:width .6s ease}#survey-live.live-flash>*{animation:oh-live 1.2s ease-out}' }} />
+    <script dangerouslySetInnerHTML={{ __html: LIVE_JS }} />
     {textAll.length > 0 && (
       <Card title="What should you write next?" actions={!aiEnabled(c.env) ? <Muted>Enable Workers AI for summaries</Muted> : null}>
         <Help>Recurring themes from open-ended answers are highlighted above each question.{aiEnabled(c.env) ? ' Ask AI to summarize them into post ideas:' : ''}</Help>

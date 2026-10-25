@@ -46,14 +46,39 @@ Any client that supports remote MCP servers over HTTP with a custom header works
 | `reports` | Subscriber growth and earnings reports |
 | `get_subscriber`, `add_subscriber`, `tag_subscriber` | Full history and engagement for any reader |
 | `list_segments`, `create_segment_from_description` | Build segments by describing them (with a dry run) |
-| `list_automations`, `create_automation`, `update_automation`, `enroll_subscriber` | Create and edit automations (draft vs live) |
+| `list_automations`, `create_automation`, `update_automation`, `enroll_subscriber` | Create and edit automations. Edits go to a draft version while the live one keeps running; `publish: true` makes them live, `status: "active"/"paused"` turns it on or off |
 | `generate_image` | AI image straight into your media library |
 | `manage_website` | Pages, redirects, SEO and crawler settings |
 | `community` | Read and reply to community posts and DMs |
 | `ads` | Ad offers and ad revenue reports |
-| `podcasts` | Shows and episodes |
-| `products` | Digital products, coupons and promo codes |
+| `podcasts` | Shows and episodes (see below) |
+| `products` | Digital products and promo codes (see below) |
 | `search_docs` | Search these docs |
+
+### `podcasts` actions
+
+| Action | Arguments |
+|---|---|
+| `list_shows` | — |
+| `create_show` / `update_show` | `title`, `description`, `author`, `owner_email`, `cover_url`, `language`, `category` (`"Technology"` or `"Business\|Marketing"`), `explicit`, `kind` (episodic/serial), `access` (public/premium/both), `copyright`; update needs `podcast_id`. Renaming never changes the feed URL. |
+| `list_episodes` | `podcast_id`, optional `status` |
+| `create_episode` / `update_episode` | `title`, `description` (show notes, HTML sanitized), `audio_url`, `season`, `number`, `episode_type` (full/trailer/bonus), `premium`, `explicit`, `image_url`, `transcript`, `status` (draft/published/scheduled), `publish_at` (ISO; future = scheduled). Create needs `podcast_id`, update needs `episode_id`. Publishing requires audio. |
+| `archive_episode` / `unarchive_episode` | `episode_id` — archived episodes leave feeds and the site; unarchiving restores a draft |
+| `delete_episode` | `episode_id` — permanent (audio file and download stats are removed) |
+
+### `products` actions
+
+Promo codes, coupons and offers are one concept in OpenHive (the "Offers & codes" page): a code with a percent or fixed discount that applies to paid subscriptions, products and/or event tickets.
+
+| Action | Arguments |
+|---|---|
+| `list`, `get_product` | `product_id` (id or slug) for get — includes the codes that apply to it |
+| `create_product` / `update_product` | `name`, `price` (USD; 0 = free lead magnet), `kind` (download/link/guide/template/ebook/membership/coaching), `description`, `link_url`, `content`, `status` (active/draft/archived) |
+| `archive_product` | `product_id` — hidden from the shop, buyers keep access |
+| `list_promo_codes` | optional `active_only` |
+| `create_promo_code` (alias `create_coupon`) | `code`, `percent_off` or `amount_off` (USD), `applies_to` (all/subscription/product/event), `target_id`, `duration` (once/repeating/forever) + `duration_months`, `max_redemptions`, `expires_at` (ISO; a bare date means end of that day), `name` |
+| `update_promo_code` | `code` or `promo_code_id`; `active`, `name`, `max_redemptions` (null = unlimited), `expires_at` (null = never). The discount itself can't change — create a new code. |
+| `delete_promo_code` | `code` or `promo_code_id` |
 
 ## Example prompts
 
