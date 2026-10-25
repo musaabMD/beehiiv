@@ -21,10 +21,10 @@ app.get('/:id', async (c) => {
   if (!post) return c.notFound();
   const pid = post.id;
   const sends = await all<any>(c.env, `SELECT * FROM sends WHERE post_id = ? ORDER BY created_at`, pid);
-  const totals = await one<any>(c.env, `SELECT COUNT(*) AS recipients,
-      SUM(CASE WHEN d.status IN ('sent','deferred') THEN 1 ELSE 0 END) AS delivered,
-      SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opens,
-      SUM(CASE WHEN d.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicks,
+  const totals = await one<any>(c.env, `SELECT COUNT(DISTINCT COALESCE(d.subscriber_id, d.email)) AS recipients,
+      COUNT(DISTINCT CASE WHEN d.status IN ('sent','deferred') THEN COALESCE(d.subscriber_id, d.email) END) AS delivered,
+      COUNT(DISTINCT CASE WHEN d.opened_at IS NOT NULL THEN COALESCE(d.subscriber_id, d.email) END) AS opens,
+      COUNT(DISTINCT CASE WHEN d.clicked_at IS NOT NULL THEN COALESCE(d.subscriber_id, d.email) END) AS clicks,
       SUM(CASE WHEN d.status = 'bounced' THEN 1 ELSE 0 END) AS bounces,
       SUM(CASE WHEN d.status = 'complained' THEN 1 ELSE 0 END) AS complaints,
       SUM(CASE WHEN d.status = 'suppressed' THEN 1 ELSE 0 END) AS suppressed,
