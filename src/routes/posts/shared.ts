@@ -135,13 +135,13 @@ export function webFontLink(t: { font?: string; heading_font?: string }): string
     if (WEB_FONTS.includes(first)) fams.add(first);
   }
   if (!fams.size) return '';
-  return `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?${[...fams].map((f) => `family=${encodeURIComponent(f)}:ital,wght@0,400;0,600;0,700;1,400`).join('&')}&display=swap">`;
+  return `<link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?${[...fams].map((f) => `family=${encodeURIComponent(f)}:ital,wght@0,400;0,600;0,700;1,400`).join('&')}&display=swap">`;
 }
 
 export function webPage(env: Env, pub: Publication, post: Pick<Post, 'title' | 'subtitle' | 'thumbnail_url' | 'style'>, body: string, authors = ''): string {
   const t = { ...themeOf(pub), ...(parseJSON<any>(post.style, {}).web || {}) };
   const vars = `--font:${t.font};--hfont:${t.heading_font};--bg:${t.bg};--surface:${t.surface};--text:${t.text};--muted:${t.muted};--accent:${t.accent};--accent-text:${t.accent_text};--border:${t.border};--radius:${t.radius}px;--shadow:${t.shadow};--maxw:${t.max_width}px`;
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><link rel="stylesheet" href="${env.APP_URL.replace(/\/$/, '')}/static/site.css">${webFontLink(t)}<style>:root{${vars}}body{margin:0}</style></head><body class="site"><article class="s-article"><header class="s-article-h"><h1>${esc(post.title || 'Untitled')}</h1>${post.subtitle ? `<p class="s-sub">${esc(post.subtitle)}</p>` : ''}<div class="s-byline">${esc(authors || pub.name)} · ${fmtDate(Date.now(), { dateStyle: 'medium' }, pub.timezone)}</div></header>${post.thumbnail_url ? `<img class="s-thumb" src="${esc(post.thumbnail_url)}" alt="">` : ''}<div class="s-body">${body}</div></article></body></html>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><link rel="stylesheet" href="${env.APP_URL.replace(/\/$/, '')}/static/site.css">${webFontLink(t).replace(` media="print" onload="this.media='all'"`, '')}<style>:root{${vars}}body{margin:0}</style></head><body class="site"><article class="s-article"><header class="s-article-h"><h1>${esc(post.title || 'Untitled')}</h1>${post.subtitle ? `<p class="s-sub">${esc(post.subtitle)}</p>` : ''}<div class="s-byline">${esc(authors || pub.name)} · ${fmtDate(Date.now(), { dateStyle: 'medium' }, pub.timezone)}</div></header>${post.thumbnail_url ? `<img class="s-thumb" src="${esc(post.thumbnail_url)}" alt="">` : ''}<div class="s-body">${body}</div></article></body></html>`;
 }
 
 export function autoSeo(post: Pick<Post, 'title' | 'subtitle' | 'content' | 'seo'>): { title: string; description: string } {

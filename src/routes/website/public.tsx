@@ -20,6 +20,34 @@ import { renderSections, parseSections, postCard, withAuthors, PUBLIC_POSTS, typ
 import { effectiveStyle, webFontLink } from '../posts/shared';
 
 const site = new Hono<AppEnv>();
+
+/** Edge cache for anonymous readers: public pages are served from Cloudflare's cache for 60 seconds.
+ *  Only for visitors with no reader, team or paywall-meter cookie, only for tracked HTML pages that set no
+ *  cookie, and every cached hit still records its page view. */
+const EDGE_TTL = 60;
+site.use('*', async (c, next) => {
+  if (c.req.method !== 'GET') return next();
+  const cookie = c.req.header('cookie') || '';
+  const url = new URL(c.req.url);
+  const personal = /(?:^|;\s*)(oh_reader|oh_sid|ohm_[^=]*)=/.test(cookie) || [...url.searchParams.keys()].some((k) => !/^utm_|^ref$|^fbclid$|^gclid$/.test(k));
+  const cache = (globalThis as any).caches?.default as Cache | undefined;
+  if (personal || !cache) return next();
+  const key = new Request(url.origin + url.pathname, { method: 'GET' });
+  const hit = await cache.match(key).catch(() => null);
+  if (hit) {
+    const ref = hit.headers.get('x-oh-track');
+    if (ref) await trackView(c, ref === '-' ? null : ref).catch(() => {});
+    const res = new Response(hit.body, hit);
+    res.headers.set('x-oh-cache', 'hit');
+    return res;
+  }
+  await next();
+  const res = c.res;
+  if (res.status !== 200 || !res.headers.get('x-oh-track') || res.headers.has('set-cookie') || !(res.headers.get('content-type') || '').includes('text/html')) return;
+  const copy = new Response(res.clone().body, res);
+  copy.headers.set('cache-control', `public, max-age=${EDGE_TTL}`);
+  try { c.executionCtx.waitUntil(cache.put(key, copy)); } catch {}
+});
 const PER_PAGE = 12;
 const REACTIONS = ['❤️', '🔥', '👏', '💡', '😂'];
 
@@ -177,23 +205,29 @@ site.get('/p/:post', async (c) => {
       bodyHtml = r.html; paywalled = r.paywalled;
     }
   }
-  const authors = await all<any>(c.env, 'SELECT u.id, u.name, u.avatar_url, u.bio FROM post_authors pa JOIN users u ON u.id = pa.user_id WHERE pa.post_id = ? ORDER BY pa.position', post.id);
-  const postTags = await all<any>(c.env, 'SELECT t.name, t.slug, t.id FROM post_tags pt JOIN content_tags t ON t.id = pt.tag_id WHERE pt.post_id = ?', post.id);
+  const mode = commentsMode(pub);
+  const commentsOn = mode !== 'off' && !!post.comments_enabled;
+  // Independent reads run together: one round trip to the database instead of nine.
+  const [authors, postTags, counts, mineRows, comments, prev, next, latest, styleRes] = await Promise.all([
+    all<any>(c.env, 'SELECT u.id, u.name, u.avatar_url, u.bio FROM post_authors pa JOIN users u ON u.id = pa.user_id WHERE pa.post_id = ? ORDER BY pa.position', post.id),
+    all<any>(c.env, 'SELECT t.name, t.slug, t.id FROM post_tags pt JOIN content_tags t ON t.id = pt.tag_id WHERE pt.post_id = ?', post.id),
+    reactionCounts(c, post.id),
+    sub ? all<{ emoji: string }>(c.env, 'SELECT emoji FROM reactions WHERE post_id = ? AND subscriber_id = ?', post.id, sub.id) : Promise.resolve([] as Array<{ emoji: string }>),
+    commentsOn ? all<any>(c.env, `SELECT cm.*, s.name AS author_name, s.email AS author_email FROM comments cm JOIN subscribers s ON s.id = cm.subscriber_id WHERE cm.post_id = ? AND cm.status = 'visible' ORDER BY cm.created_at`, post.id) : Promise.resolve([] as any[]),
+    one<any>(c.env, `SELECT slug, title FROM posts WHERE pub_id = ? AND ${PUBLIC_POSTS} AND published_at < ? ORDER BY published_at DESC LIMIT 1`, pub.id, post.published_at || 0),
+    one<any>(c.env, `SELECT slug, title FROM posts WHERE pub_id = ? AND ${PUBLIC_POSTS} AND published_at > ? ORDER BY published_at ASC LIMIT 1`, pub.id, post.published_at || 0),
+    all<CardPost>(c.env, `SELECT ${CARD_COLS} FROM posts WHERE pub_id = ? AND id != ? AND ${PUBLIC_POSTS} ORDER BY published_at DESC LIMIT 3`, pub.id, post.id),
+    effectiveStyle(c.env, pub.id, post),
+  ]);
+  const mine = mineRows.map((r) => r.emoji);
   const seo = parseJSON<any>(post.seo, {});
   const desc = seo.description || post.subtitle || post.preview_text || excerpt(doc);
   const title = seo.title || post.title;
   const url = `${b}/p/${post.slug}`;
-  const counts = await reactionCounts(c, post.id);
-  const mine = sub ? (await all<{ emoji: string }>(c.env, 'SELECT emoji FROM reactions WHERE post_id = ? AND subscriber_id = ?', post.id, sub.id)).map((r) => r.emoji) : [];
-  const mode = commentsMode(pub);
-  const commentsOn = mode !== 'off' && !!post.comments_enabled;
-  const comments = commentsOn ? await all<any>(c.env, `SELECT cm.*, s.name AS author_name, s.email AS author_email FROM comments cm JOIN subscribers s ON s.id = cm.subscriber_id WHERE cm.post_id = ? AND cm.status = 'visible' ORDER BY cm.created_at`, post.id) : [];
   const canComment = commentsOn && !!sub && (mode === 'subscribers' || reader?.premium);
   const related = await withAuthors(c.env, postTags.length
     ? await all<CardPost>(c.env, `SELECT DISTINCT p.id, p.slug, p.title, p.subtitle, p.thumbnail_url, p.published_at, p.audience, p.content FROM posts p JOIN post_tags pt ON pt.post_id = p.id WHERE pt.tag_id IN (${postTags.map(() => '?').join(',')}) AND p.id != ? AND p.pub_id = ? AND p.status = 'published' AND p.platform != 'email' AND p.hide_from_feed = 0 ORDER BY p.published_at DESC LIMIT 3`, ...postTags.map((t) => t.id), post.id, pub.id)
-    : await all<CardPost>(c.env, `SELECT ${CARD_COLS} FROM posts WHERE pub_id = ? AND id != ? AND ${PUBLIC_POSTS} ORDER BY published_at DESC LIMIT 3`, pub.id, post.id));
-  const prev = await one<any>(c.env, `SELECT slug, title FROM posts WHERE pub_id = ? AND ${PUBLIC_POSTS} AND published_at < ? ORDER BY published_at DESC LIMIT 1`, pub.id, post.published_at || 0);
-  const next = await one<any>(c.env, `SELECT slug, title FROM posts WHERE pub_id = ? AND ${PUBLIC_POSTS} AND published_at > ? ORDER BY published_at ASC LIMIT 1`, pub.id, post.published_at || 0);
+    : latest);
   await trackView(c, post.id);
   cacheHeaders(c, personalized);
   const image = seo.og_image || post.thumbnail_url;
@@ -206,7 +240,7 @@ site.get('/p/:post', async (c) => {
   };
   const tree = threadComments(comments);
   // Post look on the web = site theme ⊕ linked template's web style ⊕ the post's own web overrides
-  const webStyle = (await effectiveStyle(c.env, pub.id, post)).web;
+  const webStyle = styleRes.web;
   const cssv = (v: unknown) => String(v).replace(/[;"'<>{}\\]/g, '');
   const VARS: Record<string, string> = { font: '--font', heading_font: '--hfont', text: '--text', bg: '--bg', accent: '--accent', accent_text: '--accent-text' };
   const postVars = Object.entries(VARS).filter(([k]) => webStyle[k]).map(([k, v]) => `${v}:${cssv(webStyle[k])}`).join(';');

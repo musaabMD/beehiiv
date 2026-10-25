@@ -79,6 +79,8 @@ export function channelOf(referrer: string | null, utmMedium?: string | null, ow
 /** Record a page view for website analytics. Call from site GET handlers (skips bots — those go to bot_hits). */
 export async function trackView(c: Ctx, refId?: string | null) {
   const pub = c.get('pub');
+  // Lets the site's edge cache replay this page view when it serves a cached copy (website/public.tsx).
+  try { c.header('x-oh-track', refId || '-'); } catch {}
   const req = c.req.raw;
   const ua = req.headers.get('user-agent');
   if (classifyCrawler(ua)) return;

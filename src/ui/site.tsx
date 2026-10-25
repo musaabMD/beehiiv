@@ -34,7 +34,7 @@ function fontLink(t: Theme): string {
     if (GOOGLE_FONTS.includes(first)) fams.add(first);
   }
   if (!fams.size) return '';
-  return `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?${[...fams].map((f) => `family=${encodeURIComponent(f)}:wght@400;600;700;800`).join('&')}&display=swap">`;
+  return `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?${[...fams].map((f) => `family=${encodeURIComponent(f)}:wght@400;600;700;800`).join('&')}&display=swap">`;
 }
 
 export interface SiteProps {
