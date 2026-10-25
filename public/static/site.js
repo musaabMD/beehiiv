@@ -79,3 +79,20 @@
     car.scrollBy({ left: b.hasAttribute('data-carousel-next') ? step : -step, behavior: 'smooth' });
   });
 })();
+
+// Real-user page speed: report Largest Contentful Paint once, when the page is hidden.
+(function () {
+  try {
+    if (!('PerformanceObserver' in window) || !PerformanceObserver.supportedEntryTypes || PerformanceObserver.supportedEntryTypes.indexOf('largest-contentful-paint') < 0) return;
+    var lcp = 0, sent = false;
+    new PerformanceObserver(function (list) { var e = list.getEntries(); if (e.length) lcp = e[e.length - 1].startTime; }).observe({ type: 'largest-contentful-paint', buffered: true });
+    var send = function (force) {
+      if (sent || !lcp || (!force && document.visibilityState !== 'hidden')) return; sent = true;
+      var base = (document.body && document.body.dataset.base) || '';
+      var body = JSON.stringify({ p: location.pathname, lcp: Math.round(lcp) });
+      if (navigator.sendBeacon) navigator.sendBeacon(base.replace(/\/$/, '') + '/vitals', new Blob([body], { type: 'application/json' }));
+    };
+    addEventListener('visibilitychange', function () { send(false); }, true);
+    addEventListener('pagehide', function () { send(true); }, true);
+  } catch (e) {}
+})();

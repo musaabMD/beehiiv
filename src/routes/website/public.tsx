@@ -11,11 +11,11 @@ import { settings, siteUrl } from '../../lib/pub';
 import { trackView } from '../../lib/tracking';
 import { getTags, joinLists, leaveLists } from '../../lib/subscribers';
 import { segmentIdsFor } from '../../lib/segments';
-import { classifyCrawler } from '../../lib/guard';
+import { classifyCrawler, rateLimit, clientIP } from '../../lib/guard';
 import { mediaUrl } from '../../lib/ai';
 import { flash } from '../../ui/components';
 import { SiteLayout, SiteMessage, SubscribeForm, themeOf } from '../../ui/site';
-import { esc, fmtDate, hmac, id, now, parseJSON, stripTags, truncate, form, str, int, DAY, b64url } from '../../lib/util';
+import { esc, fmtDate, hmac, id, now, parseJSON, stripTags, truncate, form, str, int, DAY, b64url, parseUA } from '../../lib/util';
 import { renderSections, parseSections, postCard, withAuthors, PUBLIC_POSTS, type CardPost } from './sections';
 import { effectiveStyle, webFontLink } from '../posts/shared';
 
@@ -463,6 +463,19 @@ site.get('/authors/:id', async (c) => {
 // ───────── Feeds, sitemaps, robots ─────────
 const xmlEsc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const cdata = (s: string) => `<![CDATA[${s.replace(/]]>/g, ']]]]><![CDATA[>')}]]>`;
+
+// Real-user page speed beacons (public/static/site.js). One LCP sample per page view, sanity-checked.
+site.post('/vitals', async (c) => {
+  const pub = c.get('pub');
+  let b: any = {};
+  try { b = await c.req.json(); } catch { return c.body(null, 204); }
+  const lcp = Math.round(Number(b?.lcp));
+  if (!pub || !Number.isFinite(lcp) || lcp <= 0 || lcp > 60_000) return c.body(null, 204);
+  if (!(await rateLimit(c.env, `vitals:${clientIP(c.req.raw)}`, 60, 600))) return c.body(null, 204);
+  const { device } = parseUA(c.req.header('user-agent') || '');
+  await insert(c.env, 'web_vitals', { id: id(), pub_id: pub.id, path: String(b.p || '/').slice(0, 300), metric: 'lcp', value: lcp, device, created_at: now() }).catch(() => {});
+  return c.body(null, 204);
+});
 
 site.get('/feed.xml', async (c) => {
   const pub = c.get('pub');

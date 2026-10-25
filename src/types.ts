@@ -9,6 +9,7 @@ export interface Env {
   CHAT: DurableObjectNamespace;
   EMAIL?: SendEmail;
   AI?: Ai;
+  IMAGES?: ImagesBinding; // Cloudflare Images: server-side resize of imported images
   APP_NAME: string;
   APP_URL: string;
   MAIL_FROM: string;

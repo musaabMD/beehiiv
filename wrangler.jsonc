@@ -15,6 +15,7 @@
   "send_email": [{ "name": "EMAIL" }],
   // Workers AI powers the writing assistant. Uncomment after `wrangler login` (it always runs remotely).
   "ai": { "binding": "AI" },
+  "images": { "binding": "IMAGES" },
   "triggers": { "crons": ["* * * * *"] },
   "vars": {
     "APP_NAME": "OpenHive",

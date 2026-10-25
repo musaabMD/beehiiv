@@ -10,7 +10,30 @@ const ALLOWED = /^(image\/(png|jpe?g|gif|webp|avif|svg\+xml)|audio\/(mpeg|mp3|mp
 
 export interface Stored { id: string; key: string; url: string; name: string; mime: string; size: number }
 
+/** Server-side resize for images that skipped the browser's resize (imports by URL, pasted images, logos):
+ *  anything wider than 1600px or heavier than 400 KB becomes a 1600px-max WebP via the Cloudflare Images binding.
+ *  Without the binding, or if the transform fails, the original is kept. */
+const MAX_W = 1600, MAX_BYTES = 400 * 1024;
+export async function optimizeImage(env: Env, file: File): Promise<{ file: File; width?: number; height?: number }> {
+  if (!env.IMAGES || !/^image\/(jpe?g|png|webp|avif)$/.test(file.type)) return { file };
+  try {
+    const buf = await file.arrayBuffer();
+    const info: any = await env.IMAGES.info(new Blob([buf]).stream());
+    const w = Number(info?.width) || 0, h = Number(info?.height) || 0;
+    if (w <= MAX_W && buf.byteLength <= MAX_BYTES) return { file: new File([buf], file.name, { type: file.type }), width: w || undefined, height: h || undefined };
+    const width = Math.min(w || MAX_W, MAX_W);
+    const out = await (await env.IMAGES.input(new Blob([buf]).stream()).transform({ width, fit: 'scale-down' } as any).output({ format: 'image/webp', quality: 82 } as any)).response();
+    const ob = await out.arrayBuffer();
+    if (!out.ok || !ob.byteLength || ob.byteLength >= buf.byteLength) return { file: new File([buf], file.name, { type: file.type }), width: w || undefined, height: h || undefined };
+    return { file: new File([ob], file.name.replace(/\.[a-z0-9]+$/i, '') + '.webp', { type: 'image/webp' }), width, height: w && h ? Math.round((h * width) / w) : undefined };
+  } catch { return { file }; }
+}
+
 export async function storeFile(env: Env, pubId: string, file: File, opts: { folder?: string; userId?: string; alt?: string; source?: string; width?: number; height?: number } = {}): Promise<Stored> {
+  if (/^image\//.test(file.type) && !String(opts.folder || '').startsWith('private/')) {
+    const o = await optimizeImage(env, file);
+    file = o.file; opts = { ...opts, width: opts.width ?? o.width, height: opts.height ?? o.height };
+  }
   const mime = file.type || 'application/octet-stream';
   if (!ALLOWED.test(mime)) throw new Error(`File type ${mime} is not allowed`);
   if (file.size > MAX_UPLOAD) throw new Error('File is too large');

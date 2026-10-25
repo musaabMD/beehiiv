@@ -322,6 +322,20 @@ export async function podcastKpis(env: Env, pubId: string, r: Range) {
   return { downloads: (Number(row?.downloads) || 0) - bots, listeners: Number(await val(env, `SELECT COUNT(DISTINCT listener_hash) FROM episode_downloads WHERE pub_id = ? AND is_bot = 0 AND created_at BETWEEN ? AND ?`, pubId, r.from, r.to)) || 0, botDownloads: bots };
 }
 
+/** Real-user Largest Contentful Paint (from visitors' browsers): median and 75th percentile, overall and per page. */
+export async function pageSpeed(env: Env, pubId: string, r: Range) {
+  const rows = await all<{ path: string; value: number }>(env, `SELECT path, value FROM web_vitals WHERE pub_id = ? AND metric = 'lcp' AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 20000`, pubId, r.from, r.to).catch(() => []);
+  const pct = (xs: number[], q: number) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * (s.length - 1)))]; };
+  const by = new Map<string, number[]>();
+  for (const x of rows) { const a = by.get(x.path) || []; a.push(x.value); by.set(x.path, a); }
+  const all_ = rows.map((x) => x.value);
+  const good = all_.filter((v) => v <= 2500).length;
+  return {
+    samples: all_.length, median: pct(all_, 0.5), p75: pct(all_, 0.75), goodShare: all_.length ? good / all_.length : null,
+    pages: [...by.entries()].map(([path, v]) => ({ path, samples: v.length, p75: pct(v, 0.75)! })).sort((a, b) => b.samples - a.samples).slice(0, 8),
+  };
+}
+
 // ───────── posts ─────────
 export interface PostPerf {
   id: string; title: string; slug: string; published_at: number | null; platform: string;

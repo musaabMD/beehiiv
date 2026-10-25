@@ -1,6 +1,7 @@
 /** @jsxImportSource hono/jsx */
 // Analytics pages: /app/analytics/*
 import type { Child } from 'hono/jsx';
+import { pageSpeed } from '../../lib/analytics';
 import { raw } from 'hono/html';
 import type { App, Ctx } from '../../types';
 import { all, one, run, insert } from '../../lib/db';
@@ -150,10 +151,10 @@ export function registerAnalytics(dash: App) {
     const pub = c.get('pub');
     const r = parseRange(c.req.query());
     const filters = parseFilters(c, 'page_views');
-    const [kp, kpP, views, visitors, live, traffic] = await Promise.all([
+    const [kp, kpP, views, visitors, live, traffic, speed] = await Promise.all([
       webKpis(c.env, pub.id, r, filters), webKpis(c.env, pub.id, previous(r), filters),
       runReport(c.env, pub.id, { metric: 'page_views', group: 'time', range: r, filters }), runReport(c.env, pub.id, { metric: 'visitors', group: 'time', range: r, filters }),
-      realtime(c.env, pub.id), trafficToSubscribers(c.env, pub.id, r),
+      realtime(c.env, pub.id), trafficToSubscribers(c.env, pub.id, r), pageSpeed(c.env, pub.id, r),
     ]);
     const dims = ['channel', 'path', 'referrer', 'country', 'device', 'os', 'browser', 'utm_source', 'utm_campaign'] as const;
     const breakdowns = await Promise.all(dims.map((d) => runReport(c.env, pub.id, { metric: 'visitors', group: d, range: r, filters, limit: 10 })));
@@ -189,6 +190,13 @@ export function registerAnalytics(dash: App) {
           </div>
         </Grid>
         <Grid cols={3}>
+          <Card title="Page speed (real visitors)" pad>
+            {speed.samples ? <>
+              <div class="row between"><div><div class="stat-v">{(speed.p75! / 1000).toFixed(1)}s</div><div class="muted small">75th percentile LCP · {speed.p75! <= 2500 ? 'good' : speed.p75! <= 4000 ? 'needs work' : 'poor'}</div></div><div class="right"><div class="stat-v" style="font-size:18px">{Math.round((speed.goodShare || 0) * 100)}%</div><div class="muted small">of views under 2.5s</div></div></div>
+              <ul class="list-plain small" style="margin-top:10px">{speed.pages.map((p) => <li class="row between"><span class="truncate">{p.path}</span><strong>{(p.p75 / 1000).toFixed(1)}s</strong></li>)}</ul>
+              <p class="muted small" style="margin:8px 0 0">{fmtNum(speed.samples)} page views measured. Largest Contentful Paint as Google measures it; under 2.5s is good.</p>
+            </> : <p class="muted small" style="margin:0">Measured from real visitors' browsers as they read your site. Numbers appear after the first visits.</p>}
+          </Card>
           <Breakdown i={0} title="Traffic by channel" />
           <Breakdown i={1} title="Top pages" />
           <Breakdown i={2} title="Top referrers" />
