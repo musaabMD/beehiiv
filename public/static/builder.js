@@ -152,6 +152,7 @@
             <button type="button" title="Move up" data-up="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
             <button type="button" title="Move down" data-down="${i}" ${i === state.sections.length - 1 ? 'disabled' : ''}>↓</button>
             <button type="button" title="Duplicate" data-dup="${i}">⧉</button>
+            <button type="button" title="Save as block" data-saveblock="${i}">☆</button>
             <button type="button" title="Delete" data-del="${i}">✕</button>
           </span>
         </li>`).join('') || '<li class="muted pb-empty">No sections yet — add one below.</li>'}
@@ -162,12 +163,14 @@
       </div>
       <div class="pb-menu" id="pb-menu" hidden>
         <div class="pb-menu-grid">${Object.entries(D.types).map(([k, l]) => `<button type="button" data-add="${k}"><span>${ICON[k] || '•'}</span>${esc(l)}</button>`).join('')}</div>
-        ${D.saved.length ? `<p class="muted small" style="margin:10px 0 6px">Saved sections</p><div class="pb-menu-grid">${D.saved.map((t) => `<button type="button" data-saved="${esc(t.id)}"><span>☆</span>${esc(t.name)}</button>`).join('')}</div>` : ''}
+        <p class="muted small" style="margin:12px 0 6px"><strong>Your blocks</strong> · saved with “Save as block”, shared with your team</p>
+        ${D.saved.length ? `<div class="pb-menu-grid">${D.saved.map((t) => `<button type="button" data-saved="${esc(t.id)}" title="${esc(D.types[t.section.type] || t.section.type)}"><span>${t.kind === 'website_block' ? (ICON[t.section.type] || '☆') : '☆'}</span><span style="width:auto;color:inherit;text-align:left">${esc(t.name)}<small class="muted" style="display:block;font-size:11px">${esc(D.types[t.section.type] || '')}</small></span></button>`).join('')}</div>` : '<p class="muted small" style="margin:0">No saved blocks yet. Open any section and click “Save as block” to reuse it on other pages.</p>'}
       </div>`;
     $('#pb-add-btn').onclick = () => { $('#pb-menu').hidden = !$('#pb-menu').hidden; };
     $('#pb-ai-btn').onclick = aiWidget;
     $$('[data-add]', body).forEach((b) => b.onclick = () => addSection({ type: b.dataset.add, data: JSON.parse(JSON.stringify(DEFAULTS[b.dataset.add] || {})), style: {} }));
-    $$('[data-saved]', body).forEach((b) => b.onclick = () => { const t = D.saved.find((x) => x.id === b.dataset.saved); if (t) addSection(JSON.parse(JSON.stringify(t.section))); });
+    $$('[data-saved]', body).forEach((b) => b.onclick = () => { const t = D.saved.find((x) => x.id === b.dataset.saved); if (t) { addSection(JSON.parse(JSON.stringify(t.section))); toast(`Inserted “${t.name}”`); } });
+    $$('[data-saveblock]', body).forEach((b) => b.onclick = () => saveBlock(state.sections[+b.dataset.saveblock]));
     $$('[data-edit]', body).forEach((b) => b.onclick = () => { state.sel = b.dataset.edit; render(); highlight(); });
     const move = (i, j) => { const [x] = state.sections.splice(i, 1); state.sections.splice(j, 0, x); markDirty(); render(); };
     $$('[data-up]', body).forEach((b) => b.onclick = () => move(+b.dataset.up, +b.dataset.up - 1));
@@ -189,6 +192,21 @@
         move(from, to);
       });
     });
+  }
+
+  // Save one section as a reusable block (templates.kind = website_block); it appears under “Your blocks”.
+  async function saveBlock(s) {
+    if (!s) return;
+    const name = prompt('Name this block (it will be available on every page)', summary(s) || D.types[s.type]);
+    if (!name) return;
+    try {
+      const section = JSON.parse(JSON.stringify({ type: s.type, data: s.data, style: s.style || {} }));
+      const j = await postJSON(`/app/website/pages/${page.id}/save-template`, { kind: 'block', name, section });
+      if (!j.id) throw new Error(j.error || 'Save failed');
+      D.saved.unshift({ id: j.id, name, kind: 'website_block', section });
+      toast(j.message);
+      if (!state.sel) render();
+    } catch (e) { toast('Could not save block: ' + e.message); }
   }
 
   function addSection(s) {
@@ -252,17 +270,11 @@
         ${s.type === 'text' ? `<div id="pb-text-editor" class="pb-text-editor"></div>` : ''}
         ${fields.map((f) => fieldHtml(f, getPath(s.data, f[0]), 'data.')).join('')}
         <details class="pb-style" ${Object.keys(s.style).length ? 'open' : ''}><summary>Section style</summary>${STYLE.map((f) => fieldHtml(f, s.style[f[0]], 'style.')).join('')}</details>
-        <div class="row" style="margin-top:12px"><button type="button" class="btn btn-secondary btn-sm" id="pb-save-section">Save as template</button><button type="button" class="btn btn-danger btn-sm" id="pb-del-section">Delete section</button></div>
+        <div class="row" style="margin-top:12px"><button type="button" class="btn btn-secondary btn-sm" id="pb-save-section">☆ Save as block</button><button type="button" class="btn btn-danger btn-sm" id="pb-del-section">Delete section</button></div>
       </div>`;
     $('#pb-back').onclick = () => { state.sel = null; render(); };
     $('#pb-del-section').onclick = () => { if (confirm('Delete this section?')) { state.sections = state.sections.filter((x) => x.id !== s.id); state.sel = null; markDirty(); render(); } };
-    $('#pb-save-section').onclick = async () => {
-      const name = prompt('Template name', D.types[s.type]);
-      if (!name) return;
-      const j = await postJSON(`/app/website/pages/${page.id}/save-template`, { kind: 'section', name, section: s });
-      D.saved.push({ id: j.id, name, section: JSON.parse(JSON.stringify({ type: s.type, data: s.data, style: s.style })) });
-      toast(j.message);
-    };
+    $('#pb-save-section').onclick = () => saveBlock(s);
     if (s.type === 'text') mountText(s);
     bindFields(s);
   }

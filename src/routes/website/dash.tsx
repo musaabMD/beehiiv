@@ -14,6 +14,7 @@ import { DEFAULT_THEME, themeOf, type Theme } from '../../ui/site';
 import { id, now, slugify, parseJSON, form, str, int, bool, ago, fmtDateTime, parseCSV, esc } from '../../lib/util';
 import { SECTION_TYPES, STARTER_PAGES, parseSections, resolveChannelId, type Section } from './sections';
 import { renderPage, renderHome, AI_CRAWLERS, buildRobots } from './public';
+import { GalleryAssets, CategoryFilter } from '../posts/templates';
 
 const dash = new Hono<AppEnv>();
 dash.use('*', requirePerm('manage'));
@@ -72,38 +73,32 @@ const pageUrl = (c: Ctx, slug: string) => `${siteUrl(c.env, c.get('pub'))}/${slu
 dash.get('/', async (c) => {
   const pub = c.get('pub');
   const pages = await all<any>(c.env, 'SELECT * FROM pages WHERE pub_id = ? ORDER BY slug = \'\' DESC, updated_at DESC', pub.id);
-  const tpls = await all<any>(c.env, `SELECT id, name FROM templates WHERE pub_id = ? AND kind = 'website_page' ORDER BY name`, pub.id);
+  const tpls = await all<any>(c.env, `SELECT id, name, content FROM templates WHERE pub_id = ? AND kind = 'website_page' ORDER BY name`, pub.id);
   const base = siteUrl(c.env, pub);
   return c.html(
     <DashLayout c={c} title="Website" section="website" sub="pages" actions={<><LinkBtn href={base + '/'} target="_blank">View site ↗</LinkBtn><OpenBtn target="#new-page">+ New page</OpenBtn></>}>
       <div class="callout">Your site is live at <a href={base + '/'} target="_blank"><strong>{base}/</strong></a>. Connect a custom domain in <a href="/app/settings/domains">Settings → Domains</a>.</div>
-      <Grid cols={2}>
-        <Card title="AI website builder" actions={<Badge tone="purple">AI</Badge>}>
-          <form method="post" action="/app/website/ai/page" enctype="multipart/form-data" class="stack">
+      <Card title="AI website builder" actions={<Badge tone="purple">AI</Badge>}>
+        <form method="post" action="/app/website/ai/page" enctype="multipart/form-data" class="stack">
+          <Grid cols={2}>
             <Field label="Describe the page you want" hint="e.g. “A landing page for a weekly climate newsletter with testimonials, a FAQ and pricing”"><Textarea name="prompt" rows={3} required placeholder="A bold landing page for…" /></Field>
             <Field label="Screenshot to copy (optional)" hint="Upload a screenshot of a layout you like — we'll match its structure."><input class="input" type="file" name="screenshot" accept="image/*" /></Field>
-            <div class="row end"><Btn>Generate page</Btn></div>
-          </form>
-        </Card>
-        <Card title="Start from a template">
-          <div class="stack-sm">
-            {Object.entries(STARTER_PAGES).map(([k, t]) => (
-              <form method="post" action="/app/website/pages" class="row between">
-                <input type="hidden" name="starter" value={k} /><input type="hidden" name="title" value={t.title} />
-                <span><strong>{t.title}</strong> <Muted>· {t.sections.map((s) => SECTION_TYPES[s.type]).join(', ')}</Muted></span>
-                <Btn kind="secondary" small>Use</Btn>
-              </form>
-            ))}
-            {tpls.map((t) => (
-              <form method="post" action="/app/website/pages" class="row between">
-                <input type="hidden" name="template_id" value={t.id} /><input type="hidden" name="title" value={t.name} />
-                <span><strong>{t.name}</strong> <Muted>· saved page</Muted></span>
-                <Btn kind="secondary" small>Use</Btn>
-              </form>
-            ))}
-          </div>
-        </Card>
-      </Grid>
+          </Grid>
+          <div class="row end"><Btn>Generate page</Btn></div>
+        </form>
+      </Card>
+      <GalleryAssets />
+      <style>{raw('.tg-thumb-page iframe{width:400%;height:1100px;transform:scale(.25)}')}</style>
+      <h2 style="margin-top:8px">Start from a page template</h2>
+      <CategoryFilter items={[...Object.values(STARTER_PAGES), ...tpls.map((t) => ({ category: 'Team', pub_id: pub.id }))]} target="#tg-pages" />
+      <div class="tg-grid" id="tg-pages" style="margin-bottom:24px">
+        {tpls.map((t) => (
+          <PageTplCard name={t.name} cat="Team" desc={`Saved page · ${parseSections(t.content).map((x) => SECTION_TYPES[x.type]).filter(Boolean).join(', ')}`} preview={`/app/website/page-templates/saved/${t.id}/preview`} fields={{ template_id: t.id, title: t.name }} />
+        ))}
+        {Object.entries(STARTER_PAGES).map(([k, t]) => (
+          <PageTplCard name={t.title} cat={t.category} desc={t.description} slug={t.slug} preview={`/app/website/page-templates/${k}/preview`} fields={{ starter: k, title: t.title }} />
+        ))}
+      </div>
       <Card title="Pages" pad={false}>
         <Table
           rows={pages}
@@ -133,7 +128,7 @@ dash.get('/', async (c) => {
           <Field label="Title"><Input name="title" required placeholder="About" autofocus /></Field>
           <Field label="URL slug" hint="Leave empty to derive from the title. Use “/” to replace the home page."><Input name="slug" placeholder="about" /></Field>
           <Field label="Start from">
-            <Select name="starter" value="blank" options={[['blank', 'Blank page'], ...Object.entries(STARTER_PAGES).map(([k, t]) => [k, t.title + ' template'] as [string, string])]} />
+            <Select name="starter" value="blank" options={[['blank', 'Blank page'], ...Object.entries(STARTER_PAGES).map(([k, t]) => [k, `${t.title} — ${t.category} template`] as [string, string]), ...tpls.map((t) => [`saved:${t.id}`, `${t.name} — saved page`] as [string, string])]} />
           </Field>
           <div class="form-actions"><Btn>Create page</Btn></div>
         </form>
@@ -142,12 +137,51 @@ dash.get('/', async (c) => {
   );
 });
 
+/** A page-template card with a live, scaled-down render of the page. */
+function PageTplCard(p: { name: string; cat: string; desc: string; slug?: string; preview: string; fields: Record<string, string> }) {
+  return (
+    <div class="card tg-card" data-cat={p.cat}>
+      <a class="tg-thumb tg-thumb-page" href={p.preview} target="_blank" aria-label={`Preview ${p.name}`}><iframe src={p.preview} loading="lazy" tabindex={-1} title="" /></a>
+      <div class="tg-body">
+        <div class="row between" style="gap:6px"><strong>{p.name}</strong><Badge tone={p.cat === 'Team' ? 'blue' : 'gray'}>{p.cat}</Badge></div>
+        <p class="small muted">{p.desc}</p>
+        {p.slug !== undefined && <p class="small muted mono">/{p.slug || ' (home page)'}</p>}
+        <div class="tg-actions">
+          <ActionForm action="/app/website/pages" fields={p.fields} label="Use this template" kind="primary" />
+          <a class="btn btn-ghost btn-sm" href={p.preview} target="_blank">Preview</a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Live preview of a built-in (or saved team) page template, rendered with the publication's theme. */
+async function previewTemplatePage(c: Ctx, title: string, sections: any[]) {
+  c.set('reader', null);
+  const fake = { id: 'tpl', pub_id: c.get('pub').id, title, slug: 'preview', content: JSON.stringify({ sections: withIds(sections) }), html_override: null, seo: '{}', paywall: 'none' };
+  const res = await renderPage(c, fake, { preview: true });
+  return new Response(await res.text(), { headers: { 'content-type': 'text/html; charset=utf-8', 'x-frame-options': 'SAMEORIGIN' } });
+}
+
+dash.get('/page-templates/saved/:id/preview', async (c) => {
+  const t = await one<any>(c.env, `SELECT * FROM templates WHERE id = ? AND pub_id = ? AND kind = 'website_page'`, c.req.param('id'), c.get('pub').id);
+  if (!t) return c.notFound();
+  return previewTemplatePage(c, t.name, parseJSON<any>(t.content, {}).sections || []);
+});
+
+dash.get('/page-templates/:key/preview', async (c) => {
+  const st = STARTER_PAGES[c.req.param('key')];
+  if (!st) return c.notFound();
+  return previewTemplatePage(c, st.title, st.sections);
+});
+
 dash.post('/pages', async (c) => {
   const pub = c.get('pub');
   const f = await form(c.req);
   let sections: Section[] = [];
   const title = str(f.title, 120) || 'Untitled page';
   let slugWant = str(f.slug, 80);
+  if (!f.template_id && String(f.starter || '').startsWith('saved:')) f.template_id = String(f.starter).slice(6);
   if (f.template_id) {
     const t = await one<any>(c.env, `SELECT * FROM templates WHERE id = ? AND pub_id = ? AND kind = 'website_page'`, f.template_id, pub.id);
     if (t) sections = withIds(parseJSON<any>(t.content, {}).sections || []);
@@ -208,7 +242,7 @@ dash.get('/pages/:id', async (c) => {
   const [tags, podcasts, savedSections, versions] = await Promise.all([
     all<any>(c.env, 'SELECT slug, name FROM content_tags WHERE pub_id = ? ORDER BY name', pub.id),
     all<any>(c.env, 'SELECT id, title FROM podcasts WHERE pub_id = ? ORDER BY title', pub.id),
-    all<any>(c.env, `SELECT id, name, content FROM templates WHERE pub_id = ? AND kind IN ('website_section','website_block') ORDER BY name`, pub.id),
+    all<any>(c.env, `SELECT id, name, kind, content FROM templates WHERE pub_id = ? AND kind IN ('website_section','website_block') ORDER BY kind = 'website_block' DESC, name`, pub.id),
     val<number>(c.env, 'SELECT COUNT(*) FROM page_versions WHERE page_id = ?', p.id),
   ]);
   const data = {
@@ -216,7 +250,7 @@ dash.get('/pages/:id', async (c) => {
     types: SECTION_TYPES,
     tags: tags.map((t) => [t.slug, t.name]),
     podcasts: podcasts.map((x) => [x.id, x.title]),
-    saved: savedSections.map((t) => ({ id: t.id, name: t.name, section: parseJSON<any>(t.content, {}).section })).filter((t) => t.section),
+    saved: savedSections.map((t) => ({ id: t.id, name: t.name, kind: t.kind, section: parseJSON<any>(t.content, {}).section })).filter((t) => t.section && SECTION_TYPES[t.section.type]),
     siteUrl: siteUrl(c.env, pub),
     versions,
   };
@@ -301,11 +335,13 @@ dash.post('/pages/:id/save-template', async (c) => {
   if (!p) return c.json({ error: 'not_found' }, 404);
   const b = await c.req.json<any>();
   const name = str(b.name, 120) || 'Saved';
-  const kind = b.kind === 'section' ? 'website_section' : 'website_page';
-  const content = kind === 'website_section' ? { section: { type: b.section?.type, data: b.section?.data || {}, style: b.section?.style || {} } } : { sections: Array.isArray(b.sections) ? b.sections : parseSections(p.content) };
+  // kind: 'block' = reusable single block (website_block), 'section' = legacy section template, otherwise a whole page
+  const kind = b.kind === 'block' ? 'website_block' : b.kind === 'section' ? 'website_section' : 'website_page';
+  if (kind !== 'website_page' && !SECTION_TYPES[b.section?.type]) return c.json({ error: 'Unknown section type' }, 400);
+  const content = kind !== 'website_page' ? { section: { type: b.section?.type, data: b.section?.data || {}, style: b.section?.style || {} } } : { sections: Array.isArray(b.sections) ? b.sections : parseSections(p.content) };
   const tid = id();
   await insert(c.env, 'templates', { id: tid, pub_id: pub.id, name, kind, description: '', content: JSON.stringify(content), style: '{}', created_by: c.get('user').id, created_at: now(), updated_at: now() });
-  return c.json({ ok: true, id: tid, message: `Saved “${name}” to your templates` });
+  return c.json({ ok: true, id: tid, kind, message: kind === 'website_block' ? `Saved “${name}” to your block library` : `Saved “${name}” to your templates` });
 });
 
 dash.get('/youtube-check', async (c) => {
@@ -764,12 +800,12 @@ dash.post('/seo', async (c) => {
 dash.get('/templates', async (c) => {
   const rows = await all<any>(c.env, `SELECT t.*, u.name AS author FROM templates t LEFT JOIN users u ON u.id = t.created_by WHERE t.pub_id = ? AND t.kind IN ('website_page','website_section','website_block') ORDER BY t.kind, t.name`, c.get('pub').id);
   return c.html(
-    <DashLayout c={c} title="Saved sections & pages" section="website" sub="templates">
-      <Help>Save any section or whole page from the page builder (“Save as template”). Saved sections appear in the builder's “Add section” menu; saved pages appear when creating a page. Templates are shared with your whole team.</Help>
+    <DashLayout c={c} title="Saved blocks & pages" section="website" sub="templates">
+      <Help>In the page builder, use “Save as block” on any section to add it to your block library, or “Save whole page as template” on the Page tab. Saved blocks appear under “Your blocks” in the builder's “Add section” menu; saved pages appear in the page template gallery when creating a page. Shared with your whole team.</Help>
       <Card title={`${rows.length} templates`} pad={false}>
-        <Table rows={rows} empty={<Empty title="No saved templates yet" body="Open a page in the builder and use “Save as template” on a section or the whole page." action={<LinkBtn href="/app/website">Go to pages</LinkBtn>} />} cols={[
+        <Table rows={rows} empty={<Empty title="No saved templates yet" body="Open a page in the builder and use “Save as block” on a section, or save the whole page as a template." action={<LinkBtn href="/app/website">Go to pages</LinkBtn>} />} cols={[
           { h: 'Name', r: (t) => <form method="post" action={`/app/website/templates/${t.id}/rename`} class="row"><input class="input" name="name" value={t.name} style="max-width:260px" /><Btn kind="ghost" small>Rename</Btn></form> },
-          { h: 'Type', r: (t) => <Badge tone={t.kind === 'website_page' ? 'blue' : 'purple'}>{t.kind === 'website_page' ? 'Page' : 'Section'}</Badge> },
+          { h: 'Type', r: (t) => <Badge tone={t.kind === 'website_page' ? 'blue' : t.kind === 'website_block' ? 'green' : 'purple'}>{t.kind === 'website_page' ? 'Page' : t.kind === 'website_block' ? 'Block' : 'Section'}</Badge> },
           { h: 'Contents', r: (t) => { const ct = parseJSON<any>(t.content, {}); return <Muted>{t.kind === 'website_page' ? (ct.sections || []).map((s: any) => SECTION_TYPES[s.type]).join(', ') : SECTION_TYPES[ct.section?.type] || '—'}</Muted>; } },
           { h: 'By', r: (t) => <Muted>{t.author || '—'} · {ago(t.created_at)}</Muted> },
           { h: '', class: 'right nowrap', r: (t) => <>{t.kind === 'website_page' && <ActionForm action="/app/website/pages" fields={{ template_id: t.id, title: t.name }} label="New page from this" />} <ActionForm action={`/app/website/templates/${t.id}/delete`} label="Delete" kind="danger" confirm="Delete this template?" /></> },
