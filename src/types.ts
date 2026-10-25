@@ -2,7 +2,7 @@ import type { Context, Hono } from 'hono';
 
 export interface Env {
   DB: D1Database;
-  MEDIA: R2Bucket;
+  MEDIA: R2Bucket; // falls back to D1 storage (lib/mediashim) when R2 isn't bound
   ASSETS: Fetcher;
   COLLAB: DurableObjectNamespace;
   LIVE: DurableObjectNamespace;

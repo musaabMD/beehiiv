@@ -122,3 +122,7 @@ npx wrangler deploy
 - **Emails not arriving** — check Settings → Email → Outbox for errors. `E_SENDER_NOT_VERIFIED` means the sender domain isn't enabled for Email Sending.
 - **Custom domain shows "Publication not found"** — the hostname must be saved on the publication *and* attached to the worker.
 - **Logs** — `npx wrangler tail`, or Workers → openhive → Logs (observability is enabled).
+
+## Instant demo (no Cloudflare login)
+
+`npx wrangler deploy --temporary -c wrangler.demo.jsonc --var EMAIL_MODE:simulate --var APP_URL:<the workers.dev URL it prints>` deploys to a temporary Cloudflare preview account (claim it within 60 minutes from the URL Wrangler prints to keep it). Preview accounts have no R2 and no cron triggers: OpenHive then stores uploads in D1 (`src/lib/mediashim.ts`) and runs background jobs from incoming traffic, at most once a minute.

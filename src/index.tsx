@@ -9,6 +9,7 @@ import { classifyCrawler } from './lib/guard';
 import { logBot } from './lib/tracking';
 import { runJobs, runPeriodic, logError } from './lib/jobs';
 import { now } from './lib/util';
+import { withMedia } from './lib/mediashim';
 import './lib/webhooks';
 import './lib/sender';
 import './lib/automations';
@@ -108,8 +109,17 @@ app.notFound((c) => c.html(`<!doctype html><meta charset="utf-8"><title>Not foun
 // Paths that must never be rewritten for custom domains
 const PLATFORM_PREFIX = /^\/(static|media|listen|t\/|u\/|pref\/|checkout\/|hooks\/|api\/|mcp|embed\/|app|login|signup|logout|collab|live\/|health|favicon)/;
 
+let lastTick = 0;
+
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+    withMedia(env);
+    // Fallback scheduler: if cron triggers aren't available (e.g. free/preview accounts), traffic drives the
+    // background work at most once a minute per isolate. runPeriodic() guards each task with its own interval.
+    if (Date.now() - lastTick > 60_000) {
+      lastTick = Date.now();
+      ctx.waitUntil(runPeriodic(env).then(() => runJobs(env, 15_000)).catch(() => {}));
+    }
     const url = new URL(req.url);
     const appHost = new URL(env.APP_URL).host;
     if (url.host !== appHost && !url.host.endsWith('.workers.dev') && !url.host.startsWith('localhost') && !url.host.startsWith('127.0.0.1')) {
@@ -128,6 +138,7 @@ export default {
     return app.fetch(req, env, ctx);
   },
   async scheduled(_evt: ScheduledController, env: Env, ctx: ExecutionContext) {
+    withMedia(env);
     ctx.waitUntil((async () => {
       await runPeriodic(env);
       await runJobs(env, 25_000);
