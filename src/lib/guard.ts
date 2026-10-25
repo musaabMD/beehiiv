@@ -165,6 +165,24 @@ export function isBotClick(ua: string | null | undefined, msSinceSend?: number):
   return false;
 }
 
+/** Browser versions no reader still uses (security scanners often send ancient user agents, e.g. Gecko/2002). */
+export function isAncientUA(ua: string | null | undefined): boolean {
+  if (!ua) return true;
+  const gecko = ua.match(/Gecko\/(\d{4})\d{4}/); if (gecko && Number(gecko[1]) < 2016 && !/Firefox\/\d{3}/.test(ua)) return true;
+  if (/rv:1\.\d/.test(ua) || /MSIE [1-9]\./.test(ua) || /Windows NT [45]\./.test(ua)) return true;
+  const chrome = ua.match(/Chrome\/(\d+)/); if (chrome && Number(chrome[1]) < 70) return true;
+  const ff = ua.match(/Firefox\/(\d+)/); if (ff && Number(ff[1]) < 60) return true;
+  return false;
+}
+
+/** Cloud/hosting networks. People click from home, mobile and office ISPs; scanners click from data centers.
+ *  Privacy relays (iCloud Private Relay rides on Cloudflare/Akamai/Fastly) are deliberately not listed. */
+const DATACENTER = /amazon|aws|google cloud|microsoft corporation|azure|digitalocean|ovh|hetzner|linode|contabo|oracle|alibaba|tencent|leaseweb|scaleway|vultr|choopa|m247|datacamp|hostinger|ionos|gcore|psychz|quadranet|colocrossing|servers\.com|hostwinds|kamatera|upcloud|netcup|interserver|vpsserver|zenlayer/i;
+export function isDatacenter(cf: any): boolean {
+  const org = String(cf?.asOrganization || '');
+  return !!org && DATACENTER.test(org);
+}
+
 /** Apple Mail Privacy Protection & Gmail image proxy opens aren't human reads. */
 export function isMachineOpen(ua: string | null | undefined): boolean {
   if (!ua) return true;

@@ -2,7 +2,7 @@
 import type { Ctx, Env } from '../types';
 import { one, run, insert } from './db';
 import { emit } from './events';
-import { isBotClick, classifyCrawler, clientIP } from './guard';
+import { isBotClick, isAncientUA, isDatacenter, classifyCrawler, clientIP } from './guard';
 import { recomputeEngagement } from './subscribers';
 import { id, now, parseUA, sha256 } from './util';
 
@@ -10,7 +10,8 @@ export async function recordOpen(env: Env, deliveryId: string, req: Request) {
   const d = await one<any>(env, 'SELECT d.*, s.post_id, s.automation_id FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE d.id = ?', deliveryId);
   if (!d) return;
   const ua = req.headers.get('user-agent') || '';
-  const bot = isBotClick(ua) && !/GoogleImageProxy|YahooMailProxy/i.test(ua);
+  const proxy = /GoogleImageProxy|YahooMailProxy/i.test(ua);
+  const bot = !proxy && (isBotClick(ua) || isAncientUA(ua) || isDatacenter((req as any).cf));
   const { device } = parseUA(ua);
   await insert(env, 'opens', { id: id(), delivery_id: d.id, send_id: d.send_id, pub_id: d.pub_id, is_bot: bot ? 1 : 0, ua: ua.slice(0, 300), country: (req as any).cf?.country ?? null, device, created_at: now() });
   if (bot) return;
@@ -27,7 +28,20 @@ export async function recordClick(env: Env, deliveryId: string, url: string, req
   const d = await one<any>(env, 'SELECT d.*, s.post_id, s.automation_id FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE d.id = ?', deliveryId);
   if (!d) return;
   const ua = req.headers.get('user-agent') || '';
-  const bot = isBotClick(ua, d.sent_at ? now() - d.sent_at : undefined);
+  // Scanners: known scanner/bot agents, ancient browsers, data-center networks, clicks seconds after delivery,
+  // or a click landing within 2 seconds of this email's first open (prefetchers fetch the image and every link at once).
+  const lastOpen = await one<{ t: number }>(env, 'SELECT MAX(created_at) AS t FROM opens WHERE delivery_id = ?', d.id);
+  const burst = !!lastOpen?.t && now() - lastOpen.t < 2000 && !d.clicked_at;
+  const bot = isBotClick(ua, d.sent_at ? now() - d.sent_at : undefined) || isAncientUA(ua) || isDatacenter((req as any).cf) || burst;
+  if (burst) {
+    // The open that came with this click was the scanner too: take it back out of the counts.
+    await run(env, `UPDATE opens SET is_bot = 1 WHERE delivery_id = ? AND created_at >= ?`, d.id, now() - 2500);
+    const human = await one<{ n: number }>(env, 'SELECT COUNT(*) AS n FROM opens WHERE delivery_id = ? AND is_bot = 0', d.id);
+    if (!human?.n && d.opened_at) {
+      await run(env, 'UPDATE deliveries SET opened_at = NULL, open_count = 0 WHERE id = ?', d.id);
+      if (d.subscriber_id) await run(env, 'UPDATE subscribers SET open_count = MAX(open_count - 1, 0) WHERE id = ?', d.subscriber_id);
+    }
+  }
   await insert(env, 'clicks', { id: id(), delivery_id: d.id, send_id: d.send_id, pub_id: d.pub_id, url: url.slice(0, 2000), is_bot: bot ? 1 : 0, ua: ua.slice(0, 300), country: (req as any).cf?.country ?? null, created_at: now() });
   if (bot) return;
   const first = !d.clicked_at;

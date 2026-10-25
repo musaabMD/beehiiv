@@ -52,6 +52,7 @@ function statusPage(c: Ctx, did: string, email: string) {
   <div class="card" id="st" style="padding:8px 22px">
     ${[['sent', 'Handed to Cloudflare Email Sending', 'Signed with DKIM for the demo’s domain.'], ['opened', 'Opened', 'Open the email. Apple Mail can open emails on its own, so opens are a hint, not proof.'], ['clicked', 'Clicked', 'Click any link in the email. Clicks in the first 10 seconds are treated as link scanners.']]
       .map(([k, t, d]) => `<div data-step="${k}" style="display:flex;gap:14px;padding:16px 0;border-bottom:1px solid var(--line)"><span class="dot" style="width:22px;height:22px;border-radius:999px;border:2px solid var(--line);flex:none;margin-top:2px"></span><div><b>${t}</b> <span class="when muted small"></span><div class="muted small">${d}</div></div></div>`).join('')}
+    <p id="flt" class="small muted" style="margin:12px 0 0"></p>
     <p id="err" class="small" style="color:#b91c1c;margin:12px 0"></p>
   </div>
   <p class="small muted" style="margin-top:14px">Didn't get it in a minute? Check spam and Promotions. <a href="/open" style="text-decoration:underline">See this install's live deliverability numbers</a>.</p>
@@ -62,6 +63,7 @@ function tick(){fetch(u).then(function(r){return r.json()}).then(function(d){
   [['sent',d.sent_at],['opened',d.opened_at],['clicked',d.clicked_at]].forEach(function(x){var el=document.querySelector('[data-step='+x[0]+']');if(!el||!x[1])return;
     el.querySelector('.dot').style.cssText+='background:#059669;border-color:#059669';el.querySelector('.when').textContent='· '+new Date(x[1]).toLocaleTimeString();});
   document.getElementById('err').textContent=d.error?('Problem: '+d.error):'';
+  var f=document.getElementById('flt');var n=(d.bot_opens||0)+(d.bot_clicks||0);f.textContent=n?('Filtered out: '+d.bot_opens+' scanner open'+(d.bot_opens==1?'':'s')+' and '+d.bot_clicks+' scanner click'+(d.bot_clicks==1?'':'s')+'. Mail providers and security tools check links before you do; those aren\'t counted.'):'';
   if(!d.clicked_at&&Date.now()-t0<30*60*1000)setTimeout(tick,3000);}).catch(function(){setTimeout(tick,6000)})}
 tick();})();
 </script>` });
@@ -112,7 +114,8 @@ export function mountTryIt(root: Hono<AppEnv>, ctxFor: (c: any) => Promise<Ctx>)
     const d = await one<any>(c.env, `SELECT d.status, d.sent_at, d.opened_at, d.clicked_at, d.error FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE d.id = ? AND s.kind = 'try'`, did);
     c.header('cache-control', 'no-store');
     if (!d) return c.json({ error: 'not found' }, 404);
-    return c.json({ status: d.status, sent_at: d.sent_at, opened_at: d.opened_at, clicked_at: d.clicked_at, error: d.status === 'sent' ? null : d.error || (d.status === 'suppressed' ? 'This address is on a suppression list.' : null) });
+    const bots = await one<any>(c.env, `SELECT (SELECT COUNT(*) FROM opens WHERE delivery_id = ? AND is_bot = 1) AS o, (SELECT COUNT(*) FROM clicks WHERE delivery_id = ? AND is_bot = 1) AS k`, did, did);
+    return c.json({ bot_opens: bots?.o || 0, bot_clicks: bots?.k || 0, status: d.status, sent_at: d.sent_at, opened_at: d.opened_at, clicked_at: d.clicked_at, error: d.status === 'sent' ? null : d.error || (d.status === 'suppressed' ? 'This address is on a suppression list.' : null) });
   });
 
   root.get('/try/s/:id', async (c) => {
