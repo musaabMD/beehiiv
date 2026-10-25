@@ -86,7 +86,7 @@ details p{color:var(--muted);margin:10px 0 0}
 .final{text-align:center;padding:100px 0;background:radial-gradient(700px 300px at 50% 100%,rgba(245,158,11,.18),transparent 70%)}
 footer{border-top:1px solid var(--line);padding:30px 0;color:var(--muted);font-size:14px}
 footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
-footer nav{display:flex;gap:18px}
+footer nav{display:flex;gap:18px;flex-wrap:wrap}
 .sticky-buy{display:none}
 @media(max-width:960px){.grid{grid-template-columns:repeat(2,1fr)}.shot-body{grid-template-columns:1fr}.shot-side,.shot-stats{display:none}.split{grid-template-columns:1fr;gap:28px}.top nav{display:none}}
 @media(max-width:620px){.grid,.cost{grid-template-columns:1fr}section{padding:64px 0}.hero{padding-top:56px}.hide-sm{display:none}.btn-lg{width:100%}.sticky-buy{display:flex;position:fixed;left:12px;right:12px;bottom:12px;width:auto!important;z-index:20;box-shadow:0 10px 30px rgba(0,0,0,.5)}footer{padding-bottom:90px}th,td{padding:12px}}
@@ -95,7 +95,7 @@ footer nav{display:flex;gap:18px}
 <body>
 <header class="top"><div class="wrap">
   <a class="brand" href="#"><svg width="28" height="28" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#1b2130"/><path d="M32 12l17 10v20L32 52 15 42V22z" fill="#f59e0b"/><path d="M32 22l8.5 5v10L32 42l-8.5-5V27z" fill="#1b2130"/></svg>OpenHive</a>
-  <nav><a href="#features">Features</a><a href="#stack">Stack</a><a href="#pricing">Pricing</a><a href="#faq">FAQ</a></nav>
+  <nav><a href="https://openhive.mousab-r.workers.dev/features">Features</a><a href="https://openhive.mousab-r.workers.dev/compare">Compare</a><a href="https://openhive.mousab-r.workers.dev/open">Deliverability</a><a href="#pricing">Pricing</a><a href="https://openhive.mousab-r.workers.dev/changelog">Changelog</a></nav>
   
   <a class="btn btn-primary" href="https://lnkbase.com/beehiiv">Buy — $30</a>
 </div></header>
@@ -194,7 +194,7 @@ footer nav{display:flex;gap:18px}
   <p class="sub">Hosted platforms charge more as you grow — and take a cut of what you earn.</p>
   <div class="cost" style="text-align:left">
     <div class="card"><div class="muted" style="color:var(--muted)">Typical hosted platform at 10,000 subscribers</div><div class="big">$100–$200<small>/month</small></div><p>…plus a percentage of paid subscriptions on many plans, plus add-ons for webinars, courses or podcasts. That's $1,200–$2,400+ every year.</p></div>
-    <div class="card hl"><div style="color:var(--accent);font-weight:700">OpenHive</div><div class="big">$30<small> once</small></div><p>Plus your Cloudflare usage — many newsletters fit the free tier; Workers Paid starts at $5/month. 0% platform fees on subscriptions, products and tickets.</p></div>
+    <div class="card hl"><div style="color:var(--accent);font-weight:700">OpenHive</div><div class="big">$30<small> once</small></div><p>Plus your Cloudflare bill: $5/month for Workers Paid, then $0.35 per 1,000 emails — about $19/month for a weekly issue to 10,000 readers. 0% platform fees on subscriptions, products and tickets.</p></div>
   </div>
 </div></section>
 
@@ -215,7 +215,7 @@ footer nav{display:flex;gap:18px}
 <section id="faq" style="padding-top:20px"><div class="wrap" style="max-width:820px">
   <div class="center"><div class="eyebrow">FAQ</div><h2>Questions, answered</h2></div>
   <div style="margin-top:32px">
-    <details><summary>What exactly do I get?</summary><p>The complete source code of OpenHive (TypeScript, Hono, D1), database migrations, docs for deploying to Cloudflare, the REST API and MCP server, and future updates for the version you bought.</p></details><details><summary>Is this a subscription?</summary><p>No. You pay once and own your copy. Your only running cost is your Cloudflare usage — many newsletters fit in the free tier, and Workers Paid starts at $5/month.</p></details><details><summary>Do I need to know how to code?</summary><p>You need to be comfortable running a few terminal commands. The deploy guide walks through every step: create the database, enable email sending for your domain, deploy.</p></details><details><summary>How does email sending work?</summary><p>OpenHive sends through Cloudflare Email Sending on your own domain. Cloudflare publishes SPF and DKIM for you; the deliverability guide covers DMARC, warmup and feedback loops.</p></details><details><summary>Do I need Stripe?</summary><p>Only to take real payments. Without Stripe keys everything runs in test mode so you can try paid tiers, products and tickets end to end. With Stripe Connect, creators get paid directly.</p></details><details><summary>Can I run newsletters for clients?</summary><p>Yes. One instance hosts unlimited workspaces and publications, each with its own domain, team and roles. You can even set your own platform fee.</p></details><details><summary>Can I move my existing list?</summary><p>Yes — import subscribers from CSV (with custom fields and tags), and podcasts from any RSS feed with episode GUIDs preserved.</p></details><details><summary>Is my data mine?</summary><p>Completely. It lives in your Cloudflare account. Export subscribers, segments and posts at any time.</p></details>
+    <details><summary>What exactly do I get?</summary><p>The complete source code of OpenHive (TypeScript, Hono, D1), database migrations, docs for deploying to Cloudflare, the REST API and MCP server, and future updates for the version you bought.</p></details><details><summary>Is this a subscription?</summary><p>No. You pay once and own your copy. Your only running cost is your Cloudflare bill: sending email needs Workers Paid ($5/month, 3,000 emails included), then $0.35 per 1,000 emails. One weekly issue to 10,000 readers is about $19/month. See the compare page for the math.</p></details><details><summary>Do I need to know how to code?</summary><p>You need to be comfortable running a few terminal commands. The deploy guide walks through every step: create the database, enable email sending for your domain, deploy.</p></details><details><summary>How does email sending work?</summary><p>OpenHive sends through Cloudflare Email Sending on your own domain. Cloudflare publishes SPF and DKIM for you; the deliverability guide covers DMARC, warmup and feedback loops.</p></details><details><summary>Do I need Stripe?</summary><p>Only to take real payments. Without Stripe keys everything runs in test mode so you can try paid tiers, products and tickets end to end. With Stripe Connect, creators get paid directly.</p></details><details><summary>Can I run newsletters for clients?</summary><p>Yes. One instance hosts unlimited workspaces and publications, each with its own domain, team and roles. You can even set your own platform fee.</p></details><details><summary>Can I move my existing list?</summary><p>Yes — import subscribers from CSV (with custom fields and tags), and podcasts from any RSS feed with episode GUIDs preserved.</p></details><details><summary>Is my data mine?</summary><p>Completely. It lives in your Cloudflare account. Export subscribers, segments and posts at any time.</p></details>
   </div>
 </div></section>
 
@@ -229,7 +229,7 @@ footer nav{display:flex;gap:18px}
 <a class="btn btn-primary btn-lg sticky-buy" href="https://lnkbase.com/beehiiv">Get OpenHive — $30 one-time</a>
 <footer><div class="wrap">
   <span>© 2026 OpenHive · The open-source newsletter platform</span>
-  <nav><a href="#features">Features</a><a href="#pricing">Pricing</a><a href="https://lnkbase.com/beehiiv">Buy</a></nav>
+  <nav><a href="https://openhive.mousab-r.workers.dev/features">Features</a><a href="https://openhive.mousab-r.workers.dev/compare">Compare</a><a href="https://openhive.mousab-r.workers.dev/open">Deliverability</a><a href="https://openhive.mousab-r.workers.dev/changelog">Changelog</a><a href="mailto:hello@trstbase.com">hello@trstbase.com</a><a href="https://lnkbase.com/beehiiv">Buy</a></nav>
 </div></footer>
 </body>
 </html>
