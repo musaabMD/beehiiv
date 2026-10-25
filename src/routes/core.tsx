@@ -232,7 +232,14 @@ root.post('/hooks/bounce', async (c) => {
 root.post('/hooks/fbl', async (c) => {
   if (c.req.query('key') !== (await hookKey(c.env))) return c.text('forbidden', 403);
   const text = await c.req.text();
-  const emails = [...new Set([...text.matchAll(/(?:Original-Rcpt-To|Removal-Recipient|^To):\s*<?([^\s>]+@[^\s>]+)/gim)].map((m) => m[1].toLowerCase()))];
+  // The ARF report's own To: is the FBL/abuse mailbox, so never use it. Prefer the explicit recipient
+  // fields; otherwise read To: only from the embedded original message (after the message/rfc822 part).
+  const pick = (src: string, re: RegExp) => [...new Set([...src.matchAll(re)].map((m) => m[1].toLowerCase()))];
+  let emails = pick(text, /(?:Original-Rcpt-To|Removal-Recipient):\s*(?:rfc822;)?\s*<?([^\s>;]+@[^\s>;]+)/gi);
+  if (!emails.length) {
+    const at = text.search(/Content-Type:\s*(?:message\/rfc822|text\/rfc822-headers)/i);
+    if (at >= 0) emails = pick(text.slice(at), /^To:\s*(?:[^<\r\n]*<)?([^\s>]+@[^\s>]+)/gim).slice(0, 1);
+  }
   const fid = text.match(/Feedback-ID:\s*([^\r\n]+)/i)?.[1] || '';
   const campaign = text.match(/X-OpenHive-Campaign:\s*(\S+)/i)?.[1] || fid.split(':')[0];
   let pubId = fid.split(':')[1] || '';

@@ -170,6 +170,7 @@
   drawer?.querySelector('textarea').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) drawer.querySelector('.ai-form').requestSubmit(); });
 
   document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented) return; // e.g. the editor already used ⌘K for a link
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); pal?.open ? pal.close() : openPal(); }
     if (mod && e.key.toLowerCase() === 'j') { e.preventDefault(); toggleAI(); }

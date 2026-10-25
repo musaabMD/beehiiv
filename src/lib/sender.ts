@@ -30,6 +30,10 @@ export interface SendOptions {
 }
 
 const BATCH = 50;
+/** Default emails/minute per send when the publication hasn't set one (override with the SEND_RATE_PER_MINUTE var). */
+const DEFAULT_RATE = 1200;
+/** Emails handed to the sending binding at the same time within a batch. */
+const PARALLEL = 10;
 
 // ───────── targeting ─────────
 export async function audienceGroup(env: Env, pubId: string, o: SendOptions): Promise<RuleGroup> {
@@ -155,7 +159,7 @@ registerJob('send.batch', async (env, p) => {
     return { retryInMs: HOUR };
   }
   const cfg = settings(pub);
-  const rate = Math.max(BATCH, Number(cfg.send_rate_per_minute) || 0);
+  const rate = Math.max(BATCH, Number(cfg.send_rate_per_minute) || Number((env as any).SEND_RATE_PER_MINUTE) || DEFAULT_RATE);
   const limit = Math.min(BATCH, warm.remaining === Infinity ? BATCH : warm.remaining);
 
   let recipients: Subscriber[];
@@ -169,6 +173,7 @@ registerJob('send.batch', async (env, p) => {
   const content = await postContent(env, post);
   let processed = 0;
   let last = send.cursor as string | null;
+  const queue: Array<{ sub: Subscriber; subject: string; variant: string | null; cohort: string | null }> = [];
   for (const sub of recipients) {
     last = sub.id;
     // A/B: test phase only takes the sample; main phase takes the rest
@@ -196,9 +201,13 @@ registerJob('send.batch', async (env, p) => {
       cohort = cohort || o.cohorts[o.cohorts.length - 1].name;
       variant = variant ? `${variant}/${cohort}` : cohort;
     }
-    await deliver(env, pub, send.id, sub, subject, content, from, { variant, cohort, post });
+    queue.push({ sub, subject, variant, cohort });
     processed++;
     if (processed >= limit) break;
+  }
+  for (let i = 0; i < queue.length; i += PARALLEL) {
+    const res = await Promise.allSettled(queue.slice(i, i + PARALLEL).map((q) => deliver(env, pub, send.id, q.sub, q.subject, content, from, { variant: q.variant, cohort: q.cohort, post })));
+    for (const r of res) if (r.status === 'rejected') await logError(env, 'send.deliver', r.reason, pub.id);
   }
   const exhausted = processed < limit && (recipients.length < limit * 3 || o.only_subscriber_ids);
   await run(env, 'UPDATE sends SET cursor = ?, sent = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'sent\',\'deferred\')), failed = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'failed\',\'bounced\',\'suppressed\')) WHERE id = ?', last, send.id, send.id, send.id);

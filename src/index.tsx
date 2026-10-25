@@ -141,7 +141,7 @@ export default {
     withMedia(env);
     ctx.waitUntil((async () => {
       await runPeriodic(env);
-      await runJobs(env, 25_000);
+      await runJobs(env, 55_000); // use most of the minute; overlapping runs are safe (jobs are claimed with a lock)
     })());
   },
 };

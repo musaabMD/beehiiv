@@ -69,7 +69,7 @@ dash.get('/', async (c) => {
         <Toggle name="utm_tracking" checked={s.utm_tracking !== false} label="Add UTM parameters to links in emails" hint="utm_source=<slug>&utm_medium=newsletter&utm_campaign=<post>" />
         <Grid>
           <Field label="Custom link parameters" hint="Appended to every link in your emails. Placeholders: {pub} {post}"><Input name="link_params" value={s.link_params} placeholder="ref={pub}&issue={post}" /></Field>
-          <Field label="Max send rate (emails/minute)" hint="Leave blank for the platform default."><Input name="send_rate_per_minute" type="number" min={50} value={s.send_rate_per_minute ?? ''} /></Field>
+          <Field label="Max send rate (emails/minute)" hint="Leave blank for the platform default (1,200/min)."><Input name="send_rate_per_minute" type="number" min={50} value={s.send_rate_per_minute ?? ''} /></Field>
         </Grid>
       </Card>
       <Card title="Signups & readers">

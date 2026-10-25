@@ -20,6 +20,18 @@ export function StripeBanner({ c }: { c: Ctx }) {
   return <div class="callout ok"><strong>Stripe connected.</strong> {acct ? <>Payouts go to connected account <code>{acct}</code> via Stripe Connect.</> : 'Payments go to the platform Stripe account.'} OpenHive takes <strong>{Number(c.env.PLATFORM_FEE_PERCENT || 0)}% platform fees</strong>.</div>;
 }
 
+/** Make the tier's "community channels" perk real: channels gated to specific tiers get this tier added
+ *  (or removed). Free channels and "any paid tier" channels already admit it, so they are left alone. */
+async function syncTierChannels(env: AppEnv['Bindings'], pubId: string, tierId: string, selected: string[]) {
+  const chans = await all<any>(env, `SELECT id, access, tier_ids FROM channels WHERE pub_id = ? AND access = 'tiers'`, pubId);
+  for (const ch of chans) {
+    const ids = new Set(parseJSON<string[]>(ch.tier_ids, []));
+    const had = ids.has(tierId);
+    if (selected.includes(ch.id)) ids.add(tierId); else ids.delete(tierId);
+    if (had !== ids.has(tierId)) await run(env, 'UPDATE channels SET tier_ids = ? WHERE id = ?', JSON.stringify([...ids]), ch.id);
+  }
+}
+
 function tierForm(t: any | null, podcasts: any[], channels: any[]) {
   const perks = parseJSON<any>(t?.perks, {});
   return (
@@ -149,7 +161,7 @@ export function registerTiers(dash: Hono<AppEnv>) {
     name: str(f.name, 80) || 'Premium', description: str(f.description, 1000), currency: CURRENCIES.includes(f.currency) ? f.currency : 'usd',
     monthly_cents: cents(f.monthly), annual_cents: cents(f.annual), trial_days: Math.max(0, int(f.trial_days)), paid_trial_cents: cents(f.paid_trial),
     benefits: JSON.stringify(str(f.benefits, 4000).split('\n').map((x) => x.trim()).filter(Boolean)),
-    perks: JSON.stringify({ podcast_ids: f.podcast_ids || [], channel_ids: f.channel_ids || [] }),
+    perks: JSON.stringify({ podcast_ids: [].concat(f.podcast_ids || []), channel_ids: [].concat(f.channel_ids || []) }),
     group_enabled: bool(f.group_enabled) ? 1 : 0, group_seat_cents: cents(f.group_seat),
   });
 
@@ -160,6 +172,7 @@ export function registerTiers(dash: Hono<AppEnv>) {
     const tid = id();
     const pos = await val<number>(c.env, 'SELECT COALESCE(MAX(position), 0) + 1 FROM tiers WHERE pub_id = ?', pub.id);
     await insert(c.env, 'tiers', { id: tid, pub_id: pub.id, ...t, status: 'active', position: pos, created_at: now() });
+    await syncTierChannels(c.env, pub.id, tid, JSON.parse(t.perks).channel_ids);
     await emit(c.env, { pubId: pub.id, type: 'tier.created', refId: tid, data: { tier: { id: tid, ...t } }, activity: false });
     await audit(c, 'tier.created', tid);
     try { await syncTierToStripe(c.env, pub, tid); } catch (e: any) { return back(c, '/app/monetize', `Tier created, but Stripe sync failed: ${e.message}`, 'err'); }
@@ -172,6 +185,7 @@ export function registerTiers(dash: Hono<AppEnv>) {
     const tid = c.req.param('id');
     const cols = Object.keys(t);
     await run(c.env, `UPDATE tiers SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND pub_id = ?`, ...cols.map((k) => (t as any)[k]), tid, pub.id);
+    await syncTierChannels(c.env, pub.id, tid, JSON.parse(t.perks).channel_ids);
     try { await syncTierToStripe(c.env, pub, tid); } catch (e: any) { return back(c, `/app/monetize/tiers/${tid}`, `Saved, but Stripe sync failed: ${e.message}`, 'err'); }
     return back(c, `/app/monetize/tiers/${tid}`, 'Tier saved');
   });

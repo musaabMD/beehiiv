@@ -277,7 +277,7 @@ function triggerMatches(trigger: any, e: BusEvent): boolean {
     case 'field_updated': return !c.key || Object.prototype.hasOwnProperty.call(d.fields || {}, c.key);
     case 'list_subscribed': return !c.list_id || c.list_id === d.list_id;
     case 'upgraded': return !c.tier_id || c.tier_id === d.tier_id;
-    case 'purchase': return d.kind === 'product' || d.kind === 'replay' ? !c.product_id || c.product_id === d.ref_id : false;
+    case 'purchase': return d.product_id ? !c.product_id || c.product_id === d.product_id : false;
     case 'event_registered': return !c.event_id || c.event_id === d.event_id;
     case 'survey_submitted': return !c.survey_id || c.survey_id === d.survey_id;
     case 'poll_voted': return !c.poll_id || c.poll_id === d.poll_id;

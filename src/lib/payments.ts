@@ -141,7 +141,13 @@ export async function markPaid(env: Env, orderId: string, extra: { paymentIntent
     catch (e) { const { logError } = await import('./jobs'); await logError(env, 'fulfill:' + order.kind, e, pub.id); }
   }
   const fresh = await one<any>(env, 'SELECT subscriber_id FROM orders WHERE id = ?', orderId);
-  await emit(env, { pubId: pub.id, type: 'order.paid', subscriberId: fresh?.subscriber_id ?? order.subscriber_id, refId: order.ref_id, data: { order_id: order.id, kind: order.kind, ref_id: order.ref_id, amount_cents: order.amount_cents, currency: order.currency } });
+  // A replay bought from an event page is a 'ticket' order; expose it as a product purchase so
+  // "Purchases a product" automations fire for it too.
+  let productId: string | null = order.kind === 'product' || order.kind === 'replay' ? order.ref_id : null;
+  let replay = false;
+  try { replay = order.kind === 'ticket' && !!JSON.parse(order.data || '{}').replay; } catch {}
+  if (replay) productId = (await one<any>(env, 'SELECT replay_product_id FROM live_events WHERE id = ?', order.ref_id))?.replay_product_id || null;
+  await emit(env, { pubId: pub.id, type: 'order.paid', subscriberId: fresh?.subscriber_id ?? order.subscriber_id, refId: order.ref_id, data: { order_id: order.id, kind: order.kind, ref_id: order.ref_id, product_id: productId, replay, amount_cents: order.amount_cents, currency: order.currency } });
 }
 
 /** Verify a Stripe webhook signature (Stripe-Signature: t=...,v1=...). */

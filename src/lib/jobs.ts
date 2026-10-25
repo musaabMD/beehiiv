@@ -35,7 +35,14 @@ export async function runJobs(env: Env, budgetMs = 20_000): Promise<number> {
       `SELECT id, kind, payload, attempts FROM jobs WHERE status = 'pending' AND run_at <= ? AND (locked_until IS NULL OR locked_until < ?) ORDER BY run_at LIMIT 10`,
       t, t,
     );
-    if (!due.length) break;
+    if (!due.length) {
+      // Nothing due right now. If a job (e.g. the next send batch) is due within a few seconds and
+      // there's budget left, wait for it instead of leaving it for the next cron tick a minute later.
+      const next = await env.DB.prepare(`SELECT MIN(run_at) AS t FROM jobs WHERE status = 'pending'`).first<{ t: number | null }>();
+      const wait = next?.t ? next.t - now() : Infinity;
+      if (wait > 0 && wait <= 5_000 && Date.now() - start + wait < budgetMs - 2_000) { await new Promise((r) => setTimeout(r, wait + 50)); continue; }
+      break;
+    }
     for (const j of due) {
       // claim
       const claim = await run(env, `UPDATE jobs SET locked_until = ?, status = 'running', attempts = attempts + 1 WHERE id = ? AND status = 'pending'`, t + 5 * MIN, j.id);

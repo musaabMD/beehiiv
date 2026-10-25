@@ -198,6 +198,10 @@ onOrderPaid('ticket', async (env, order, pub) => {
     : await registerAttendee(env, pub, ev, { email: order.email, name: order.name, orderId: order.id, slot: d.slot ? Number(d.slot) : null, reader: true });
   if (r.reg?.subscriber_id) await run(env, 'UPDATE orders SET subscriber_id = COALESCE(subscriber_id, ?) WHERE id = ?', r.reg.subscriber_id, order.id);
   if (d.replay && ev.replay_product_id) await run(env, 'UPDATE products SET sales_count = sales_count + 1, revenue_cents = revenue_cents + ? WHERE id = ?', order.amount_cents, ev.replay_product_id);
+  if (d.replay && ev.replay_product_id && r.reg?.subscriber_id) {
+    const p = await one<any>(env, 'SELECT automation_id FROM products WHERE id = ?', ev.replay_product_id);
+    if (p?.automation_id) { const { enroll } = await import('../lib/automations'); await enroll(env, p.automation_id, r.reg.subscriber_id, { product_id: ev.replay_product_id, order_id: order.id }).catch(() => null); }
+  }
 });
 
 // Reminder emails (up to 5 per event)

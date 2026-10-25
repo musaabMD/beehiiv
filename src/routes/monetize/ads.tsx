@@ -390,7 +390,9 @@ export function registerAds(dash: Hono<AppEnv>, root: Hono<AppEnv>) {
       })().catch(() => {});
       try { c.executionCtx.waitUntil(work); } catch { await work; }
     }
-    return c.redirect(target.toString(), 302);
+    // Only follow links to the advertiser's own site, so /t/ad can't be used as an open redirect.
+    const allowed = (() => { try { return o && new URL(o.curl).hostname.replace(/^www\./, '') === target.hostname.replace(/^www\./, ''); } catch { return false; } })();
+    return c.redirect(allowed ? target.toString() : (o?.curl || '/'), 302);
   });
 }
 

@@ -431,7 +431,14 @@ async function renderBlock(st: State, b: Block): Promise<string> {
       if (!ad && !d.headline) return '';
       const a = ad || { headline: d.headline, body: d.body || '', url: d.url || '#', image_url: d.image, cta_label: d.cta || 'Learn more', opp_id: null, link_params: '' };
       let url = a.url as string;
-      if (a.link_params) url += (url.includes('?') ? '&' : '?') + String(a.link_params).replace(/\{pub\}/g, ctx.pub.slug).replace(/\{post\}/g, ctx.post?.slug || '');
+      if (a.link_params) {
+        const params = String(a.link_params).replace(/\{pub\}/g, ctx.pub.slug).replace(/\{post\}/g, ctx.post?.slug || '');
+        try {
+          const u = new URL(url);
+          for (const [k, v] of new URLSearchParams(params)) if (!u.searchParams.has(k)) u.searchParams.set(k, v);
+          url = u.toString(); // keeps any #fragment at the end
+        } catch { url += (url.includes('?') ? '&' : '?') + params; }
+      }
       const href = a.opp_id ? `${ctx.env.APP_URL}/t/ad/${a.opp_id}?u=${encodeURIComponent(url)}${ctx.deliveryId ? `&d=${ctx.deliveryId}` : ''}` : url;
       const label = d.label || 'Together with';
       if (E)

@@ -53,6 +53,14 @@ export async function serveObject(env: Env, key: string, req: Request, extraHead
   }
   if (!obj || !('body' in obj)) return new Response('Not found', { status: 404 });
   obj.writeHttpMetadata(headers);
+  // Uploaded files are served from the app's own domain, so they must never run scripts here.
+  // SVG (and anything that isn't plain media/PDF) gets a locked-down CSP; nosniff stops type guessing.
+  headers.set('x-content-type-options', 'nosniff');
+  const type = (headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!/^(image\/(png|jpe?g|gif|webp|avif)|audio\/.*|video\/.*|application\/pdf)$/.test(type)) {
+    headers.set('content-security-policy', "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox");
+  }
+  if (type === 'image/svg+xml' && !headers.has('content-disposition')) headers.set('content-disposition', 'inline');
   headers.set('accept-ranges', 'bytes');
   headers.set('etag', obj.httpEtag);
   if (!headers.has('cache-control')) headers.set('cache-control', 'public, max-age=31536000, immutable');
