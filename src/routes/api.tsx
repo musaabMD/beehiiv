@@ -4,7 +4,7 @@ import { Hono } from 'hono';
 import type { AppEnv, Module } from '../types';
 import { apiAuth, apiError, keyFromRequest, limit, RATE_LIMIT } from '../lib/apiauth';
 import { handleRpc, PROTOCOL_VERSION, SERVER_INFO } from '../lib/mcp';
-import { logError } from '../lib/jobs';
+import { logError, kick } from '../lib/jobs';
 import { ROUTES, BadRequest, NotFound } from './api/rest';
 import { openapi } from './api/openapi';
 import { now } from '../lib/util';
@@ -28,7 +28,10 @@ for (const r of ROUTES) {
   const handler = async (c: any) => {
     c.header('access-control-allow-origin', '*');
     try {
-      return await r.handler(c, c.get('apiPub'));
+      const res = await r.handler(c, c.get('apiPub'));
+      // Real-time side effects (webhooks, automations, sends) run right away instead of waiting for cron.
+      if (r.method !== 'GET') kick(c.env, c.executionCtx);
+      return res;
     } catch (e: any) {
       if (e instanceof BadRequest) return apiError(c, 400, 'bad_request', e.message);
       if (e instanceof NotFound) return apiError(c, 404, 'not_found', e.message);
