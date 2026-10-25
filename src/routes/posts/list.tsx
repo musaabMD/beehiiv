@@ -8,6 +8,7 @@ import { Card, Table, Status, Badge, Tabs, LinkBtn, Btn, Empty, Select, Input, b
 import { form, fmtDate, num, pct, parseJSON, qs, str, esc } from '../../lib/util';
 import { siteUrl } from '../../lib/pub';
 import { newPost, uniqueSlug } from './shared';
+import { GalleryAssets, CategoryFilter, TemplateCard, UseTemplate, CATEGORIES } from './templates';
 
 const app = new Hono<AppEnv>();
 const PAGE = 30;
@@ -144,30 +145,32 @@ export async function duplicatePost(c: any, p: Post): Promise<string> {
   return pid;
 }
 
-// New post: choose blank or a template
+// New post: choose blank or a template (gallery with live thumbnails + category filter)
 app.get('/new', async (c) => {
   const pub = c.get('pub');
-  const tpls = await all<any>(c.env, `SELECT id, name, description, pub_id, is_default, kind FROM templates WHERE (pub_id IS NULL OR pub_id = ?) AND kind = 'post' ORDER BY pub_id IS NULL, is_default DESC, name`, pub.id);
+  const tpls = await all<any>(c.env, `SELECT t.*, u.name AS author FROM templates t LEFT JOIN users u ON u.id = t.created_by WHERE (t.pub_id IS NULL OR t.pub_id = ?) AND t.kind = 'post' ORDER BY t.pub_id IS NULL, t.is_default DESC, t.name`, pub.id);
+  const order = (t: any) => (t.pub_id ? 0 : (CATEGORIES.indexOf(t.category) + 1 || 99) * 1000 + (String(t.id).startsWith('tpl_lib_') ? 0 : 500));
+  tpls.sort((a, b) => order(a) - order(b) || (a.pub_id ? 0 : a.created_at - b.created_at));
   const def = tpls.find((t) => t.pub_id && t.is_default);
   return c.html(
-    <DashLayout c={c} title="New post" section="posts" sub="posts" crumbs={[['/app/posts', 'Posts']]}>
-      <div class="grid g3">
-        <form method="post" action="/app/posts/new" class="card" style="margin:0">
-          <div class="card-b stack">
-            <h3>Blank post</h3>
-            <p class="muted small">{def ? `Starts empty with your default style (“${def.name}”).` : 'Start from an empty canvas.'}</p>
-            <Btn kind="primary">Start writing</Btn>
+    <DashLayout c={c} title="New post" section="posts" sub="posts" crumbs={[['/app/posts', 'Posts']]} actions={<LinkBtn href="/app/posts/templates" kind="ghost">Manage templates</LinkBtn>}>
+      <GalleryAssets />
+      <CategoryFilter items={tpls} target="#tg-new" />
+      <div class="tg-grid" id="tg-new">
+        <form method="post" action="/app/posts/new" class="card tg-card" style="margin:0">
+          <div class="tg-thumb tg-blank" aria-hidden="true">＋</div>
+          <div class="tg-body">
+            <strong>Blank post</strong>
+            <p class="small muted">{def ? `Starts empty with your default style (“${def.name}”).` : 'Start from an empty canvas with your publication’s style.'}</p>
+            <div class="tg-actions"><Btn kind="primary" small>Start writing</Btn></div>
           </div>
         </form>
         {tpls.map((t) => (
-          <form method="post" action="/app/posts/new" class="card" style="margin:0">
-            <input type="hidden" name="template_id" value={t.id} />
-            <div class="card-b stack">
-              <div class="row between"><h3 style="margin:0">{t.name}</h3>{t.pub_id ? <Badge tone="blue">Team</Badge> : <Badge>Library</Badge>}</div>
-              <p class="muted small">{t.description || 'Team template'}</p>
-              <div class="row"><Btn kind="secondary">Use template</Btn><a class="btn btn-ghost btn-sm" href={`/app/posts/templates/${t.id}/preview`} target="_blank">Preview</a></div>
-            </div>
-          </form>
+          <TemplateCard t={t}>
+            <UseTemplate t={t} label="Use template" />
+            <a class="btn btn-ghost btn-sm" href={`/app/posts/templates/${t.id}/preview`} target="_blank">Preview email</a>
+            <a class="btn btn-ghost btn-sm" href={`/app/posts/templates/${t.id}/preview?mode=web`} target="_blank">Web</a>
+          </TemplateCard>
         ))}
       </div>
     </DashLayout>,
@@ -180,9 +183,10 @@ app.post('/new', async (c) => {
   let opts: Parameters<typeof newPost>[3] = {};
   const tid = str(f.template_id);
   const tpl = tid
-    ? await one<any>(c.env, 'SELECT * FROM templates WHERE id = ? AND (pub_id IS NULL OR pub_id = ?)', tid, pub.id)
+    ? await one<any>(c.env, `SELECT * FROM templates WHERE id = ? AND (pub_id IS NULL OR pub_id = ?) AND kind = 'post'`, tid, pub.id)
     : await one<any>(c.env, `SELECT * FROM templates WHERE pub_id = ? AND is_default = 1 AND kind = 'post' LIMIT 1`, pub.id);
-  if (tpl) opts = { content: tid ? tpl.content : '{"blocks":[]}', style: tpl.style, template_id: tpl.id };
+  // Content is copied (it's the starting outline); style is linked via template_id — the post stores only its own overrides.
+  if (tpl) opts = { content: tid ? tpl.content : '{"blocks":[]}', style: '{}', template_id: tpl.id };
   const pid = await newPost(c.env, pub, c.get('user').id, opts);
   return c.redirect(`/app/posts/${pid}/edit`, 303);
 });

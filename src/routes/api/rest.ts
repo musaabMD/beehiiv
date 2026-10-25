@@ -129,7 +129,8 @@ export async function createPost(env: any, pub: Publication, b: Record<string, a
     templateId = tpl.id;
     const tplBlocks = parseDoc(tpl.content).blocks.map((x) => ({ ...x, id: id(8) }));
     blocks = blocks ? [...tplBlocks, ...blocks] : tplBlocks;
-    style = tpl.style || '{}';
+    // style stays '{}' (no overrides): the template's style is linked via template_id, so later template edits apply
+    style = '{}';
   }
   blocks = blocks || [];
   const t = now();

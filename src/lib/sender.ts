@@ -76,7 +76,8 @@ export interface Content { title: string; subtitle?: string; doc: Doc; preview_t
 
 export async function postContent(env: Env, post: Post): Promise<Content> {
   const authors = await all<{ name: string }>(env, 'SELECT u.name FROM post_authors pa JOIN users u ON u.id = pa.user_id WHERE pa.post_id = ? ORDER BY pa.position', post.id);
-  const tpl = post.template_id ? await one<{ style: string }>(env, 'SELECT style FROM templates WHERE id = ?', post.template_id) : null;
+  // Effective email style = publication default (styleFor) ⊕ linked template's current style ⊕ the post's own overrides.
+  const tpl = post.template_id ? await one<{ style: string }>(env, 'SELECT style FROM templates WHERE id = ? AND (pub_id IS NULL OR pub_id = ?)', post.template_id, post.pub_id) : null;
   return {
     title: post.title, subtitle: post.subtitle, doc: parseDoc(post.email_content || post.content), preview_text: post.preview_text, slug: post.slug,
     thumbnail: post.thumbnail_url, style: JSON.stringify({ ...parseJSON(tpl?.style, {} as any).email, ...parseJSON(post.style, {} as any).email }),
