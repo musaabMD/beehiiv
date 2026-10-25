@@ -59,7 +59,7 @@ app.get('/:id', async (c) => {
   const providers = await all<any>(c.env, `SELECT COALESCE(d.provider,'other') AS provider, COUNT(*) AS n, SUM(CASE WHEN d.status IN ('sent','deferred') THEN 1 ELSE 0 END) AS delivered, SUM(CASE WHEN d.status = 'bounced' THEN 1 ELSE 0 END) AS bounced, SUM(CASE WHEN d.status = 'complained' THEN 1 ELSE 0 END) AS complained, SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS op FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? GROUP BY provider ORDER BY n DESC`, pid);
   const web = await one<any>(c.env, `SELECT COUNT(*) AS views, COUNT(DISTINCT visitor_id) AS visitors FROM page_views WHERE pub_id = ? AND ref_id = ?`, pub.id, pid);
   const webChannels = await all<any>(c.env, `SELECT COALESCE(channel,'direct') AS ch, COUNT(*) AS n FROM page_views WHERE pub_id = ? AND ref_id = ? GROUP BY ch ORDER BY n DESC`, pub.id, pid);
-  const signups = (await one<any>(c.env, `SELECT COUNT(*) AS n FROM subscribers WHERE pub_id = ? AND landing_path LIKE ?`, pub.id, `%/p/${post.slug}%`))?.n || 0;
+  const signups = (await one<any>(c.env, `SELECT COUNT(*) AS n FROM subscribers WHERE pub_id = ? AND instr(landing_path, ?) > 0`, pub.id, `/p/${post.slug}`))?.n || 0;
   // polls in this post
   const pollIds: string[] = [];
   walkBlocks(parseDoc(post.content).blocks, (b) => { if (b.type === 'poll' && b.data?.poll_id) pollIds.push(b.data.poll_id); });
