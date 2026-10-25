@@ -17,7 +17,7 @@ import { sendTransactional, button } from '../lib/email';
 import { classifyCrawler, isBotClick, clientIP, rateLimit } from '../lib/guard';
 import { trackView } from '../lib/tracking';
 import { sanitizeHtml } from '../lib/sanitize';
-import { APPLE_CATEGORIES, LANGUAGES, buildFeed, parseFeed, detectApp, detectDevice, fmtDuration, type FeedEpisode } from '../lib/podcast';
+import { APPLE_CATEGORIES, LANGUAGES, buildFeed, parseFeed, detectApp, detectDevice, fmtDuration, isMp3, id3Size, mp3Slice, shiftVtt, type FeedEpisode } from '../lib/podcast';
 import { id, now, slugify, form, str, int, bool, parseJSON, sha256, token, fmtDate, num, esc, stripTags, truncate, MIN, DAY } from '../lib/util';
 
 const dash = new Hono<AppEnv>();
@@ -106,6 +106,103 @@ registerJob('podcast.copy_audio', async (env, p) => {
   const buf = await r.arrayBuffer();
   await env.MEDIA.put(key, buf, { httpMetadata: { contentType: ep.mime || 'audio/mpeg' } });
   await run(env, 'UPDATE episodes SET audio_key = ?, size = ?, updated_at = ? WHERE id = ?', key, buf.byteLength, now(), ep.id);
+  if (!ep.transcript) await queueTranscript(env, ep.id);
+});
+
+// ───────────────── automatic transcripts ─────────────────
+// Every uploaded/imported episode is transcribed in the background with Workers AI (Whisper). Long MP3s are cut into
+// frame-aligned byte ranges of the stored object (never loading the whole file), transcribed one by one, and stitched
+// (text + time-shifted WebVTT). Progress is saved after each chunk so a job resumes where it left off.
+const TRANSCRIBE_CHUNK = 2 * 1024 * 1024;        // ~2 MB of MP3 per Whisper call (≈ 2 min at 128 kbps)
+const TRANSCRIBE_SINGLE_MAX = 20 * 1024 * 1024;  // non-MP3 audio can't be split safely; send whole files up to this size
+const TRANSCRIBE_BUDGET_MS = 25_000;             // per job run; the job re-queues itself to continue
+
+/** Queue (or re-queue) background transcription for an episode's current audio. */
+export async function queueTranscript(env: Env, episodeId: string, force = false, runAt = now()) {
+  const ep = await one<any>(env, 'SELECT id, audio_key, audio_url FROM episodes WHERE id = ?', episodeId);
+  if (!ep || (!ep.audio_key && !ep.audio_url)) return null;
+  await run(env, `UPDATE episodes SET transcript_status = 'queued', transcript_note = NULL, transcript_progress = NULL WHERE id = ?`, ep.id);
+  return enqueue(env, 'podcast.transcribe', { episode_id: ep.id, src: ep.audio_key || ep.audio_url, force }, runAt);
+}
+
+async function audioSize(env: Env, ep: any): Promise<number> {
+  if (ep.audio_key) return (await env.MEDIA.head(ep.audio_key))?.size || 0;
+  const r = await fetch(ep.audio_url, { method: 'HEAD', headers: { 'user-agent': 'OpenHive-Transcriber/1.0' } }).catch(() => null);
+  return Number(r?.headers.get('content-length')) || ep.size || 0;
+}
+
+/** Read bytes [offset, offset+length) of the episode audio (R2 range read, or an HTTP Range request for external audio). */
+async function audioRange(env: Env, ep: any, offset: number, length: number): Promise<Uint8Array> {
+  if (ep.audio_key) {
+    const o = await env.MEDIA.get(ep.audio_key, { range: { offset, length } });
+    if (!o) throw new Error('Audio file not found in storage');
+    return new Uint8Array(await o.arrayBuffer());
+  }
+  const r = await fetch(ep.audio_url, { headers: { range: `bytes=${offset}-${offset + length - 1}`, 'user-agent': 'OpenHive-Transcriber/1.0' } });
+  if (r.status === 206) return new Uint8Array(await r.arrayBuffer());
+  if (!r.ok) throw new Error(`Audio fetch failed (HTTP ${r.status})`);
+  // Host ignored the Range header: only acceptable for small files.
+  const len = Number(r.headers.get('content-length')) || 0;
+  if (len > TRANSCRIBE_SINGLE_MAX) { r.body?.cancel(); throw new Error('The audio host does not support byte ranges; copy the audio into OpenHive to transcribe it.'); }
+  return new Uint8Array(await r.arrayBuffer()).slice(offset, offset + length);
+}
+
+async function skipTranscript(env: Env, epId: string, jobId: string, status: 'skipped' | 'failed', note: string) {
+  await run(env, 'UPDATE episodes SET transcript_status = ?, transcript_note = ?, transcript_progress = NULL WHERE id = ?', status, note, epId);
+  await run(env, 'UPDATE jobs SET error = ? WHERE id = ?', `${status}: ${note}`.slice(0, 2000), jobId);
+}
+
+registerJob('podcast.transcribe', async (env, p, job) => {
+  const ep = await one<any>(env, 'SELECT * FROM episodes WHERE id = ?', p.episode_id);
+  if (!ep) return;
+  const src = ep.audio_key || ep.audio_url;
+  if (!src || (p.src && p.src !== src)) return; // audio changed since this job was queued; a newer job handles it
+  if (!p.force && ep.transcript && ep.transcript_status !== 'running') {
+    await run(env, `UPDATE episodes SET transcript_status = 'done', transcript_note = 'Kept the existing transcript' WHERE id = ?`, ep.id);
+    return;
+  }
+  if (!aiEnabled(env)) return skipTranscript(env, ep.id, job.id, 'skipped', AI_DISABLED_MSG);
+  const size = await audioSize(env, ep);
+  if (!size) return skipTranscript(env, ep.id, job.id, 'failed', 'Audio file not found or empty.');
+  const mp3 = isMp3(ep.mime, src);
+  if (!mp3 && size > TRANSCRIBE_SINGLE_MAX)
+    return skipTranscript(env, ep.id, job.id, 'skipped', `This ${ep.mime || 'audio'} file is ${(size / 1048576).toFixed(0)} MB. Files over ${TRANSCRIBE_SINGLE_MAX / 1048576} MB can only be transcribed automatically as MP3 — upload an MP3 or a transcript file.`);
+
+  const prog = parseJSON<{ offset: number; t: number; text: string; vtt: string; n: number }>(ep.transcript_progress, { offset: 0, t: 0, text: '', vtt: '', n: 0 });
+  await run(env, `UPDATE episodes SET transcript_status = 'running' WHERE id = ?`, ep.id);
+  const started = Date.now();
+  try {
+    while (prog.offset < size && Date.now() - started < TRANSCRIBE_BUDGET_MS) {
+      let piece: Uint8Array, sec = 0;
+      if (!mp3) {
+        piece = await audioRange(env, ep, 0, size);
+        prog.offset = size;
+      } else {
+        if (prog.offset === 0) prog.offset = id3Size(await audioRange(env, ep, 0, Math.min(size, 10)));
+        const last = size - prog.offset <= TRANSCRIBE_CHUNK * 1.25;
+        const win = await audioRange(env, ep, prog.offset, last ? size - prog.offset : TRANSCRIBE_CHUNK + 8192);
+        const cut = mp3Slice(win, TRANSCRIBE_CHUNK, last);
+        if (!cut) { prog.offset = size; break; } // no more decodable audio
+        piece = win.subarray(cut.start, cut.end);
+        sec = cut.sec;
+        prog.offset += cut.end;
+      }
+      const t = await aiTranscribe(env, piece.slice().buffer as ArrayBuffer);
+      if (!t.ok) throw new Error(t.text);
+      if ((t.text || '').trim()) prog.text += (prog.text ? '\n\n' : '') + t.text.trim();
+      if (t.vtt) prog.vtt += (prog.vtt ? '\n\n' : '') + shiftVtt(t.vtt, prog.t);
+      prog.t += sec;
+      prog.n++;
+      await run(env, 'UPDATE episodes SET transcript_progress = ? WHERE id = ?', JSON.stringify(prog), ep.id);
+    }
+  } catch (e: any) {
+    if (job.attempts >= 3) return skipTranscript(env, ep.id, job.id, 'failed', 'Transcription failed: ' + String(e?.message || e).slice(0, 300));
+    throw e; // retried with backoff, resuming from the saved progress
+  }
+  if (prog.offset < size) return { retryInMs: 0 }; // more chunks to do; continue in the next run
+  const text = prog.text.trim();
+  await run(env, `UPDATE episodes SET transcript = ?, transcript_vtt = ?, transcript_status = 'done', transcript_note = ?, transcript_progress = NULL, updated_at = ? WHERE id = ?`,
+    text || null, prog.vtt ? 'WEBVTT\n\n' + prog.vtt : null, text ? `Transcribed automatically in ${prog.n} part${prog.n === 1 ? '' : 's'}` : 'No speech detected', now(), ep.id);
 });
 
 // ───────────────── dashboard ─────────────────
@@ -252,10 +349,12 @@ dash.post('/import', async (c) => {
       season: it.season, number: it.number, episode_type: it.episode_type, explicit: it.explicit ? 1 : 0, image_url: it.image || null,
       status: 'published', published_at: it.published_at, created_at: now(), updated_at: now(),
     });
+    // Copied audio is transcribed once it lands in R2 (see podcast.copy_audio); external audio is transcribed via range requests.
     if (copy) await enqueue(c.env, 'podcast.copy_audio', { episode_id: eid }, now() + n * 2000);
+    else await queueTranscript(c.env, eid, false, now() + n * 20_000);
     n++;
   }
-  if (copy) kick(c.env, c.executionCtx);
+  kick(c.env, c.executionCtx);
   return back(c, `/app/podcasts/${sid}`, `Imported "${feed.title}" with ${n} episodes${copy ? ' — audio is being copied in the background' : ''}. Set up an RSS redirect at your old host to move listeners over.`);
 });
 
@@ -283,7 +382,7 @@ dash.get('/:id', async (c) => {
       <PodTabs show={show} active={`/app/podcasts/${show.id}`} />
       <form method="get" class="row" style="margin-bottom:12px"><Select name="status" value={status} autosubmit options={[['', 'All episodes'], ['published', 'Published'], ['scheduled', 'Scheduled'], ['draft', 'Drafts'], ['archived', 'Archived']]} attrs={{ style: 'width:200px' }} /></form>
       <Table rows={eps} rowHref={(e) => `/app/podcasts/${show.id}/episodes/${e.id}`} empty={<Empty icon="🎧" title="No episodes yet" body="Upload audio, write show notes, and publish — your feed updates instantly." action={<LinkBtn href={`/app/podcasts/${show.id}/episodes/new`} kind="primary">Upload an episode</LinkBtn>} />} cols={[
-        { h: 'Episode', r: (e) => <div><a href={`/app/podcasts/${show.id}/episodes/${e.id}`}>{e.title}</a><div class="muted small">{e.season ? `S${e.season} ` : ''}{e.number ? `E${e.number} · ` : ''}{e.duration ? fmtDuration(e.duration) : 'no audio'}{e.premium ? ' · 🔒 premium' : ''}{e.transcript ? ' · transcript' : ''}</div></div> },
+        { h: 'Episode', r: (e) => <div><a href={`/app/podcasts/${show.id}/episodes/${e.id}`}>{e.title}</a><div class="muted small">{e.season ? `S${e.season} ` : ''}{e.number ? `E${e.number} · ` : ''}{e.duration ? fmtDuration(e.duration) : 'no audio'}{e.premium ? ' · 🔒 premium' : ''}{e.transcript ? ' · transcript' : e.transcript_status === 'queued' || e.transcript_status === 'running' ? ' · transcribing…' : ''}</div></div> },
         { h: 'Status', r: (e) => <Status s={e.status} /> },
         { h: 'Date', r: (e) => <span class="nowrap">{fmtDate(e.published_at || e.created_at, { dateStyle: 'medium', timeStyle: e.status === 'scheduled' ? 'short' : undefined }, pub.timezone)}</span> },
         { h: 'Downloads', r: (e) => num(e.dl), class: 'right' },
@@ -454,6 +553,18 @@ dash.get('/:id/analytics', async (c) => {
   );
 });
 
+function TranscriptStatus({ ep }: { ep: any }) {
+  const st = ep.transcript_status as string;
+  const prog = parseJSON<any>(ep.transcript_progress, null);
+  const pct = prog && ep.size ? Math.min(99, Math.round((prog.offset / ep.size) * 100)) : 0;
+  const label = st === 'queued' ? 'Transcript queued — it will be generated in the background.'
+    : st === 'running' ? `Generating transcript… ${pct ? pct + '%' : ''}`
+    : st === 'skipped' ? `Automatic transcript skipped: ${ep.transcript_note || ''}`
+    : st === 'failed' ? `Automatic transcript failed: ${ep.transcript_note || ''}`
+    : ep.transcript_note || 'Transcript ready';
+  return <div class={`callout ${st === 'failed' || st === 'skipped' ? 'warn' : ''}`} style="margin-bottom:8px" data-transcript-status={st}>{label}</div>;
+}
+
 function EpisodeForm(p: { show: any; ep?: any; tz: string }) {
   const e = p.ep || { episode_type: 'full', status: 'draft', premium: p.show.access === 'premium' ? 1 : 0 };
   const action = p.ep ? `/app/podcasts/${p.show.id}/episodes/${e.id}` : `/app/podcasts/${p.show.id}/episodes/new`;
@@ -482,10 +593,11 @@ function EpisodeForm(p: { show: any; ep?: any; tz: string }) {
             </div>
             <input type="hidden" name="description" value={e.description || ''} />
           </Field>
-          <Field label="Transcript" hint="Plain text or WebVTT. Generate automatically with AI, or upload a .txt/.vtt file.">
+          <Field label="Transcript" hint="Generated automatically in the background whenever you upload audio (Workers AI). You can also paste text/WebVTT or upload a .txt/.vtt file.">
+            {p.ep && e.transcript_status ? <TranscriptStatus ep={e} /> : null}
             <Textarea name="transcript" value={e.transcript} rows={8} />
             <div class="row" style="margin-top:6px"><input type="file" accept=".txt,.vtt,text/plain,text/vtt" data-transcript-file class="input" style="max-width:280px" />
-              {p.ep && (e.audio_key || e.audio_url) ? <Btn kind="secondary" small formaction={`/app/podcasts/${p.show.id}/episodes/${e.id}/transcribe`}>✨ Generate transcript</Btn> : null}
+              {p.ep && (e.audio_key || e.audio_url) ? <Btn kind="secondary" small formaction={`/app/podcasts/${p.show.id}/episodes/${e.id}/transcribe`} confirm={e.transcript ? 'Replace the current transcript with a new AI transcript?' : undefined}>✨ {e.transcript || e.transcript_status ? 'Regenerate transcript' : 'Generate transcript'}</Btn> : null}
             </div>
           </Field>
         </Card>
@@ -562,6 +674,10 @@ async function saveEpisode(c: Ctx, show: any, existing: any | null) {
     image_url: str(f.image_url, 1000) || null, transcript: str(f.transcript, 400000) || null, status, published_at: isNaN(publishedAt) ? null : publishedAt, updated_at: now(),
   };
   const slug = await uniqueSlug(c.env, 'episodes', 'podcast_id', show.id, str(f.slug) || (existing?.slug && !str(f.slug) ? existing.slug : title), existing?.id);
+  // Transcribe automatically when audio is new or replaced, unless the user supplied their own transcript in this save.
+  const audioChanged = (audioKey || audioUrl) && (!existing || (existing.audio_key || existing.audio_url) !== (audioKey || audioUrl));
+  const aiTranscriptKept = existing && existing.transcript_status === 'done' && (fields.transcript || '') === (existing.transcript || '');
+  const autoTranscribe = !!audioChanged && (!fields.transcript || !!aiTranscriptKept);
   if (existing) {
     if (existing.audio_key && existing.audio_key !== audioKey) await c.env.MEDIA.delete(existing.audio_key).catch(() => {});
     const cols = Object.keys(fields);
@@ -569,12 +685,14 @@ async function saveEpisode(c: Ctx, show: any, existing: any | null) {
     const ep = { ...existing, ...fields, slug };
     if (status === 'published' && existing.status !== 'published') await emitEp(c.env, 'podcast.episode.published', ep, show);
     else await emitEp(c.env, 'podcast.episode.updated', ep, show);
-    return { id: existing.id };
+    if (autoTranscribe) { await queueTranscript(c.env, existing.id, true); kick(c.env, c.executionCtx); }
+    return { id: existing.id, transcribing: autoTranscribe };
   }
   const eid = id();
   await insert(c.env, 'episodes', { id: eid, podcast_id: show.id, pub_id: show.pub_id, guid: crypto.randomUUID(), slug, ...fields, created_at: now() });
   if (status === 'published') await emitEp(c.env, 'podcast.episode.published', { id: eid, ...fields, slug }, show);
-  return { id: eid };
+  if (autoTranscribe) { await queueTranscript(c.env, eid); kick(c.env, c.executionCtx); }
+  return { id: eid, transcribing: autoTranscribe };
 }
 
 dash.post('/:id/episodes/new', async (c) => {
@@ -582,7 +700,7 @@ dash.post('/:id/episodes/new', async (c) => {
   if (!show) return c.notFound();
   const r = await saveEpisode(c, show, null);
   if (r.error) return back(c, `/app/podcasts/${show.id}/episodes/new`, r.error, 'err');
-  return back(c, `/app/podcasts/${show.id}/episodes/${r.id}`, 'Episode created');
+  return back(c, `/app/podcasts/${show.id}/episodes/${r.id}`, r.transcribing ? 'Episode created — the transcript is being generated in the background' : 'Episode created');
 });
 
 dash.post('/:id/episodes/:eid', async (c) => {
@@ -591,7 +709,7 @@ dash.post('/:id/episodes/:eid', async (c) => {
   if (!show || !ep) return c.notFound();
   const r = await saveEpisode(c, show, ep);
   if (r.error) return back(c, `/app/podcasts/${show.id}/episodes/${ep.id}`, r.error, 'err');
-  return back(c, `/app/podcasts/${show.id}/episodes/${ep.id}`, 'Episode saved');
+  return back(c, `/app/podcasts/${show.id}/episodes/${ep.id}`, r.transcribing ? 'Episode saved — the transcript is being generated in the background' : 'Episode saved');
 });
 
 dash.post('/:id/episodes/:eid/:action{archive|unarchive|delete|transcribe}', async (c) => {
@@ -614,16 +732,12 @@ dash.post('/:id/episodes/:eid/:action{archive|unarchive|delete|transcribe}', asy
       await emitEp(c.env, 'podcast.episode.deleted', ep, show);
       return back(c, base, 'Episode deleted');
     case 'transcribe': {
+      // "Regenerate": re-run the background job, replacing the current transcript.
       if (!aiEnabled(c.env)) return back(c, `${base}/episodes/${ep.id}`, AI_DISABLED_MSG + ' You can paste or upload a transcript instead.', 'err');
-      let audio: ArrayBuffer | null = null;
-      if (ep.audio_key) audio = (await (await c.env.MEDIA.get(ep.audio_key))?.arrayBuffer()) || null;
-      else if (ep.audio_url) audio = await fetch(ep.audio_url).then((r) => (r.ok ? r.arrayBuffer() : null)).catch(() => null);
-      if (!audio) return back(c, `${base}/episodes/${ep.id}`, 'Audio file not found', 'err');
-      if (audio.byteLength > 25 * 1024 * 1024) return back(c, `${base}/episodes/${ep.id}`, 'Audio is larger than 25 MB — upload a transcript file instead.', 'err');
-      const t = await aiTranscribe(c.env, audio);
-      if (!t.ok) return back(c, `${base}/episodes/${ep.id}`, t.text, 'err');
-      await run(c.env, 'UPDATE episodes SET transcript = ?, transcript_vtt = ?, updated_at = ? WHERE id = ?', t.text, t.vtt || null, now(), ep.id);
-      return back(c, `${base}/episodes/${ep.id}`, 'Transcript generated');
+      if (!ep.audio_key && !ep.audio_url) return back(c, `${base}/episodes/${ep.id}`, 'Upload audio first', 'err');
+      await queueTranscript(c.env, ep.id, true);
+      kick(c.env, c.executionCtx);
+      return back(c, `${base}/episodes/${ep.id}`, 'Transcription started in the background — refresh in a minute or two.');
     }
   }
   return c.notFound();
@@ -696,6 +810,7 @@ function feedXml(env: Env, pub: Publication, show: any, eps: any[], tok: string 
     guid: e.guid, title: e.title, description: e.description || '', enclosure: listenUrl(env, e.id, tok), mime: e.mime, size: e.size, duration: e.duration,
     season: e.season, number: e.number, episode_type: e.episode_type, explicit: e.explicit, image: e.image_url, published_at: e.published_at || e.created_at,
     link: `${base}/podcasts/${show.slug}/${e.slug}`, transcriptUrl: e.transcript ? `${base}/podcasts/${show.slug}/${e.slug}/transcript.txt` : null,
+    transcriptVttUrl: e.transcript_vtt ? `${base}/podcasts/${show.slug}/${e.slug}/transcript.vtt` : null,
   }));
   return buildFeed({
     title: show.title, description: show.description || pub.description, author: show.author || pub.name, owner_email: show.owner_email, cover_url: show.cover_url || pub.logo_url,
@@ -761,6 +876,14 @@ site.get('/podcasts/:show', async (c) => {
       </div>
     ),
   }));
+});
+
+site.get('/podcasts/:show/:episode/transcript.vtt', async (c) => {
+  const show = await showBySlug(c);
+  const ep = show && (await one<any>(c.env, `SELECT * FROM episodes WHERE podcast_id = ? AND slug = ? AND status = 'published'`, show.id, c.req.param('episode')));
+  if (!show || !ep || !ep.transcript_vtt) return c.text('Not found', 404);
+  if ((ep.premium || show.access === 'premium') && !canHearPremium(c)) return c.text('Premium', 403);
+  return c.body(ep.transcript_vtt, 200, { 'content-type': 'text/vtt; charset=utf-8' });
 });
 
 site.get('/podcasts/:show/:episode/transcript.txt', async (c) => {

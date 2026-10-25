@@ -13,7 +13,7 @@ import { SiteLayout, SiteMessage } from '../ui/site';
 import { siteUrl, senderFor } from '../lib/pub';
 import { storeFile, serveObject } from '../lib/media';
 import { emit } from '../lib/events';
-import { registerPeriodic, logError } from '../lib/jobs';
+import { registerPeriodic, registerJob, enqueue, kick, logError } from '../lib/jobs';
 import { createCheckout, onOrderPaid, applyOffer, stripeEnabled } from '../lib/payments';
 import { subscribe } from '../lib/subscribers';
 import { sendMail, sendTransactional, button } from '../lib/email';
@@ -281,7 +281,7 @@ dash.get('/', async (c) => {
 });
 
 function EventForm(p: { ev?: any; action: string; tiersExist?: boolean }) {
-  const e = p.ev || { kind: 'webinar', timezone: 'UTC', capacity: 10000, currency: 'usd', access: 'public', reminders: '[1440,60]', status: 'published', coaching: '{}' };
+  const e = p.ev || { kind: 'webinar', timezone: 'UTC', capacity: 10000, currency: 'usd', access: 'public', reminders: '[1440,60]', status: 'published', coaching: '{}', record_auto: 1 };
   const rem = remindersOf(e);
   const coach = parseJSON<any>(e.coaching, {});
   const avail: any[] = coach.availability || [];
@@ -303,6 +303,9 @@ function EventForm(p: { ev?: any; action: string; tiersExist?: boolean }) {
             <Field label="Ends"><input type="datetime-local" class="input" name="ends_local" value={utcToZoned(e.ends_at, e.timezone)} required /></Field>
           </Grid>
           <Field label="Timezone"><select class="input" name="timezone">{tzs.map((z) => <option value={z} selected={z === e.timezone}>{z.replace(/_/g, ' ')}</option>)}</select></Field>
+          <div data-show-kind="webinar">
+            <Check name="record_auto" checked={!!e.record_auto} label="Record automatically" hint="Recording starts when you go live and uploads in chunks during the session, so closing the tab never loses more than a few seconds. The replay is ready shortly after you end the event." />
+          </div>
           <div data-show-kind="in_person"><Field label="Location / address"><Input name="location" value={e.location} placeholder="Venue, street, city" /></Field></div>
           <div data-show-kind="coaching">
             <Card title="Coaching availability">
@@ -367,7 +370,7 @@ function eventFields(f: Record<string, any>) {
       title: str(f.title, 200) || 'Untitled event', description: sanitizeHtml(str(f.description, 20000), { blocks: true }), kind, cover_url: str(f.cover_url, 1000) || null,
       starts_at: starts, ends_at: ends, timezone: tz, location: str(f.location, 300) || null, capacity: Math.min(10000, Math.max(1, int(f.capacity, 10000))),
       price_cents: parsePrice(f.price, currency), currency, access: ['public', 'subscribers', 'premium'].includes(f.access) ? f.access : 'public',
-      reminders: JSON.stringify(reminders), status: ['published', 'unlisted', 'draft'].includes(f.status) ? f.status : 'published',
+      reminders: JSON.stringify(reminders), status: ['published', 'unlisted', 'draft'].includes(f.status) ? f.status : 'published', record_auto: bool(f.record_auto) ? 1 : 0,
       coaching: JSON.stringify({ duration_min: Math.max(10, int(f.duration_min, 30)), days_ahead: Math.min(90, Math.max(1, int(f.days_ahead, 14))), availability }),
     },
   };
@@ -739,6 +742,7 @@ dash.get('/:id/replay', async (c) => {
   if (!ev) return c.notFound();
   const pub = c.get('pub');
   const product = ev.replay_product_id ? await one<any>(c.env, 'SELECT * FROM products WHERE id = ?', ev.replay_product_id) : null;
+  const sessions = await all<any>(c.env, 'SELECT * FROM event_recordings WHERE event_id = ? ORDER BY started_at DESC LIMIT 20', ev.id);
   return c.html(
     <DashLayout c={c} title={ev.title} section="events" crumbs={[['/app/events', 'Events']]} scripts={EV_JS}>
       <EvTabs ev={ev} active={`/app/events/${ev.id}/replay`} />
@@ -750,12 +754,26 @@ dash.get('/:id/replay', async (c) => {
               <p class="muted small" style="margin-top:8px">Registrants can watch at <a href={`${evUrl(c.env, pub, ev)}/replay`} target="_blank">{evUrl(c.env, pub, ev)}/replay</a></p>
               <ActionForm action={`/app/events/${ev.id}/recording/delete`} label="Delete recording" kind="danger" confirm="Delete the recording?" />
             </>
-          ) : <p class="muted">Recordings are captured automatically from the studio when you click <strong>Record</strong>. You can also upload a video file.</p>}
+          ) : <p class="muted">{ev.record_auto ? <>Recording starts automatically when you go live in the studio and is uploaded while you stream.</> : <>Automatic recording is off for this event — click <strong>Record</strong> in the studio, or turn on “Record automatically” in Settings.</>} You can also upload a video file.</p>}
           <form method="post" action={`/app/events/${ev.id}/recording`} enctype="multipart/form-data" class="stack" style="margin-top:12px">
             <Field label={ev.recording_key ? 'Replace with a file' : 'Upload a recording'}><input type="file" name="file" accept="video/mp4,video/webm,video/quicktime" class="input" required /></Field>
             <div class="form-actions"><Btn kind="secondary">Upload</Btn></div>
           </form>
         </Card>
+        {sessions.length > 0 && (
+          <Card title="Studio recordings" pad={false}>
+            <Table rows={sessions} cols={[
+              { h: 'Started', r: (r) => fmtDate(r.started_at, { dateStyle: 'medium', timeStyle: 'short' }, ev.timezone) },
+              { h: 'Size', r: (r) => `${(r.bytes / 1048576).toFixed(1)} MB` },
+              { h: 'Status', r: (r) => <><Status s={r.status === 'recording' ? 'live' : r.status} />{r.auto ? <span class="muted small"> auto</span> : null}{r.key && r.key === ev.recording_key ? <span class="badge b-green" style="margin-left:6px">replay</span> : null}</> },
+              { h: '', r: (r) => <div class="row end">
+                {r.status === 'ready' && <a class="btn btn-ghost btn-sm" href={`/app/events/${ev.id}/recordings/${r.id}`} target="_blank">Play</a>}
+                {r.status === 'ready' && r.key !== ev.recording_key && <ActionForm action={`/app/events/${ev.id}/recordings/${r.id}/use`} label="Use as replay" />}
+                {r.status !== 'recording' && <ActionForm action={`/app/events/${ev.id}/recordings/${r.id}/delete`} label="Delete" kind="danger" confirm="Delete this recording?" />}
+              </div> },
+            ]} />
+          </Card>
+        )}
         <Card title="Sell the replay">
           {product ? (
             <>
@@ -828,8 +846,166 @@ dash.post('/:id/recording/delete', async (c) => {
   const ev = await getEvent(c, c.req.param('id'));
   if (!ev) return c.notFound();
   if (ev.recording_key) await c.env.MEDIA.delete(ev.recording_key).catch(() => {});
+  if (ev.recording_key) await run(c.env, 'DELETE FROM event_recordings WHERE event_id = ? AND key = ?', ev.id, ev.recording_key);
   await run(c.env, 'UPDATE live_events SET recording_key = NULL WHERE id = ?', ev.id);
   return back(c, `/app/events/${ev.id}/replay`, 'Recording deleted');
+});
+
+// ───────────────── studio recordings: chunked upload while live ─────────────────
+// The studio's MediaRecorder emits a chunk every few seconds; each chunk is stored as its own object right away, so a
+// closed tab or crashed browser loses at most the last few seconds. Finishing (or the stale sweep below) stitches the
+// chunks into one WebM object with an R2 multipart upload (uniform 8 MiB parts, resumable across job runs).
+const REC_PART = 8 * 1024 * 1024;
+const REC_MAX_CHUNK = 50 * 1024 * 1024;
+const recPrefix = (rec: { pub_id: string; id: string }) => `${rec.pub_id}/private/recordings/${rec.id}/`;
+const recChunkKey = (rec: { pub_id: string; id: string }, seq: number) => `${recPrefix(rec)}${String(seq).padStart(6, '0')}.part`;
+const recFinalKey = (rec: { pub_id: string; id: string; mime?: string }) => `${rec.pub_id}/private/recordings/${rec.id}.${(rec.mime || '').includes('mp4') ? 'mp4' : 'webm'}`;
+
+async function getRecording(c: Ctx, ev: any, rid: string) {
+  return one<any>(c.env, 'SELECT * FROM event_recordings WHERE id = ? AND event_id = ? AND pub_id = ?', rid, ev.id, ev.pub_id);
+}
+
+dash.post('/:id/recording/start', async (c) => {
+  const ev = await getEvent(c, c.req.param('id'));
+  if (!ev) return c.json({ error: 'not_found' }, 404);
+  const body = await c.req.json<any>().catch(() => ({}));
+  const mime = /^video\/(webm|mp4)/.test(String(body.mime || '')) ? String(body.mime).split(';')[0] : 'video/webm';
+  const rid = id();
+  await insert(c.env, 'event_recordings', { id: rid, event_id: ev.id, pub_id: ev.pub_id, status: 'recording', mime, parts: 0, bytes: 0, auto: body.auto ? 1 : 0, started_at: now(), updated_at: now() });
+  return c.json({ id: rid, chunkUrl: `/app/events/${ev.id}/recording/${rid}/chunk`, finishUrl: `/app/events/${ev.id}/recording/${rid}/finish` });
+});
+
+dash.post('/:id/recording/:rid/chunk', async (c) => {
+  const ev = await getEvent(c, c.req.param('id'));
+  const rec = ev && (await getRecording(c, ev, c.req.param('rid')));
+  if (!ev || !rec) return c.json({ error: 'not_found' }, 404);
+  if (rec.status !== 'recording') return c.json({ error: 'finished' }, 409);
+  const seq = Number(c.req.query('seq'));
+  if (!Number.isInteger(seq) || seq < 0 || seq > 100_000) return c.json({ error: 'bad_seq' }, 400);
+  const buf = await c.req.arrayBuffer();
+  if (!buf.byteLength) return c.json({ ok: true, empty: true });
+  if (buf.byteLength > REC_MAX_CHUNK) return c.json({ error: 'chunk_too_large' }, 413);
+  const key = recChunkKey(rec, seq);
+  const existed = await c.env.MEDIA.head(key);
+  await c.env.MEDIA.put(key, buf, { httpMetadata: { contentType: rec.mime } });
+  await run(c.env, 'UPDATE event_recordings SET parts = MAX(parts, ?), bytes = bytes + ?, updated_at = ? WHERE id = ?', seq + 1, existed ? buf.byteLength - existed.size : buf.byteLength, now(), rec.id);
+  return c.json({ ok: true, seq });
+});
+
+dash.post('/:id/recording/:rid/finish', async (c) => {
+  const ev = await getEvent(c, c.req.param('id'));
+  const rec = ev && (await getRecording(c, ev, c.req.param('rid')));
+  if (!ev || !rec) return c.json({ error: 'not_found' }, 404);
+  if (rec.status === 'recording') {
+    await run(c.env, `UPDATE event_recordings SET status = 'finalizing', updated_at = ? WHERE id = ? AND status = 'recording'`, now(), rec.id);
+    // A beacon from a closing tab may arrive before the last chunk lands: give stragglers a moment.
+    await enqueue(c.env, 'event.recording.finalize', { id: rec.id }, now() + (c.req.query('late') ? 30_000 : 2_000));
+    kick(c.env, c.executionCtx);
+  }
+  return c.json({ ok: true });
+});
+
+dash.get('/:id/recordings/:rid', async (c) => {
+  const ev = await getEvent(c, c.req.param('id'));
+  const rec = ev && (await getRecording(c, ev, c.req.param('rid')));
+  if (!ev || !rec || !rec.key) return c.notFound();
+  return serveObject(c.env, rec.key, c.req.raw, { 'cache-control': 'private, max-age=600' });
+});
+
+dash.post('/:id/recordings/:rid/:action{use|delete}', async (c) => {
+  const ev = await getEvent(c, c.req.param('id'));
+  const rec = ev && (await getRecording(c, ev, c.req.param('rid')));
+  if (!ev || !rec) return c.notFound();
+  if (c.req.param('action') === 'use') {
+    if (rec.status !== 'ready' || !rec.key) return back(c, `/app/events/${ev.id}/replay`, 'That recording is not ready yet', 'err');
+    await run(c.env, 'UPDATE live_events SET recording_key = ? WHERE id = ?', rec.key, ev.id);
+    return back(c, `/app/events/${ev.id}/replay`, 'Replay updated');
+  }
+  if (rec.key) await c.env.MEDIA.delete(rec.key).catch(() => {});
+  await deleteRecChunks(c.env, rec);
+  if (rec.key && ev.recording_key === rec.key) await run(c.env, 'UPDATE live_events SET recording_key = NULL WHERE id = ?', ev.id);
+  await run(c.env, 'DELETE FROM event_recordings WHERE id = ?', rec.id);
+  return back(c, `/app/events/${ev.id}/replay`, 'Recording deleted');
+});
+
+async function deleteRecChunks(env: Env, rec: any) {
+  const keys: string[] = [];
+  for (let i = 0; i < rec.parts; i++) keys.push(recChunkKey(rec, i));
+  for (let i = 0; i < keys.length; i += 500) await env.MEDIA.delete(keys.slice(i, i + 500)).catch(() => {});
+}
+
+async function readChunk(env: Env, rec: any, seq: number): Promise<Uint8Array | null> {
+  const o = await env.MEDIA.get(recChunkKey(rec, seq));
+  return o ? new Uint8Array(await o.arrayBuffer()) : null;
+}
+
+/** Stitch uploaded chunks into one object. Resumable: progress (uploadId, uploaded parts, next byte) is saved per part. */
+registerJob('event.recording.finalize', async (env, p) => {
+  const rec = await one<any>(env, 'SELECT * FROM event_recordings WHERE id = ?', p.id);
+  if (!rec || rec.status === 'ready' || rec.status === 'empty') return;
+  await run(env, `UPDATE event_recordings SET status = 'finalizing', updated_at = ? WHERE id = ?`, now(), rec.id);
+  if (!rec.parts || !rec.bytes) {
+    await run(env, `UPDATE event_recordings SET status = 'empty', updated_at = ? WHERE id = ?`, now(), rec.id);
+    return;
+  }
+  const finalKey = recFinalKey(rec);
+  const bucket = env.MEDIA as R2Bucket & { createMultipartUpload?: R2Bucket['createMultipartUpload'] };
+  const started = Date.now();
+  let size = 0;
+  if (typeof bucket.createMultipartUpload === 'function') {
+    const prog = parseJSON<{ uploadId: string | null; i: number; off: number; parts: R2UploadedPart[]; size: number }>(rec.progress, { uploadId: null, i: 0, off: 0, parts: [], size: 0 });
+    const mpu = prog.uploadId ? bucket.resumeMultipartUpload(finalKey, prog.uploadId) : await bucket.createMultipartUpload(finalKey, { httpMetadata: { contentType: rec.mime } });
+    prog.uploadId = mpu.uploadId;
+    while (prog.i < rec.parts) {
+      const pieces: Uint8Array[] = [];
+      let total = 0, i = prog.i, off = prog.off;
+      while (total < REC_PART && i < rec.parts) {
+        const bytes = await readChunk(env, rec, i);
+        if (!bytes) { i++; off = 0; continue; }
+        const rest = bytes.subarray(off);
+        const need = REC_PART - total;
+        if (rest.length <= need) { pieces.push(rest); total += rest.length; i++; off = 0; }
+        else { pieces.push(rest.subarray(0, need)); total += need; off += need; }
+      }
+      if (!total) { prog.i = i; prog.off = 0; break; }
+      const part = new Uint8Array(total);
+      let o = 0;
+      for (const pc of pieces) { part.set(pc, o); o += pc.length; }
+      prog.parts.push(await mpu.uploadPart(prog.parts.length + 1, part));
+      prog.size += total;
+      prog.i = i; prog.off = off;
+      await run(env, 'UPDATE event_recordings SET progress = ?, updated_at = ? WHERE id = ?', JSON.stringify(prog), now(), rec.id);
+      if (Date.now() - started > 20_000 && prog.i < rec.parts) return { retryInMs: 0 };
+    }
+    await mpu.complete(prog.parts);
+    size = prog.size;
+  } else {
+    // D1 storage fallback (no R2 multipart): concatenate in memory. Fine for demos, not for long webinars.
+    const pieces: Uint8Array[] = [];
+    for (let i = 0; i < rec.parts; i++) { const b = await readChunk(env, rec, i); if (b) pieces.push(b); }
+    size = pieces.reduce((n, b) => n + b.length, 0);
+    const all = new Uint8Array(size);
+    let o = 0;
+    for (const b of pieces) { all.set(b, o); o += b.length; }
+    await env.MEDIA.put(finalKey, all, { httpMetadata: { contentType: rec.mime } });
+  }
+  await run(env, `UPDATE event_recordings SET status = 'ready', key = ?, bytes = ?, progress = NULL, updated_at = ? WHERE id = ?`, finalKey, size, now(), rec.id);
+  await deleteRecChunks(env, rec);
+  // Becomes the replay unless one exists that is a manual upload or a longer studio recording.
+  const ev = await one<any>(env, 'SELECT id, recording_key FROM live_events WHERE id = ?', rec.event_id);
+  if (ev) {
+    const cur = ev.recording_key ? await one<any>(env, 'SELECT bytes FROM event_recordings WHERE key = ?', ev.recording_key) : null;
+    if (!ev.recording_key || (cur && cur.bytes < size)) await run(env, 'UPDATE live_events SET recording_key = ? WHERE id = ?', finalKey, ev.id);
+  }
+});
+
+// Sessions whose browser went away without finishing: stitch whatever arrived.
+registerPeriodic('events.recordings.stale', 2 * MIN, async (env) => {
+  const stale = await all<any>(env, `SELECT id FROM event_recordings WHERE (status = 'recording' AND updated_at < ?) OR (status = 'finalizing' AND updated_at < ?) LIMIT 20`, now() - 5 * MIN, now() - 30 * MIN);
+  for (const r of stale) {
+    await run(env, `UPDATE event_recordings SET status = 'finalizing', updated_at = ? WHERE id = ?`, now(), r.id);
+    await enqueue(env, 'event.recording.finalize', { id: r.id });
+  }
 });
 
 const LiveRoomUI = (p: { cfg: Record<string, unknown>; host: boolean; title: string; pinnedNote?: string }) => (
@@ -881,7 +1057,7 @@ dash.get('/:id/studio', async (c) => {
   return c.html(
     <DashLayout c={c} title={`Studio · ${ev.title}`} section="events" crumbs={[['/app/events', 'Events'], [`/app/events/${ev.id}`, ev.title]]} styles={['/static/live.css']} scripts={['/static/live.js']} wide
       actions={<LinkBtn href={`${evUrl(c.env, pub, ev)}`} target="_blank">Attendee page</LinkBtn>}>
-      <LiveRoomUI host title={ev.title} cfg={await liveCfg(c.env, pub, ev, { ws: `/live/${ev.id}`, role: 'host', recordUrl: `/app/events/${ev.id}/recording`, status: ev.stream_status })} />
+      <LiveRoomUI host title={ev.title} cfg={await liveCfg(c.env, pub, ev, { ws: `/live/${ev.id}`, role: 'host', recordUrl: `/app/events/${ev.id}/recording`, recordBase: `/app/events/${ev.id}/recording`, autoRecord: !!ev.record_auto, status: ev.stream_status })} />
     </DashLayout>,
   );
 });

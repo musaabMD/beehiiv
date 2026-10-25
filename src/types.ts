@@ -27,6 +27,9 @@ export interface Env {
   REALTIME_APP_TOKEN?: string;
   REALTIME_API_BASE?: string; // override for testing / self-hosted SFU
   GIPHY_API_KEY?: string;     // GIF search in the editor (or per-publication in Integrations)
+  DISCORD_CLIENT_ID?: string;     // Discord OAuth2 app for verified member linking (or per publication in Community → Settings)
+  DISCORD_CLIENT_SECRET?: string;
+  DISCORD_API_BASE?: string;      // override for testing (default https://discord.com/api)
 }
 
 export type Role = 'owner' | 'admin' | 'member' | 'contributor';

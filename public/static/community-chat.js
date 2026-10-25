@@ -133,7 +133,7 @@
         case 'reactions': { const x = S.msgs.get(m.id); if (x) { x.reactions = m.reactions; upsert(x); } break; }
         case 'typing': if (m.key !== me.key) { S.typing.set(m.key, { name: m.name, at: Date.now() }); renderTyping(); } break;
         case 'presence': S.online = m.online; renderOnline(); break;
-        case 'room': if (m.room?.name) $('.cc-title', root).textContent = (m.room.kind === 'group' ? '' : '#') + m.room.name; break;
+        case 'room': if (m.room?.name) $('.cc-title', root).textContent = (m.room.kind === 'public' ? '#' : '') + m.room.name; break;
         case 'muted': S.mutedUntil = m.until; applyMuted(); break;
         case 'banned': S.banned = true; applyMuted(); status(m.reason || 'You were removed from this chat.', 'err'); break;
         case 'error':

@@ -56,7 +56,7 @@ export interface FeedShow {
 }
 export interface FeedEpisode {
   guid: string; title: string; description: string; enclosure: string; mime: string; size: number; duration: number; season: number | null; number: number | null;
-  episode_type: string; explicit: number; image: string | null; published_at: number; link: string; transcriptUrl: string | null;
+  episode_type: string; explicit: number; image: string | null; published_at: number; link: string; transcriptUrl: string | null; transcriptVttUrl?: string | null;
 }
 
 export function buildFeed(show: FeedShow, eps: FeedEpisode[], opts: { privateFeed?: boolean } = {}): string {
@@ -75,7 +75,7 @@ export function buildFeed(show: FeedShow, eps: FeedEpisode[], opts: { privateFee
       <enclosure url="${x(e.enclosure)}" length="${e.size || 0}" type="${x(e.mime || 'audio/mpeg')}"/>
       <itunes:duration>${Math.round(e.duration || 0)}</itunes:duration>
       <itunes:episodeType>${x(e.episode_type || 'full')}</itunes:episodeType>${e.season ? `\n      <itunes:season>${e.season}</itunes:season>` : ''}${e.number ? `\n      <itunes:episode>${e.number}</itunes:episode>` : ''}
-      <itunes:explicit>${e.explicit ? 'true' : 'false'}</itunes:explicit>${e.image ? `\n      <itunes:image href="${x(e.image)}"/>` : ''}${e.transcriptUrl ? `\n      <podcast:transcript url="${x(e.transcriptUrl)}" type="text/plain"/>` : ''}
+      <itunes:explicit>${e.explicit ? 'true' : 'false'}</itunes:explicit>${e.image ? `\n      <itunes:image href="${x(e.image)}"/>` : ''}${e.transcriptUrl ? `\n      <podcast:transcript url="${x(e.transcriptUrl)}" type="text/plain"/>` : ''}${e.transcriptVttUrl ? `\n      <podcast:transcript url="${x(e.transcriptVttUrl)}" type="text/vtt"/>` : ''}
     </item>`).join('');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:podcast="https://podcastindex.org/namespace/1.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom">
@@ -187,4 +187,88 @@ export function detectDevice(ua: string | null | undefined): string {
   if (/CarPlay|Android Auto/i.test(u)) return 'Car';
   if (/Windows|Macintosh|Mac OS X|Linux|X11/i.test(u)) return 'Desktop';
   return 'Other';
+}
+
+// ───────── MP3 frame walking (frame-safe byte-range chunking for transcription) ─────────
+const BR_V1_L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+const BR_V2_L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+const SR: Record<number, number[]> = { 3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000] };
+
+/** Parse an MPEG audio Layer III frame header at `p`. Returns frame length (bytes) and duration (seconds), or null. */
+export function mp3Frame(b: Uint8Array, p: number): { len: number; sec: number } | null {
+  if (p + 4 > b.length || b[p] !== 0xff || (b[p + 1] & 0xe0) !== 0xe0) return null;
+  const ver = (b[p + 1] >> 3) & 3; // 0 = 2.5, 2 = 2, 3 = 1
+  const layer = (b[p + 1] >> 1) & 3; // 1 = Layer III
+  if (ver === 1 || layer !== 1) return null;
+  const bi = (b[p + 2] >> 4) & 15;
+  const si = (b[p + 2] >> 2) & 3;
+  if (bi === 0 || bi === 15 || si === 3) return null;
+  const pad = (b[p + 2] >> 1) & 1;
+  const sr = SR[ver][si];
+  const kbps = (ver === 3 ? BR_V1_L3 : BR_V2_L3)[bi];
+  const len = ver === 3 ? Math.floor((144000 * kbps) / sr) + pad : Math.floor((72000 * kbps) / sr) + pad;
+  return len > 4 ? { len, sec: (ver === 3 ? 1152 : 576) / sr } : null;
+}
+
+/** Size of a leading ID3v2 tag (0 if none). */
+export function id3Size(b: Uint8Array): number {
+  if (b.length < 10 || b[0] !== 0x49 || b[1] !== 0x44 || b[2] !== 0x33) return 0;
+  const size = ((b[6] & 0x7f) << 21) | ((b[7] & 0x7f) << 14) | ((b[8] & 0x7f) << 7) | (b[9] & 0x7f);
+  return 10 + size + (b[5] & 0x10 ? 10 : 0);
+}
+
+/** First offset >= from where a valid frame is followed by another valid frame (robust resync). */
+export function mp3Sync(b: Uint8Array, from = 0): number {
+  for (let p = from; p + 4 <= b.length; p++) {
+    const f = mp3Frame(b, p);
+    if (!f) continue;
+    if (p + f.len + 4 > b.length || mp3Frame(b, p + f.len)) return p;
+  }
+  return -1;
+}
+
+/**
+ * Pick a frame-aligned slice of a window `b` read from an MP3 file, at most `target` bytes of audio.
+ * Returns where audio starts in the window, the exclusive cut point, and the slice's audio duration.
+ * With `last`, the slice runs to the end of the window.
+ */
+export function mp3Slice(b: Uint8Array, target: number, last: boolean): { start: number; end: number; sec: number } | null {
+  let start = mp3Sync(b, 0);
+  if (start < 0) return null;
+  // Skip a Xing/Info/VBRI header frame: it carries the whole file's duration, which would mislabel this slice.
+  const first = mp3Frame(b, start)!;
+  const tag = String.fromCharCode(...b.subarray(start + 4, Math.min(start + 40, b.length)));
+  if (/Xing|Info|VBRI/.test(tag) && start + first.len < b.length) start += first.len;
+  let p = start, sec = 0;
+  while (p < b.length) {
+    const f = mp3Frame(b, p);
+    if (!f) {
+      const q = mp3Sync(b, p + 1);
+      if (q < 0) break;
+      p = q;
+      continue;
+    }
+    if (p + f.len > b.length) break;
+    if (!last && p + f.len - start > target) break;
+    p += f.len;
+    sec += f.sec;
+  }
+  return p > start ? { start, end: last ? b.length : p, sec } : null;
+}
+
+export function isMp3(mime: string | null | undefined, key: string | null | undefined): boolean {
+  return /mpeg|mp3/i.test(mime || '') || /\.mp3$/i.test(key || '');
+}
+
+/** Shift every WebVTT timestamp by `offset` seconds and drop the WEBVTT header (for concatenating chunk VTTs). */
+export function shiftVtt(vtt: string, offset: number): string {
+  const fmt = (s: number) => {
+    const ms = Math.round(s * 1000);
+    const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000), sec = Math.floor((ms % 60000) / 1000), r = ms % 1000;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${String(r).padStart(3, '0')}`;
+  };
+  return vtt
+    .replace(/^﻿?WEBVTT[^\n]*\n+/, '')
+    .replace(/(?:(\d+):)?(\d{1,2}):(\d{2})\.(\d{3})/g, (_m, h, mi, s, ms) => fmt((Number(h) || 0) * 3600 + Number(mi) * 60 + Number(s) + Number(ms) / 1000 + offset))
+    .trim();
 }
