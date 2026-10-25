@@ -26,6 +26,11 @@ export interface Env {
   REALTIME_APP_TOKEN?: string;
   REALTIME_API_BASE?: string; // override for testing / self-hosted SFU
   GIPHY_API_KEY?: string;     // GIF search in the editor (or per-publication in Integrations)
+  // Inbound mail (Email Routing → email() handler). See docs/DELIVERABILITY.md.
+  INBOUND_FORWARD_TO?: string;  // verified destination for human replies that reach a routed address (otherwise rejected)
+  BOUNCE_ADDRESS?: string;      // shown in Settings → Email; default bounces@<MAIL_FROM domain>
+  FBL_ADDRESS?: string;         // address you register with mailbox-provider FBLs; default fbl@<MAIL_FROM domain>
+  MAIL_FROM_WARMUP?: string;    // 'off' disables warm-up caps for the default MAIL_FROM domain
 }
 
 export type Role = 'owner' | 'admin' | 'member' | 'contributor';

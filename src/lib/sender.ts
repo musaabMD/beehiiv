@@ -107,9 +107,14 @@ export async function buildEmail(env: Env, pub: Publication, c: Content, sub: Su
 }
 
 // ───────── warmup & blocklist ─────────
-/** Daily cap for a sending domain under warmup: 200 → doubles daily → unlimited after day 12. */
+/**
+ * Daily cap for a sending domain under warmup: 200 → doubles daily → unlimited after day 12.
+ * Applies to publications' custom email domains and to the default MAIL_FROM domain (lib/domains platform_domains).
+ */
 export async function warmupAllowance(env: Env, fromEmail: string): Promise<{ ok: boolean; reason?: string; remaining: number }> {
-  const dom = await one<any>(env, `SELECT * FROM domains WHERE hostname = ? AND kind = 'email'`, domainOf(fromEmail));
+  const host = domainOf(fromEmail);
+  const dom = (await one<any>(env, `SELECT * FROM domains WHERE hostname = ? AND kind = 'email'`, host))
+    || (await (await import('./domains')).platformWarmupDomain(env, host));
   if (!dom) return { ok: true, remaining: Infinity };
   if (dom.blocklisted) return { ok: false, reason: `Sending domain ${dom.hostname} is on a blocklist — sending paused`, remaining: 0 };
   if (!dom.warmup_started_at) return { ok: true, remaining: Infinity };

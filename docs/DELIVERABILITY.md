@@ -18,7 +18,7 @@ Every marketing email carries `List-Unsubscribe` (HTTPS + mailto) and `List-Unsu
 
 ## Complaint tracking per newsletter
 
-Each message has a `Feedback-ID` header (`campaign:publication:type:openhive`) so Gmail Postmaster Tools reports complaint rates per newsletter and per campaign.
+Cloudflare Email Sending sets the `Feedback-ID` header itself (Gmail Postmaster Tools reputation feedback) and rejects sends that try to set it. OpenHive tags every message with `X-OpenHive-Feedback-ID: campaign:publication:kind:openhive` and `X-OpenHive-Campaign: <send id>` instead. Bounce and complaint reports quote these headers, which is how a report is traced back to the publication, the campaign and the kind of mail (newsletter or transactional).
 
 ## Validation before the list
 
@@ -33,48 +33,97 @@ Every signup — forms, embeds, magic links, imports, API — goes through:
 
 ## Suppression model
 
-| Layer | What goes there | Effect |
+| Layer | What goes there | Blocks |
 |---|---|---|
-| Global | hard bounces, policy blocks, spam-trap style failures | never emailed again by any publication |
-| Publication | unsubscribes, complaints | that publication stops emailing them |
-| Transactional | addresses that asked for no transactional mail | blocks login links/receipts only |
+| Global | hard bounces, policy blocks, complaints that can't be tied to a publication, mailbox-full / DNS / repeated-soft (temporary) | all newsletters from every publication; **transactional mail only for "mailbox does not exist"** (`hard_bounce`), manual and Cloudflare-suppressed entries |
+| Publication | unsubscribes, complaints | that publication's newsletters |
+| Transactional | bounces and complaints **of transactional mail** (login links, receipts, confirmations), plus manual entries | transactional mail only |
 
-Entries can be **temporary** (mailbox full: 3 days, DNS failure: 7 days, repeated soft bounces: 14 days) or **permanent**. Expired temporary entries are ignored automatically.
+So a reader who marks a newsletter as spam stops getting newsletters but still receives their login link and receipts, while an address whose login link hard-bounced is not mailed again. Entries can be **temporary** (mailbox full: 3 days, DNS failure: 7 days, repeated soft bounces: 14 days) or **permanent**. Expired temporary entries are ignored automatically. Settings → Email shows every layer and lets admins add or lift entries.
 
 ## Bounce handling
 
-Errors are classified as hard, soft, mailbox full, DNS failure, policy or complaint.
+Errors are classified as hard, soft, mailbox full, DNS failure, policy or complaint (enhanced status codes `5.x.x` are always permanent).
 
-- Hard and policy bounces → global permanent suppression, subscriber marked bounced.
-- Soft bounces and deferrals → retried with backoff (15 min doubling, max 6 h) for **26 hours** before being recorded as a bounce.
-- Mailbox full / DNS → temporary suppression.
+| Bounce of… | Hard | Policy | Complaint | Mailbox full / DNS |
+|---|---|---|---|---|
+| a newsletter / automation email | global, subscriber → bounced | global (newsletters only) | publication layer, subscriber → complained | global, temporary |
+| a transactional email | transactional + global, subscriber → bounced | transactional | transactional | transactional, temporary |
 
-### Bounce webhook
+Soft bounces and deferrals are retried with backoff (15 min doubling, max 6 h) for **26 hours** before being recorded as a bounce. Synchronous failures from the send call are recorded immediately; asynchronous bounces and complaints arrive through the channels below. Every report received is listed under Settings → Email → Inbound reports.
 
-Point any bounce source at:
+## Receiving bounces and complaints
+
+Cloudflare Email Sending owns the envelope sender (`Return-Path` is its bounce processor and can't be changed), so bounce messages don't come back to you by themselves. OpenHive gives you three ways in; all of them feed the same classification and suppression code (`src/lib/inbound.ts`).
+
+### 1. Email Sending events → Queue (recommended for bounces and complaints)
+
+Cloudflare publishes `message.bounced`, `message.complained`, `message.rejected` and `message.deferred` events for every sending domain. The Worker's `queue()` handler consumes them and matches each event to the original message by Message-ID.
+
+```bash
+npx wrangler queues create email-events
+npx wrangler queues create email-events-dlq
+```
+
+Add to `wrangler.jsonc` and deploy:
+
+```jsonc
+"queues": {
+  "consumers": [{ "queue": "email-events", "max_batch_size": 10, "max_retries": 3, "dead_letter_queue": "email-events-dlq" }]
+}
+```
+
+Then in the Cloudflare dashboard: **Queues → email-events → Subscriptions → Subscribe to events**, source **Email Sending**, pick your sending domain (repeat per domain) and the events `message.bounced`, `message.complained`, `message.rejected` (optionally `message.deferred` for the log).
+
+### 2. Email Routing → the Worker's `email()` handler (FBL reports, stray bounces, mailto: unsubscribes)
+
+Feedback-loop programs email ARF reports to an address you register, some mail servers send bounces to the From address, and every newsletter's `List-Unsubscribe` header includes `mailto:<sender>?subject=unsubscribe`. Route those addresses to the Worker:
+
+1. Cloudflare dashboard → your sending domain → **Email → Email Routing** → enable it (adds MX + SPF records for receiving).
+2. **Routing rules → Create address**: `fbl@yourdomain.com` → action **Send to a Worker** → `openhive`. Do the same for `bounces@yourdomain.com`.
+3. Optional but recommended: route your sender address (e.g. `newsletter@yourdomain.com`) to the Worker too, so `mailto:` unsubscribes and bounces sent to the From address are processed. Human replies that reach it are forwarded to `INBOUND_FORWARD_TO` (a verified Email Routing destination, set as a var) or rejected with a polite message when it isn't set. Auto-replies (out-of-office) are dropped. Readers normally reply to the publication's Reply-To address, which is unaffected.
+
+The handler recognizes:
+
+- **DSNs** (`multipart/report; report-type=delivery-status`, RFC 3464) and common non-standard bounce formats → bounces. `Action: delayed` is logged only.
+- **ARF reports** (`multipart/report; report-type=feedback-report`, RFC 5965) → complaints. When a provider redacts the recipient, the unsubscribe token in the quoted `List-Unsubscribe` header identifies the subscriber.
+- **`unsubscribe`** subject lines sent to a publication's sender address → that publication unsubscribes the sender.
+
+Inbound mail is unauthenticated, so the handler only suppresses addresses this instance actually emailed in the last 45 days; anything else is logged as ignored. The addresses shown in Settings → Email default to `bounces@` and `fbl@` on the `MAIL_FROM` domain; override them with the `BOUNCE_ADDRESS` / `FBL_ADDRESS` vars if you route different ones.
+
+Test locally with `wrangler dev`:
+
+```bash
+curl -X POST 'http://localhost:8787/cdn-cgi/local/email?from=MAILER-DAEMON@mx.example.net&to=bounces@yourdomain.com' --data-binary @bounce.eml
+```
+
+### 3. HTTP hooks (other sources)
 
 ```
 POST https://YOUR_APP/hooks/bounce?key=<hooks key>
 Content-Type: application/json
-{"email": "x@example.com", "type": "bounce", "diagnostic": "550 5.1.1 user unknown"}
+{"email": "x@example.com", "type": "bounce", "diagnostic": "550 5.1.1 user unknown", "kind": "marketing"}
 ```
 
-DSN messages (text/plain) are also accepted. The hooks key is shown in Settings → Email.
+`type` is `bounce` or `complaint`; `kind` (`marketing` | `transactional`) picks the suppression layer and is inferred from the outbox when omitted. A raw DSN body is accepted too. `POST /hooks/fbl?key=…` takes a raw ARF report. The hooks key is shown in Settings → Email.
 
 ## Feedback loops (FBL)
 
-Register your sending domain with each provider's complaint program and forward ARF reports to `https://YOUR_APP/hooks/fbl?key=<hooks key>`:
+Register your sending domain with each provider's complaint program and use `fbl@yourdomain.com` (routed to the Worker, above) as the report address:
 
-1. **Gmail** — add the domain to [Google Postmaster Tools](https://postmaster.google.com) (verify with a TXT record). Gmail reports complaint *rates* there (via Feedback-ID) rather than per-message reports.
-2. **Yahoo / AOL** — sign up at the Yahoo Sender Hub Complaint Feedback Loop with your DKIM domain. Route the report mailbox to the FBL endpoint (Cloudflare Email Routing → Worker, or any forwarder that POSTs the raw message).
+1. **Gmail** — add the domain to [Google Postmaster Tools](https://postmaster.google.com) (verify with a TXT record). Gmail reports complaint *rates* there rather than per-message reports.
+2. **Yahoo / AOL** — sign up at the Yahoo Sender Hub Complaint Feedback Loop with your DKIM domain.
 3. **Microsoft (Outlook/Hotmail)** — enroll in JMRP and SNDS at sendersupport.olc.protection.outlook.com.
 4. Others (Comcast, Fastmail, Zoho…) — most use the Validity Universal FBL.
 
-Every complaint becomes a publication suppression and is linked to the send through the `X-OpenHive-Campaign` header.
+Complaints Cloudflare receives itself arrive as `message.complained` events (option 1). Every complaint becomes a publication suppression and is linked to the send through the `X-OpenHive-Campaign` header.
 
 ## Warmup
 
-New sending domains get a daily cap that doubles each day: 200 → 400 → 800 … and is lifted after day 12. Start warmup in Settings → Domains. Sends that hit the cap pause and resume automatically the next hour.
+New sending domains get a daily cap that doubles each day: 200 → 400 → 800 … and is lifted after day 12. Sends that hit the cap pause and resume automatically the next hour.
+
+- **Custom domains** start warming up when they're verified in Settings → Domains.
+- **The default `MAIL_FROM` domain** is warmed up too, without being added as a custom domain. Its clock starts at the first email the instance ever sent from it (taken from the outbox), so upgrading an instance that has been sending for weeks doesn't suddenly cap it. Settings → Email shows today's cap; instance operators (`SUPERADMIN_EMAILS`) can restart the schedule after moving `MAIL_FROM` to a new domain. Set the var `MAIL_FROM_WARMUP=off` to disable it. It is also checked against blocklists, and operators are alerted when it's listed.
 
 Tips: send to your most engaged subscribers first (create a segment "opened in the last 30 days") and keep complaint rates under 0.1%.
 
@@ -90,6 +139,7 @@ Opens and clicks from security scanners, link prefetchers and bots are recorded 
 
 - [ ] SPF, DKIM and DMARC pass (Settings → Domains shows green)
 - [ ] Postmaster Tools verified, FBLs registered
+- [ ] Email Sending events queue subscribed and `fbl@` / `bounces@` routed to the Worker (Settings → Email → Inbound reports shows them arriving)
 - [ ] Domain warmup started at least a week ago for new domains
 - [ ] Imported lists were opted in, and cold addresses removed
 - [ ] Physical address set in Settings → Publication (CAN-SPAM)

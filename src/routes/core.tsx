@@ -7,7 +7,7 @@ import { serveObject } from '../lib/media';
 import { recordOpen, recordClick } from '../lib/tracking';
 import { verifySubToken, unsubscribe, joinLists, leaveLists, getSubscriber } from '../lib/subscribers';
 import { markPaid, verifyStripeSignature } from '../lib/payments';
-import { recordBounce, classifyBounce, suppress } from '../lib/email';
+import { processBounceHook, processFblHook } from '../lib/inbound';
 import { emit } from '../lib/events';
 import { siteUrl } from '../lib/pub';
 import { PlainLayout } from '../ui/layout';
@@ -200,9 +200,10 @@ root.post('/hooks/stripe', async (c) => {
 });
 
 /**
- * Inbound bounce / complaint / feedback-loop processing.
- * Accepts JSON {email, type?: 'bounce'|'complaint', diagnostic?: string, pub_id?} or ARF reports (text) from mailbox provider FBLs.
- * Protect with ?key=<first 16 chars of sha256(APP_URL)> (shown in Settings → Email).
+ * Inbound bounce / complaint / feedback-loop processing — the same code the Worker email() and queue() handlers run
+ * (lib/inbound.ts). /hooks/bounce: JSON {email, type?: 'bounce'|'complaint', status?, diagnostic?, pub_id?,
+ * kind?: 'marketing'|'transactional'} (or an array), or a raw DSN. /hooks/fbl: a raw ARF report.
+ * Protect with ?key=<first 16 chars of sha256(APP_URL + ':hooks')> (shown in Settings → Email).
  */
 async function hookKey(env: any) {
   const { sha256 } = await import('../lib/util');
@@ -211,38 +212,13 @@ async function hookKey(env: any) {
 
 root.post('/hooks/bounce', async (c) => {
   if (c.req.query('key') !== (await hookKey(c.env))) return c.text('forbidden', 403);
-  const ct = c.req.header('content-type') || '';
-  const items: Array<{ email: string; type?: string; diagnostic?: string; pub_id?: string }> = [];
-  if (ct.includes('json')) {
-    const j: any = await c.req.json();
-    for (const x of Array.isArray(j) ? j : [j]) items.push(x);
-  } else {
-    const text = await c.req.text();
-    for (const m of text.matchAll(/(?:Final-Recipient|Original-Rcpt-To|Original-Recipient):\s*(?:rfc822;)?\s*<?([^\s>;]+@[^\s>;]+)/gi)) items.push({ email: m[1], diagnostic: text.match(/Diagnostic-Code:\s*(.+)/i)?.[1] || text.match(/Status:\s*(\S+)/i)?.[1] || '' });
-  }
-  for (const it of items) {
-    const cls = it.type === 'complaint' ? { type: 'complaint' as const } : classifyBounce(it.diagnostic || 'hard');
-    await recordBounce(c.env, it.email, it.pub_id || null, cls.type, it.diagnostic || '');
-    await run(c.env, `UPDATE deliveries SET status = ?, bounce_type = ? WHERE id = (SELECT id FROM deliveries WHERE email = ? ORDER BY created_at DESC LIMIT 1)`, cls.type === 'complaint' ? 'complained' : 'bounced', cls.type, it.email.toLowerCase());
-  }
-  return c.json({ processed: items.length });
+  return c.json(await processBounceHook(c.env, c.req.header('content-type') || '', await c.req.text()));
 });
 
-// Feedback loop (ARF) reports → complaint suppression for the publication found via Feedback-ID / campaign header
+// Feedback loop (ARF) reports → complaint suppression for the publication found via X-OpenHive-Feedback-ID / campaign header
 root.post('/hooks/fbl', async (c) => {
   if (c.req.query('key') !== (await hookKey(c.env))) return c.text('forbidden', 403);
-  const text = await c.req.text();
-  const emails = [...new Set([...text.matchAll(/(?:Original-Rcpt-To|Removal-Recipient|^To):\s*<?([^\s>]+@[^\s>]+)/gim)].map((m) => m[1].toLowerCase()))];
-  const fid = text.match(/Feedback-ID:\s*([^\r\n]+)/i)?.[1] || '';
-  const campaign = text.match(/X-OpenHive-Campaign:\s*(\S+)/i)?.[1] || fid.split(':')[0];
-  let pubId = fid.split(':')[1] || '';
-  if (!pubId && campaign) pubId = (await one<any>(c.env, 'SELECT pub_id FROM sends WHERE id = ?', campaign))?.pub_id || '';
-  for (const e of emails) {
-    await recordBounce(c.env, e, pubId || null, 'complaint', 'fbl');
-    if (!pubId) await suppress(c.env, e, 'global', 'fbl');
-    if (campaign) await run(c.env, `UPDATE deliveries SET status = 'complained', bounce_type = 'complaint' WHERE send_id = ? AND email = ?`, campaign, e);
-  }
-  return c.json({ processed: emails.length });
+  return c.json(await processFblHook(c.env, await c.req.text()));
 });
 
 export { hookKey };

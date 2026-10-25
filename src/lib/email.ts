@@ -39,7 +39,20 @@ export function classifyBounce(codeOrMessage: string): { type: BounceType; retry
   return { type: 'soft', retry: true };
 }
 
-/** Is this address suppressed for this kind of mail? Expired temporary suppressions are ignored. */
+/**
+ * Global-layer reasons that also block transactional mail. Everything else on the global layer (complaints, FBL reports,
+ * policy blocks, mailbox-full / DNS / repeated-soft temporary entries) only blocks marketing, so a reader who marked a
+ * newsletter as spam can still get their login link or receipt.
+ */
+export function blocksTransactional(reason: string): boolean {
+  return /^(hard_bounce|manual|invalid|cf_suppressed)/.test(reason);
+}
+
+/**
+ * Is this address suppressed for this kind of mail? Expired temporary suppressions are ignored.
+ * - marketing: the global layer (any reason) + this publication's layer
+ * - transactional: the transactional layer + global entries meaning "this mailbox doesn't exist" (see blocksTransactional)
+ */
 export async function isSuppressed(env: Env, email: string, pubId: string | null, kind: 'marketing' | 'transactional'): Promise<string | null> {
   const t = now();
   const rows = await all<{ scope: string; pub_id: string; reason: string; expires_at: number | null }>(
@@ -48,9 +61,13 @@ export async function isSuppressed(env: Env, email: string, pubId: string | null
     email.toLowerCase(), t,
   );
   for (const r of rows) {
-    if (r.scope === 'global') return r.reason; // hard bounces + complaints block everything
-    if (kind === 'marketing' && r.scope === 'pub' && r.pub_id === (pubId || '')) return r.reason;
-    if (kind === 'transactional' && r.scope === 'transactional') return r.reason;
+    if (kind === 'marketing') {
+      if (r.scope === 'global') return r.reason;
+      if (r.scope === 'pub' && r.pub_id === (pubId || '')) return r.reason;
+    } else {
+      if (r.scope === 'transactional') return r.reason;
+      if (r.scope === 'global' && blocksTransactional(r.reason)) return r.reason;
+    }
   }
   return null;
 }
@@ -69,11 +86,32 @@ export async function unsuppress(env: Env, email: string, scope: SuppressScope, 
   await run(env, 'DELETE FROM suppressions WHERE email = ? AND scope = ? AND pub_id = ?', email.toLowerCase(), scope, scope === 'global' ? '' : pubId);
 }
 
-/** Apply a bounce/complaint to suppression lists and subscriber status. */
-export async function recordBounce(env: Env, email: string, pubId: string | null, type: BounceType, detail = '') {
+/**
+ * Apply a bounce/complaint to suppression lists and subscriber status.
+ * `kind` is the kind of mail that bounced. Marketing bounces write the global/publication layers; transactional bounces
+ * write the transactional layer (plus global for "mailbox does not exist"), so marketing suppressions never block login
+ * links while transactional hard bounces do.
+ */
+export async function recordBounce(env: Env, email: string, pubId: string | null, type: BounceType, detail = '', kind: 'marketing' | 'transactional' = 'marketing') {
   const e = email.toLowerCase();
-  if (type === 'hard' || type === 'policy') {
-    await suppress(env, e, 'global', 'hard_bounce:' + detail.slice(0, 80));
+  const why = detail.slice(0, 80);
+  if (kind === 'transactional') {
+    if (type === 'hard') {
+      await suppress(env, e, 'transactional', 'hard_bounce:' + why);
+      await suppress(env, e, 'global', 'hard_bounce:' + why);
+      await run(env, `UPDATE subscribers SET status = 'bounced', updated_at = ? WHERE email = ? AND status IN ('active','pending')`, now(), e);
+    } else if (type === 'policy') await suppress(env, e, 'transactional', 'policy:' + why);
+    else if (type === 'complaint') await suppress(env, e, 'transactional', 'complaint');
+    else if (type === 'mailbox_full') await suppress(env, e, 'transactional', 'mailbox_full', '', 3 * DAY);
+    else if (type === 'dns') await suppress(env, e, 'transactional', 'dns_failure', '', 7 * DAY);
+    return;
+  }
+  if (type === 'hard') {
+    await suppress(env, e, 'global', 'hard_bounce:' + why);
+    await run(env, `UPDATE subscribers SET status = 'bounced', updated_at = ? WHERE email = ? AND status IN ('active','pending')`, now(), e);
+  } else if (type === 'policy') {
+    // content/reputation blocks stop newsletters everywhere but don't block transactional mail
+    await suppress(env, e, 'global', 'policy:' + why);
     await run(env, `UPDATE subscribers SET status = 'bounced', updated_at = ? WHERE email = ? AND status IN ('active','pending')`, now(), e);
   } else if (type === 'complaint') {
     await suppress(env, e, pubId ? 'pub' : 'global', 'complaint', pubId || '');
@@ -102,7 +140,10 @@ export async function sendMail(env: Env, m: MailInput): Promise<MailResult> {
   if (sup) return { ok: false, status: 'suppressed', error: 'suppressed: ' + sup };
 
   const from = m.from || { email: env.MAIL_FROM, name: m.pub?.from_name || m.pub?.name || env.APP_NAME };
-  const headers: Record<string, string> = { 'Feedback-ID': feedbackId(m.pub, m.campaignId, kind), ...(m.headers || {}) };
+  // Feedback-ID is platform-controlled on Cloudflare Email Sending (it sets its own for Postmaster Tools, and sending it
+  // ourselves fails the whole request with E_HEADER_NOT_ALLOWED), so ours travels as an X- header. Bounce (DSN) and
+  // complaint (ARF) reports quote the original headers, which is how lib/inbound maps them to a publication + mail kind.
+  const headers: Record<string, string> = { 'X-OpenHive-Feedback-ID': feedbackId(m.pub, m.campaignId, kind), ...(m.headers || {}) };
   if (m.unsubscribeUrl && kind === 'marketing') {
     headers['List-Unsubscribe'] = `<${m.unsubscribeUrl}>, <mailto:${from.email}?subject=unsubscribe>`;
     headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
@@ -136,8 +177,14 @@ export async function sendMail(env: Env, m: MailInput): Promise<MailResult> {
   }
   await insert(env, 'outbox', {
     id: id(), pub_id: m.pub?.id ?? null, to_email: to, from_email: `${from.name || ''} <${from.email}>`, subject: m.subject,
-    html: m.html.length > 400_000 ? m.html.slice(0, 400_000) : m.html, headers: JSON.stringify(headers), status: res.status, error: res.error ?? null, created_at: now(),
+    html: m.html.length > 400_000 ? m.html.slice(0, 400_000) : m.html, headers: JSON.stringify(headers), status: res.status, error: res.error ?? null,
+    message_id: res.messageId ?? null, kind, created_at: now(),
   });
+  // Marketing senders (sender.ts, automations) record bounces against their delivery rows. Transactional mail (login
+  // links, receipts, confirmations) has none, so permanent failures feed the transactional layer here.
+  if (kind === 'transactional' && res.status === 'failed' && res.bounce && !res.retry) {
+    await recordBounce(env, to, m.pub?.id ?? null, res.bounce, res.error || '', 'transactional').catch(() => {});
+  }
   return res;
 }
 
