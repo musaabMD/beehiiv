@@ -462,6 +462,11 @@
         panel.append(F.field('Preview text', F.input(c, 'preview_text', { placeholder: 'Shown after the subject in the inbox' })));
         panel.append(F.field('Heading (optional)', F.input(c, 'title', { placeholder: 'Shown as the email title' })));
         panel.append(F.field('From', F.select(c, 'sender_id', (meta.senders || []).map((x) => [x.id, `${x.name || ''} <${x.email}> · ${x.purpose}`]), 'Default automations sender')));
+        const design = el('div', 'af-design', `<span class="field-l">Design</span><div class="row between" style="gap:6px;flex-wrap:wrap"><span class="small ${c.template_name ? '' : 'muted'}">${c.template_name ? `Template: <strong>${esc(c.template_name)}</strong>${c.style && Object.keys(c.style).length ? ' · custom colors & fonts' : ''}` : 'Publication default style'}</span><span class="row" style="gap:6px"><button type="button" class="btn btn-secondary btn-sm" data-a="tpl">Start from template</button>${c.style && Object.keys(c.style).length ? '<button type="button" class="btn btn-ghost btn-sm" data-a="unstyle">Use default style</button>' : ''}</span></div>`);
+        design.querySelector('[data-a=tpl]').onclick = () => pickTemplate(c);
+        const un = design.querySelector('[data-a=unstyle]');
+        if (un) un.onclick = () => { delete c.style; delete c.template_id; delete c.template_name; changed({ render: false }); renderPanel(); };
+        panel.append(design);
         const box = el('div', 'af-email-editor');
         panel.append(el('span', 'field-l', 'Content'), box);
         if (window.OHEditor?.mount) {
@@ -570,6 +575,61 @@
     }
   }
   let renderTimer = null;
+
+  // ───────── start from template (welcome / automation / post designs) ─────────
+  let tplCache = null;
+  async function getJSON(url) {
+    const r = await fetch(url, { headers: { accept: 'application/json' }, credentials: 'same-origin' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Request failed');
+    return j;
+  }
+  async function pickTemplate(c) {
+    let dlg = $('#af-tplpick');
+    if (!dlg) {
+      dlg = el('dialog', 'modal modal-wide af-tplpick');
+      dlg.id = 'af-tplpick';
+      dlg.innerHTML = `<header class="modal-h"><h3>Start from a template</h3><button type="button" class="btn btn-ghost btn-sm" data-close>✕</button></header><div class="modal-b"><div class="af-tplpick-filter" role="toolbar"></div><div class="af-tplpick-grid"><p class="muted">Loading templates…</p></div></div>`;
+      const css = el('style', null, `.af-tplpick{width:min(1100px,96vw)}.af-tplpick-filter{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.af-tplpick-filter button{border:1px solid var(--border,#e5e7eb);background:none;border-radius:999px;padding:4px 12px;font:inherit;font-size:13px;cursor:pointer;color:inherit}.af-tplpick-filter button.on{background:var(--text,#111);color:var(--bg,#fff);border-color:var(--text,#111)}.af-tplpick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px;max-height:65vh;overflow:auto}.af-tplpick-card{border:1px solid var(--border,#e5e7eb);border-radius:10px;overflow:hidden;background:var(--surface,#fff);display:flex;flex-direction:column;text-align:left;padding:0;cursor:pointer;font:inherit;color:inherit}.af-tplpick-card:hover{outline:2px solid var(--accent,#f59e0b)}.af-tplpick-card[hidden]{display:none}.af-tplpick-th{height:200px;overflow:hidden;position:relative;background:#f4f4f5;border-bottom:1px solid var(--border,#e5e7eb)}.af-tplpick-th iframe{position:absolute;top:0;left:0;width:200%;height:400px;border:0;transform:scale(.5);transform-origin:0 0;pointer-events:none}.af-tplpick-b{padding:10px 12px}.af-tplpick-b small{display:block;color:var(--muted,#6b7280);margin-top:2px}`);
+      dlg.append(css);
+      document.body.append(dlg);
+      dlg.addEventListener('click', (e) => { if (e.target.closest('[data-close]') || e.target === dlg) dlg.close(); });
+    }
+    dlg.showModal();
+    const grid = dlg.querySelector('.af-tplpick-grid');
+    const bar = dlg.querySelector('.af-tplpick-filter');
+    try {
+      tplCache = tplCache || (await getJSON('/app/automations/email-templates')).templates;
+      const kindLabel = { welcome: 'Welcome emails', automation: 'Automation emails', post: 'Newsletter designs' };
+      const groups = [...new Set(tplCache.map((t) => t.kind))];
+      bar.innerHTML = `<button type="button" class="on" data-k="">All</button>${groups.map((k) => `<button type="button" data-k="${esc(k)}">${esc(kindLabel[k] || k)}</button>`).join('')}`;
+      grid.innerHTML = tplCache.map((t) => `<button type="button" class="af-tplpick-card" data-id="${esc(t.id)}" data-kind="${esc(t.kind)}"><span class="af-tplpick-th"><iframe src="/app/posts/templates/${encodeURIComponent(t.id)}/preview?thumb=1" loading="lazy" tabindex="-1" title=""></iframe></span><span class="af-tplpick-b"><strong>${esc(t.name)}</strong><small>${esc(t.team ? 'Team template' : (kindLabel[t.kind] || t.kind).replace(/s$/, ''))}${t.category && !t.team ? ' · ' + esc(t.category) : ''}</small></span></button>`).join('') || '<p class="muted">No templates yet.</p>';
+      bar.onclick = (e) => {
+        const b = e.target.closest('button[data-k]');
+        if (!b) return;
+        bar.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+        grid.querySelectorAll('.af-tplpick-card').forEach((card) => { card.hidden = !!b.dataset.k && card.dataset.kind !== b.dataset.k; });
+      };
+      grid.onclick = async (e) => {
+        const card = e.target.closest('.af-tplpick-card');
+        if (!card) return;
+        if ((c.doc?.blocks || []).length && !confirm('Replace this email’s content and style with the template?')) return;
+        try {
+          const t = await getJSON(`/app/automations/email-templates/${encodeURIComponent(card.dataset.id)}`);
+          c.doc = t.doc;
+          c.style = t.style || {};
+          c.template_id = t.template_id;
+          c.template_name = t.template_name;
+          if (!c.subject && t.subject) c.subject = t.subject;
+          if (!c.preview_text && t.preview_text) c.preview_text = t.preview_text;
+          dlg.close();
+          changed();
+          renderPanel();
+          toast(`Loaded “${t.template_name}”`);
+        } catch (err) { toast('Could not load template: ' + err.message); }
+      };
+    } catch (err) { grid.innerHTML = `<p class="muted">Could not load templates: ${esc(err.message)}</p>`; }
+  }
 
   // ───────── preview / test ─────────
   async function preview(c) {

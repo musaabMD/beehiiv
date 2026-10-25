@@ -65,7 +65,7 @@ dash.get('/', async (c) => {
         <Field label="Postal address" hint="Required by CAN-SPAM; shown in every email footer."><Input name="address" value={pub.address} /></Field>
         <Field label="Email footer (HTML)" hint="Added to the bottom of every newsletter and automation email."><Textarea name="footer_html" value={pub.footer_html} rows={3} /></Field>
         <Toggle name="double_opt_in" checked={!!s.double_opt_in} label="Double opt-in" hint="New subscribers must confirm by email before they receive anything." />
-        <Toggle name="welcome_email" checked={s.welcome_email !== false} label="Welcome email" hint="Triggers your welcome automation when someone subscribes." />
+        <Toggle name="welcome_email" checked={s.welcome_email !== false} label="Welcome email" hint={<>Triggers your welcome automation when someone subscribes. <a href="/app/automations/welcome">Design the welcome email from a template →</a></>} />
         <Toggle name="utm_tracking" checked={s.utm_tracking !== false} label="Add UTM parameters to links in emails" hint="utm_source=<slug>&utm_medium=newsletter&utm_campaign=<post>" />
         <Grid>
           <Field label="Custom link parameters" hint="Appended to every link in your emails. Placeholders: {pub} {post}"><Input name="link_params" value={s.link_params} placeholder="ref={pub}&issue={post}" /></Field>

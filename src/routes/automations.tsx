@@ -16,6 +16,7 @@ import { DashLayout } from '../ui/layout';
 import { Card, Btn, LinkBtn, ActionForm, Field, Input, Textarea, Toggle, Table, Empty, Status, Stat, Stats, Tabs, Modal, OpenBtn, Json, back, Bars, Badge } from '../ui/components';
 import { id, now, parseJSON, form, str, int, bool, ago, fmtDateTime, num, pct } from '../lib/util';
 import { TEMPLATES, templateByKey } from './automations/templates';
+import { GalleryAssets, TemplateCard } from './posts/templates';
 import { stepSummary, triggerSummary, flatten, stepLabel, normalizeSteps, normalizeTrigger, BRANCH_TYPES } from './automations/shared';
 
 const dash = new Hono<AppEnv>();
@@ -117,7 +118,7 @@ dash.get('/', async (c) => {
             <label class="af-tpl"><input type="radio" name="template" value="" checked /><span><strong>Blank automation</strong><small>Pick a trigger and build your own flow.</small></span></label>
             {TEMPLATES.map((t) => <label class="af-tpl"><input type="radio" name="template" value={t.key} /><span><strong>{t.name}</strong><small>{t.description}</small></span></label>)}
           </div>
-          <div class="form-actions"><Btn>Create automation</Btn></div>
+          <div class="form-actions"><a class="btn btn-ghost" href="/app/automations/welcome">Design a welcome email from a template →</a><Btn>Create automation</Btn></div>
         </form>
       </Modal>
     </DashLayout>,
@@ -137,6 +138,75 @@ dash.post('/new', async (c) => {
   });
   await audit(c, 'automation.create', aid, { template: tpl?.key });
   return c.redirect(`/app/automations/${aid}`, 303);
+});
+
+// ───────────────────────── email templates (welcome / automation / post designs) ─────────────────────────
+const TPL_KINDS = `('welcome','automation','post')`;
+const tplRow = (c: Ctx, tid: string) => one<any>(c.env, `SELECT * FROM templates WHERE id = ? AND (pub_id IS NULL OR pub_id = ?) AND kind IN ${TPL_KINDS}`, tid, c.get('pub').id);
+const freshIds = (blocks: any[]): any[] => (blocks || []).map((b) => ({
+  ...b, id: id(8),
+  data: b.data && Array.isArray(b.data.blocks) ? { ...b.data, blocks: freshIds(b.data.blocks) } : b.data && Array.isArray(b.data.columns) ? { ...b.data, columns: b.data.columns.map((col: any) => ({ ...col, blocks: freshIds(col.blocks) })) } : b.data,
+}));
+/** A send_email step config built from a template: copies its blocks and its email style tokens. */
+function emailFromTemplate(t: any) {
+  const subject = t.kind === 'welcome' ? 'Welcome to {{publication.name}}' : t.kind === 'automation' ? t.name : '';
+  return { subject, preview_text: t.kind === 'post' ? '' : String(t.description || '').slice(0, 140), doc: { blocks: freshIds(parseJSON<any>(t.content, { blocks: [] }).blocks || []) }, style: parseJSON<any>(t.style, {}).email || {}, template_id: t.id, template_name: t.name };
+}
+
+/** Template list for the “Start from template” picker in email steps. */
+dash.get('/email-templates', async (c) => {
+  const rows = await all<any>(c.env, `SELECT id, name, description, kind, category, pub_id FROM templates WHERE (pub_id IS NULL OR pub_id = ?) AND kind IN ${TPL_KINDS} ORDER BY CASE kind WHEN 'welcome' THEN 0 WHEN 'automation' THEN 1 ELSE 2 END, pub_id IS NULL, created_at`, c.get('pub').id);
+  return c.json({ templates: rows.map((t) => ({ id: t.id, name: t.name, description: t.description, kind: t.kind, category: t.pub_id ? 'Team' : t.category || '', team: !!t.pub_id })) });
+});
+
+dash.get('/email-templates/:tid', async (c) => {
+  const t = await tplRow(c, c.req.param('tid'));
+  if (!t) return c.json({ error: 'not_found' }, 404);
+  return c.json(emailFromTemplate(t));
+});
+
+/** Create a draft automation whose first step is an email built from a template (welcome templates get the welcome trigger). */
+dash.post('/from-template', async (c) => {
+  const f = await form(c.req);
+  const t = await tplRow(c, str(f.template_id));
+  if (!t) return back(c, '/app/automations', 'Template not found', 'err');
+  const aid = id();
+  const welcome = t.kind === 'welcome';
+  const steps = [{ id: id(10), type: 'send_email', config: emailFromTemplate(t) }];
+  await insert(c.env, 'automations', {
+    id: aid, pub_id: c.get('pub').id, name: welcome ? `Welcome email · ${t.name}` : t.name, description: t.description || '', status: 'draft', trigger: '{}', steps: '[]',
+    draft_trigger: JSON.stringify({ type: 'welcome', config: {} }), draft_steps: JSON.stringify(steps), allow_reentry: 0, created_by: c.get('user').id, created_at: now(), updated_at: now(),
+  });
+  await audit(c, 'automation.create', aid, { template_id: t.id });
+  return back(c, `/app/automations/${aid}`, welcome ? `Welcome email created from “${t.name}” — review it, then activate to send it to new subscribers.` : `Automation created from “${t.name}” — pick a trigger, then activate.`);
+});
+
+/** Welcome email entry point (linked from Settings): open existing welcome automations, or pick a design to create one. */
+dash.get('/welcome', async (c) => {
+  const pub = c.get('pub');
+  const existing = await all<any>(c.env, `SELECT id, name, status FROM automations WHERE pub_id = ? AND status != 'archived' AND json_extract(COALESCE(draft_trigger, trigger), '$.type') = 'welcome' ORDER BY status = 'active' DESC, updated_at DESC`, pub.id);
+  const tpls = await all<any>(c.env, `SELECT * FROM templates WHERE (pub_id IS NULL OR pub_id = ?) AND kind = 'welcome' ORDER BY pub_id IS NULL, created_at`, pub.id);
+  return c.html(
+    <DashLayout c={c} title="Welcome email" section="automations" crumbs={[['/app/automations', 'Automations']]}>
+      <GalleryAssets />
+      <p class="muted" style="margin-top:0">The welcome email goes out automatically when someone subscribes (after confirmation, if double opt-in is on). It's an automation with the “Welcome” trigger, so you can add more emails, delays and branches later.</p>
+      {existing.length > 0 && (
+        <Card title="Your welcome automations">
+          <div class="stack-sm">{existing.map((a) => <div class="row between"><span><a href={`/app/automations/${a.id}`}><strong>{a.name}</strong></a> <Status s={a.status} /></span><LinkBtn small href={`/app/automations/${a.id}`}>Open</LinkBtn></div>)}</div>
+        </Card>
+      )}
+      <h2>Start a welcome email from a design</h2>
+      <div class="tg-grid">
+        {tpls.map((t) => (
+          <TemplateCard t={t}>
+            <form method="post" action="/app/automations/from-template" class="inline-form"><input type="hidden" name="template_id" value={t.id} /><Btn small kind="primary">Use this design</Btn></form>
+            <a class="btn btn-ghost btn-sm" href={`/app/posts/templates/${t.id}/preview`} target="_blank">Preview</a>
+          </TemplateCard>
+        ))}
+      </div>
+      <p class="small muted" style="margin-top:16px">Want a multi-email onboarding sequence instead? Create a new automation and pick “Welcome series”. Design your own welcome templates in <a href="/app/posts/templates">Posts → Templates</a> (set “Used for” to Welcome email).</p>
+    </DashLayout>,
+  );
 });
 
 dash.post('/:id/duplicate', async (c) => {
@@ -331,7 +401,7 @@ dash.put('/:id/draft', async (c) => {
 async function stepEmail(c: Ctx, body: any) {
   const pub = c.get('pub');
   const cfg = body?.config || {};
-  const content: Content = { title: cfg.title || '', subtitle: '', doc: cfg.doc || { blocks: [] }, preview_text: cfg.preview_text || '', style: null, hideHeader: !cfg.title };
+  const content: Content = { title: cfg.title || '', subtitle: '', doc: cfg.doc || { blocks: [] }, preview_text: cfg.preview_text || '', style: cfg.style && typeof cfg.style === 'object' ? JSON.stringify(cfg.style) : null, hideHeader: !cfg.title };
   const sample = (await one<Subscriber>(c.env, `SELECT * FROM subscribers WHERE pub_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1`, pub.id)) ||
     ({ id: 'preview', pub_id: pub.id, email: c.get('user').email, name: c.get('user').name, tier: 'free', referral_code: 'preview', referral_count: 0, custom: '{}', created_at: now() } as Subscriber);
   const built = await buildEmail(c.env, pub, content, sample, {});
