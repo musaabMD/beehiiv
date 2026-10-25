@@ -19,6 +19,7 @@ export class CollabRoom implements DurableObject {
   private subtitle = '';
   private postId = '';
   private dirty = false;
+  private metaChanged = false;
 
   constructor(private state: DurableObjectState, private env: Env) {}
 
@@ -26,7 +27,7 @@ export class CollabRoom implements DurableObject {
     if (this.blocks) return;
     const snap = await this.state.storage.get<any>('snap');
     if (snap) {
-      Object.assign(this, { blocks: snap.blocks, versions: snap.versions || {}, title: snap.title, subtitle: snap.subtitle, postId: snap.postId });
+      Object.assign(this, { blocks: snap.blocks, versions: snap.versions || {}, title: snap.title, subtitle: snap.subtitle, postId: snap.postId, metaChanged: !!snap.metaChanged });
       return;
     }
     await this.loadFromD1();
@@ -57,16 +58,20 @@ export class CollabRoom implements DurableObject {
 
   private async persist() {
     this.dirty = true;
-    await this.state.storage.put('snap', { blocks: this.blocks, versions: this.versions, title: this.title, subtitle: this.subtitle, postId: this.postId });
+    await this.state.storage.put('snap', { blocks: this.blocks, versions: this.versions, title: this.title, subtitle: this.subtitle, postId: this.postId, metaChanged: this.metaChanged });
     const alarm = await this.state.storage.getAlarm();
     if (!alarm) await this.state.storage.setAlarm(Date.now() + 3000);
   }
 
   private async flush() {
     if (!this.blocks || !this.postId) return;
-    await this.env.DB.prepare('UPDATE posts SET content = ?, title = ?, subtitle = ?, updated_at = ? WHERE id = ?')
-      .bind(JSON.stringify({ blocks: this.blocks }), this.title, this.subtitle, Date.now(), this.postId)
-      .run();
+    // title/subtitle are only written when a collaborator changed them through the room
+    if (this.metaChanged) {
+      await this.env.DB.prepare('UPDATE posts SET content = ?, title = ?, subtitle = ?, updated_at = ? WHERE id = ?')
+        .bind(JSON.stringify({ blocks: this.blocks }), this.title, this.subtitle, Date.now(), this.postId).run();
+    } else {
+      await this.env.DB.prepare('UPDATE posts SET content = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify({ blocks: this.blocks }), Date.now(), this.postId).run();
+    }
     this.dirty = false;
   }
 
@@ -121,6 +126,7 @@ export class CollabRoom implements DurableObject {
     if (msg.t === 'meta') {
       if (typeof msg.title === 'string') this.title = msg.title.slice(0, 300);
       if (typeof msg.subtitle === 'string') this.subtitle = msg.subtitle.slice(0, 500);
+      this.metaChanged = true;
       this.broadcast({ t: 'meta', title: msg.title, subtitle: msg.subtitle, from: peer.cid }, ws);
       await this.persist();
       return;
@@ -157,6 +163,7 @@ export class CollabRoom implements DurableObject {
       if (this.dirty || (await this.state.storage.get('snap'))) { await this.load(); await this.flush(); }
       await this.state.storage.delete('snap');
       this.blocks = null;
+      this.metaChanged = false;
     } else this.broadcast({ t: 'peers', peers: left.map((w) => w.deserializeAttachment() as Peer) });
   }
 

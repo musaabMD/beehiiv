@@ -695,7 +695,16 @@
     // ───────── slash menu ─────────
     buildSlash() {
       this.slash = h('div', { class: 'ohe-slash', role: 'listbox' });
+      this.slashSearch = h('input', { class: 'ohe-slash-q', placeholder: 'Search blocks…', 'aria-label': 'Search blocks' });
+      this.slashBody = h('div');
+      this.slash.append(this.slashSearch, this.slashBody);
       document.body.append(this.slash);
+      this.slashSearch.addEventListener('input', () => { this.slashQuery = this.slashSearch.value.toLowerCase(); this.slashIdx = 0; this.renderSlash(); });
+      this.slashSearch.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); this.slashMove(e.key === 'ArrowDown' ? 1 : -1); }
+        else if (e.key === 'Enter') { e.preventDefault(); this.slashChoose(); }
+        else if (e.key === 'Escape') { e.preventDefault(); this.hideSlash(); }
+      });
       this.slash.addEventListener('mousedown', (e) => {
         const b = e.target.closest('[data-key]');
         if (!b) return;
@@ -718,6 +727,9 @@
       const top = Math.min(r.bottom + 6, window.innerHeight - 340);
       Object.assign(this.slash.style, { top: top + window.scrollY + 'px', left: Math.max(8, Math.min(r.left, window.innerWidth - 330)) + window.scrollX + 'px' });
       this.slash.classList.add('on');
+      this.slashSearch.value = '';
+      this.slashSearch.style.display = mode === 'insert' ? '' : 'none';
+      if (mode === 'insert') setTimeout(() => this.slashSearch.focus());
     }
     checkSlash(it) {
       const el = it.view.mergeTarget();
@@ -732,13 +744,13 @@
     renderSlash() {
       const q = (this.slashQuery || '').trim();
       this.slashList = this.availableTypes().filter(([k, t]) => !q || t.label.toLowerCase().includes(q) || (t.keys || '').includes(q) || k.includes(q));
-      if (!this.slashList.length) { this.slash.innerHTML = '<div class="ohe-slash-empty">No matching blocks</div>'; return; }
+      if (!this.slashList.length) { this.slashBody.innerHTML = '<div class="ohe-slash-empty">No matching blocks</div>'; return; }
       let group = '';
-      this.slash.innerHTML = this.slashList.map(([k, t], i) => {
+      this.slashBody.innerHTML = this.slashList.map(([k, t], i) => {
         const g = t.group !== group ? `<div class="ohe-slash-g">${esc((group = t.group))}</div>` : '';
         return `${g}<button type="button" role="option" class="ohe-slash-i ${i === this.slashIdx ? 'on' : ''}" data-key="${k}" data-idx="${i}"><span class="ohe-slash-ic">${esc(t.icon)}</span>${esc(t.label)}</button>`;
       }).join('');
-      this.slash.querySelector('.on')?.scrollIntoView({ block: 'nearest' });
+      this.slashBody.querySelector('.on')?.scrollIntoView({ block: 'nearest' });
     }
     slashMove(d) { if (!this.slashList?.length) return; this.slashIdx = (this.slashIdx + d + this.slashList.length) % this.slashList.length; this.renderSlash(); }
     slashChoose() {
