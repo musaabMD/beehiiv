@@ -1,6 +1,7 @@
 /** @jsxImportSource hono/jsx */
 // Subscribers: list (filters, keyset pagination, bulk actions, CSV export), add, and full profile.
 import { Hono } from 'hono';
+import { raw } from 'hono/html';
 import type { AppEnv, Ctx, Subscriber } from '../../types';
 import { one, all, run, val, batch, stmt, insertStmt, encodeCursor, decodeCursor } from '../../lib/db';
 import { compile } from '../../lib/segments';
@@ -116,7 +117,7 @@ app.get('/', async (c) => {
         <div class="form-actions"><Btn>Add subscriber</Btn></div>
       </form>
     </Modal>
-    {c.req.query('add') === '1' && <script>{`document.addEventListener('DOMContentLoaded',()=>document.getElementById('add-sub').showModal())`}</script>}
+    {c.req.query('add') === '1' && <script>{raw(`document.addEventListener('DOMContentLoaded',function(){document.getElementById('add-sub').showModal()})`)}</script>}
   </>);
 });
 
