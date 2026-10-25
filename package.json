@@ -13,7 +13,8 @@
     "deploy": "wrangler deploy",
     "build:docs": "node scripts/build-docs.mjs",
     "build:landing": "node scripts/build-landing.mjs",
-    "seed": "node scripts/seed.mjs > .wrangler/seed.sql && wrangler d1 execute openhive --local --file .wrangler/seed.sql"
+    "seed": "node scripts/seed.mjs > .wrangler/seed.sql && wrangler d1 execute openhive --local --file .wrangler/seed.sql",
+    "demo": "wrangler d1 migrations apply openhive --local && node scripts/seed.mjs > .wrangler/seed.sql && wrangler d1 execute openhive --local --file .wrangler/seed.sql && node scripts/demo-data.mjs > .wrangler/demo.sql && wrangler d1 execute openhive --local --file .wrangler/demo.sql && wrangler dev"
   },
   "dependencies": {
     "hono": "^4.13.13"
