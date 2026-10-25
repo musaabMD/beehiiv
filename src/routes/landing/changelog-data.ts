@@ -3,6 +3,65 @@ export interface ChangelogEntry { date: string; slug: string; title: string; bod
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-25', slug: 'bounces-in-app', title: 'Bounces and complaints come straight back',
+    body: [
+      'OpenHive now receives bounce and spam-complaint reports itself, through Cloudflare Email Routing and Cloudflare\'s sending events, and turns them into suppressions. Settings → Email shows every report it received. Reports only count for addresses this install actually emailed, so nobody can be suppressed by a forged report.',
+      'Bounces and complaints on account email (login links, receipts) now fill the transactional suppression list on their own, and a reader who complained about a newsletter still gets their login link. The default sending domain now warms up like custom domains.',
+      'Fixed: emails set a Feedback-ID header that Cloudflare doesn\'t allow, which could make real sends fail. OpenHive now uses its own tracking header.',
+    ],
+    links: [['Deliverability guide', '/docs/deliverability']],
+  },
+  {
+    date: '2026-10-25', slug: 'templates-library', title: '31 designed templates, linked styles and website page templates',
+    body: [
+      'The template library now has 31 designs: weekly briefs, digests, essays, interviews, sponsor issues, podcast notes, sales, tutorials, welcome and automation emails, with previews and categories.',
+      'Posts keep a live link to their template\'s style, so changing a template\'s colors or fonts updates the posts made from it, including posts created through the API. Welcome and automation emails can start from a template.',
+      'The website builder has 10 built-in page templates (About, Start here, Advertise, Podcast, Events, Link in bio and more) and can save a single section as a reusable block.',
+    ],
+    links: [['Templates', '/features/templates']],
+  },
+  {
+    date: '2026-10-25', slug: 'editor-upgrades', title: 'Email-only and web-only blocks, and a sharper editor',
+    body: [
+      'Any block can now show in email only or on the web only, so one draft makes two versions. Bluesky posts embed properly, Stocktwits messages show as cards, and section background images now show in Outlook.',
+      'AI rewrite, translate and fix keep your bold, links and footnotes. The size gauge measures the email exactly as it will be sent. Search and replace reaches buttons, captions, alt text and tables. Pasting from Google Docs keeps headings, and its images are copied into your media library before Google\'s links expire. Gallery captions take bold, italics and links.',
+    ],
+    links: [['Editor', '/features/editor']],
+  },
+  {
+    date: '2026-10-25', slug: 'community-dms', title: 'Members can message each other',
+    body: [
+      'Community members can send each other direct messages in real time, with an inbox and unread counts. Members can block someone, report a message to the moderation queue, or turn DMs off. Members link Discord with Discord login, and upcoming Luma events show in the community.',
+    ],
+    links: [['Community', '/features/community']],
+  },
+  {
+    date: '2026-10-25', slug: 'auto-transcripts-recordings', title: 'Automatic transcripts and recordings',
+    body: [
+      'Every podcast episode is transcribed automatically after upload, long episodes in pieces, with captions published in the feed. Webinars record automatically when you go live and upload every few seconds, so closing the tab loses nothing.',
+    ],
+  },
+  {
+    date: '2026-10-25', slug: 'reader-phone-login', title: 'Readers can log in with their phone',
+    body: ['On a publication\'s site, readers can log in on a computer by scanning a code and approving on their phone.'],
+  },
+  {
+    date: '2026-10-25', slug: 'api-webhooks', title: 'Webhook versions, REST automations and more MCP tools',
+    body: [
+      'Webhook endpoints stay on the payload version they were created with until you upgrade them, and every delivery attempt is kept in the log. The REST API can now create, edit, publish, pause and resume automations, and create polls and surveys. AI agents can manage podcast shows and episodes, products and promo codes over MCP. Survey results update live.',
+    ],
+    links: [['REST API', '/docs/api'], ['MCP tools', '/docs/mcp-tools']],
+  },
+  {
+    date: '2026-10-25', slug: 'ai-on', title: 'AI features switched on',
+    body: ['The AI writer, AI images, text-to-speech audio versions, transcripts and the ⌘J assistant now run on Cloudflare Workers AI out of the box.'],
+  },
+  {
+    date: '2026-10-25', slug: 'redesign', title: 'A lighter site, with every feature listed',
+    body: ['The site has a new light design. Every feature page lists each capability one by one with its real status, next to a screenshot of the real app.'],
+    links: [['All features', '/features']],
+  },
+  {
     date: '2026-10-25', slug: 'deliverability-page', title: 'A public deliverability page',
     body: [
       'The new Deliverability page shows this install\'s own numbers for the last 30 days: delivery rate, hard bounces, spam complaints, and the median open and click rate, with a week-by-week track record.',

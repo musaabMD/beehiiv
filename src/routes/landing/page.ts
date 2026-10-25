@@ -241,7 +241,7 @@ footer nav{display:flex;gap:18px;flex-wrap:wrap}
     <h2>The boring infrastructure, already done</h2>
     <p class="sub">The pieces that usually take a team: validation, suppression lists, feedback loops, warmup schedules and blocklist monitoring — shipped and documented.</p>
     <ul class="ticks">
-      ${['Gmail Feedback-ID tagging for per-newsletter complaint rates', 'Feedback-loop and bounce webhooks feed suppression lists', 'Domain warmup caps and automatic blocklist pause', 'SPF / DKIM / DMARC record generator with live DNS checks']
+      ${['Every email tagged so complaints are matched to the right newsletter', 'Feedback-loop and bounce webhooks feed suppression lists', 'Domain warmup caps and automatic blocklist pause', 'SPF / DKIM / DMARC record generator with live DNS checks']
         .map((x) => `<li>${ic('check', 18)}<span>${x}</span></li>`).join('')}
     </ul>
   </div>

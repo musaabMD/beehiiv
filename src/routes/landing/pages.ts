@@ -164,7 +164,7 @@ ${show ? `<section style="padding-top:8px"><div class="wrap">
       ${tick('<b>New domains warm up.</b> 200 emails on the first day, doubling each day, with no cap from day 13.')}
       ${tick('<b>Your list stays clean.</b> Typos, throwaway inboxes and domains without a mail server are refused at signup; imports skip them and say why.')}
       ${tick('<b>Bounces are sorted.</b> Hard bounces and complaints suppress the address for good; a full mailbox or DNS failure only for a few days. Deferred mail is retried for 26 hours.')}
-      ${tick('<b>Complaints are tracked per newsletter.</b> Every email carries a Feedback-ID for Gmail and one-click unsubscribe.')}
+      ${tick('<b>Complaints are traced to the newsletter.</b> Every email carries its own tracking ID and one-click unsubscribe, and bounce and complaint reports come straight back into the app.')}
       ${tick('<b>Blocklists are watched.</b> Sending domains are checked every 6 hours; a listed domain pauses sending and alerts admins.')}
     </ul></div>
   </div>
