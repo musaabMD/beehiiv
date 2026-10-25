@@ -368,8 +368,9 @@ registerPeriodic('billing.lifecycle', 15 * MIN, async (env) => {
     for (const s of due) {
       const sub = await one<any>(env, 'SELECT email, name FROM subscribers WHERE id = ?', s.subscriber_id);
       await insert(env, 'orders', { id: id(), pub_id: s.pub_id, kind: 'subscription', ref_id: s.tier_id, subscriber_id: s.subscriber_id, email: sub?.email || '', name: sub?.name || '', amount_cents: s.amount_cents, currency: s.currency, status: 'paid', data: JSON.stringify({ description: 'Renewal (test mode)', renewal: true }), created_at: t, paid_at: t });
-      await run(env, 'UPDATE subscriptions SET current_period_end = ?, updated_at = ? WHERE id = ?', addInterval(s.current_period_end, s.interval), t, s.id);
-      await run(env, 'UPDATE subscriptions SET current_period_end = ? WHERE group_owner_id = ?', addInterval(s.current_period_end, s.interval), s.id);
+      const next = addInterval(s.current_period_end < t - 2 * DAY ? t : s.current_period_end, s.interval);
+      await run(env, 'UPDATE subscriptions SET current_period_end = ?, updated_at = ? WHERE id = ?', next, t, s.id);
+      await run(env, 'UPDATE subscriptions SET current_period_end = ? WHERE group_owner_id = ?', next, s.id);
     }
   }
   // memberships expire

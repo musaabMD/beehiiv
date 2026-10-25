@@ -94,7 +94,7 @@ function decodeXml(s: string) {
 export interface CardPost { id: string; slug: string; title: string; subtitle: string; thumbnail_url: string | null; published_at: number | null; audience: string; authors?: string; content?: string }
 
 export function postCard(base: string, p: CardPost, first = false, tz = 'UTC'): string {
-  const premium = p.audience === 'premium' || (p.content || '').includes('"type":"paywall"');
+  const premium = p.audience === 'premium' || /"type":\s*"paywall"/.test(p.content || '');
   return `<a class="s-card" href="${esc(base)}/p/${esc(p.slug)}">${p.thumbnail_url ? img(p.thumbnail_url, '', first, 'class="s-card-img" width="640" height="360"') : `<div class="s-card-img s-card-ph" aria-hidden="true"></div>`}<div class="s-card-b"><h3>${esc(p.title || 'Untitled')}</h3>${p.subtitle ? `<p>${esc(truncate(p.subtitle, 160))}</p>` : ''}<div class="s-meta">${p.authors ? `<span>${esc(p.authors)}</span><span>·</span>` : ''}<time datetime="${new Date(p.published_at || 0).toISOString()}">${fmtDate(p.published_at, { dateStyle: 'medium' }, tz)}</time>${premium ? '<span class="s-lock">🔒 Premium</span>' : ''}</div></div></a>`;
 }
 

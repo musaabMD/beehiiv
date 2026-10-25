@@ -226,4 +226,3 @@ export function registerTiers(dash: Hono<AppEnv>) {
   }
 }
 
-export { tierPrice };

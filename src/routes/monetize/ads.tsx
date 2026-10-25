@@ -285,4 +285,3 @@ export function registerAds(dash: Hono<AppEnv>, root: Hono<AppEnv>) {
   });
 }
 
-export { Help, DAY, int };

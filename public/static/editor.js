@@ -1631,7 +1631,7 @@
     else if (v === 'up') ed.move(it, -1);
     else if (v === 'down') ed.move(it, 1);
     else if (v === 'del') { it.list.remove(it); ed.changed(); }
-    else if (v === 'comment') ed.opts.onComment(ed.topItem(it).block.id, textOf(JSON.stringify(it.view.toJSON().data).replace(/"[a-z_]+":/g, ' ')).slice(0, 120));
+    else if (v === 'comment') ed.opts.onComment(ed.topItem(it).block.id, (it.body.textContent || TYPES[it.block.type]?.label || '').replace(/\s+/g, ' ').trim().slice(0, 120));
     else if (v === 'wrap') { const b = it.view.toJSON(); const idx = it.list.items.indexOf(it); it.list.remove(it, true); it.list.insert({ id: uid(), type: 'section', data: { blocks: [b], style: { bg: '#f8fafc', padding: 20, radius: 10 } } }, idx); ed.changed(); }
   }
 

@@ -1022,7 +1022,7 @@ site.get('/events/:ev', async (c) => {
               <div class="s-stack">
                 <div class="ev-price">{fmtPrice(ev.price_cents, ev.currency)}</div>
                 <RegisterForm />
-                <p class="s-small s-muted">{ev.capacity - taken < 50 ? `Only ${ev.capacity - taken} seats left · ` : ''}You'll get a calendar invite and reminders by email.</p>
+                <p class="s-small s-muted">{ev.capacity - taken < 50 ? `Only ${ev.capacity - taken} seat${ev.capacity - taken === 1 ? '' : 's'} left · ` : ''}You'll get a calendar invite and reminders by email.</p>
               </div>
             )}
           </aside>

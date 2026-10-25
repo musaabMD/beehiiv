@@ -109,4 +109,3 @@ export function registerOrders(dash: Hono<AppEnv>) {
   });
 }
 
-export { emit, onOrderPaid, now };

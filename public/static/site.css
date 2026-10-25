@@ -224,3 +224,5 @@ h1,h2,h3,h4{font-family:var(--hfont);line-height:1.2;margin:0 0 .5em;letter-spac
 .pb-html{padding:0}
 .pb-selected{outline:3px solid #f59e0b;outline-offset:-3px}
 .pb-text h2:first-child,.pb-text h1:first-child{margin-top:0}
+.s-body>:first-child{margin-top:0}
+@media(max-width:520px){.s-brand{font-size:16px}.s-brand span{max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.s-actions .s-btn{height:36px;padding:0 12px;font-size:14px}.s-article{padding-top:28px}.s-body{font-size:17px}}

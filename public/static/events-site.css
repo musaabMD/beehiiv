@@ -5,7 +5,7 @@
 .ev-when{font-size:17px}
 .ev-box{position:sticky;top:84px;display:flex;flex-direction:column;gap:14px}
 .ev-box .s-form input{min-width:0;width:100%}
-.ev-form{flex-direction:column}
+.ev-form{flex-direction:column;flex-wrap:nowrap}.ev-form input{flex:none!important;height:44px;width:100%}
 .ev-price{font-size:30px;font-weight:800}
 .ev-countdown{display:flex;gap:10px;justify-content:center;margin:8px 0}
 .ev-countdown div{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 10px;min-width:58px;text-align:center}
