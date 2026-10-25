@@ -8,11 +8,12 @@ import { siteUrl } from '../../lib/pub';
 import { trackView } from '../../lib/tracking';
 import { SiteLayout, SiteMessage } from '../../ui/site';
 import { back } from '../../ui/components';
-import { id, now, form, str, ago, truncate, esc } from '../../lib/util';
+import { id, now, form, str, ago, truncate, esc, fmtDate } from '../../lib/util';
 import { channelAccess, getMember, ensureDefaultChannel, renderBody, authorNames, createCommunityPost, notify, canModerate, canManage, type Channel } from './shared';
-import { discordCfg, syncDiscordRoles } from '../../lib/discord';
+import { discordCfg, syncDiscordRoles, discordOAuthCfg, discordAuthorizeUrl } from '../../lib/discord';
+import { issueToken } from '../../lib/auth';
 import { pubAdminEmails } from '../grow/shared';
-import { chatUnreadTotal } from './chatdata';
+import { chatUnreadTotal, dmUnreadTotal, upcomingLumaEvents } from './chatdata';
 
 const CSS = `.c-layout{display:grid;grid-template-columns:220px 1fr;gap:28px;padding:32px 20px}.c-side a{display:flex;justify-content:space-between;padding:7px 10px;border-radius:8px;text-decoration:none;color:var(--muted)}.c-side a.on,.c-side a:hover{background:var(--surface);color:var(--text)}.c-side h4{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:16px 10px 6px}
 .c-post{border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;margin-bottom:12px;background:var(--bg);display:block;text-decoration:none;color:inherit}.c-post:hover{border-color:var(--accent)}.c-post h3{margin:0 0 4px;font-size:18px}.c-post p{margin:0;color:var(--muted);font-size:15px}
@@ -43,6 +44,8 @@ export async function Shell(c: Ctx, title: string, active: string, content: any)
   const chans = await all<Channel>(c.env, 'SELECT * FROM channels WHERE pub_id = ? ORDER BY position, created_at', pub.id);
   const unread = sub ? (await one<{ n: number }>(c.env, `SELECT COUNT(*) AS n FROM direct_messages WHERE pub_id = ? AND subscriber_id = ? AND from_side = 'publication' AND read_at IS NULL`, pub.id, sub.id))?.n || 0 : 0;
   const chatUnread = sub && member?.status === 'active' ? await chatUnreadTotal(c.env, pub.id, sub.id) : 0;
+  const dmUnread = sub && member?.status === 'active' ? await dmUnreadTotal(c.env, pub.id, sub.id) : 0;
+  const events = await upcomingLumaEvents(c.env, pub.id, 3);
   return c.html(await SiteLayout({
     c, title, head: <style>{raw(CSS)}</style>,
     children: (
@@ -53,7 +56,14 @@ export async function Shell(c: Ctx, title: string, active: string, content: any)
             const acc = channelAccess(ch, sub, premium);
             return <a href={`${base}/community/${ch.slug}`} class={active === ch.slug ? 'on' : ''}><span>#{ch.name}</span>{ch.access !== 'free' && !acc.ok ? <span>🔒</span> : null}</a>;
           })}
-          {member?.status === 'active' && <><h4>You</h4><a href={`${base}/community/chat`} class={active === 'chat' ? 'on' : ''}><span>Chats</span>{chatUnread ? <span class="s-badge" data-chat-unread>{chatUnread > 99 ? '99+' : chatUnread}</span> : null}</a><a href={`${base}/community/messages`} class={active === 'messages' ? 'on' : ''}><span>Messages</span>{unread ? <span class="s-badge">{unread}</span> : null}</a>{discordCfg(pub) && <a href={`${base}/community/discord`} class={active === 'discord' ? 'on' : ''}>Discord</a>}</>}
+          {events.length > 0 && (
+            <div class="c-events" data-community-events>
+              <h4>Upcoming events</h4>
+              {events.map((e) => <a href={`${base}/events/${e.slug}`} title={e.title}><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{e.title}<small style="display:block;font-size:12px">{fmtDate(e.starts_at, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }, e.timezone)}</small></span></a>)}
+              <a href={`${base}/community/events`} class={active === 'events' ? 'on' : ''}><span>All events →</span></a>
+            </div>
+          )}
+          {member?.status === 'active' && <><h4>You</h4><a href={`${base}/community/chat`} class={active === 'chat' ? 'on' : ''}><span>Chats</span>{chatUnread ? <span class="s-badge" data-chat-unread>{chatUnread > 99 ? '99+' : chatUnread}</span> : null}</a><a href={`${base}/community/dm`} class={active === 'dm' ? 'on' : ''} data-nav-dm><span>Direct messages</span>{dmUnread ? <span class="s-badge" data-dm-unread-total>{dmUnread > 99 ? '99+' : dmUnread}</span> : null}</a><a href={`${base}/community/messages`} class={active === 'messages' ? 'on' : ''}><span>Message the team</span>{unread ? <span class="s-badge">{unread}</span> : null}</a>{discordCfg(pub) && <a href={`${base}/community/discord`} class={active === 'discord' ? 'on' : ''}>Discord</a>}</>}
         </aside>
         <section style="min-width:0">{content}</section>
       </div>
@@ -136,32 +146,69 @@ export function registerCommunitySite(site: App) {
     return back(c, `${info.base}/community/messages`, 'Message sent');
   });
 
-  // ── Discord account linking
+  // ── Discord account linking: OAuth2 ("identify") when configured; otherwise a manual, unverified user ID.
   site.get('/community/discord', async (c) => {
     const info = await ctxInfo(c);
     const err = requireWriter(info);
     if (err || !discordCfg(info.pub)) return Shell(c, 'Discord', 'discord', err ? <Gate base={info.base} pubName={info.pub.name} /> : <p>Discord isn't enabled for this community.</p>);
+    const oauth = await discordOAuthCfg(c.env, info.pub);
+    const m = info.member!;
+    const r = c.req.query('r');
     return Shell(c, 'Discord', 'discord', (
       <>
         <h1>Link your Discord</h1>
-        <p class="s-muted">Your Discord roles will follow your subscription tier automatically. In Discord: Settings → Advanced → enable Developer Mode, then right-click your name → Copy User ID.</p>
-        <form method="post" action={`${info.base}/community/discord`} class="s-form" style="margin-top:16px">
-          <input name="discord_user_id" value={info.member?.discord_user_id || ''} placeholder="Your Discord user ID (e.g. 80351110224678912)" pattern="\d{15,21}" required />
-          <button class="s-btn">{info.member?.discord_user_id ? 'Update & re-sync' : 'Link & sync roles'}</button>
-        </form>
+        <p class="s-muted">Your Discord roles follow your subscription tier automatically.</p>
+        {r && <div class={`s-box ${c.req.query('ok') === '1' ? '' : 's-error'}`} data-discord-result style="margin:12px 0">{r}</div>}
+        {m.discord_user_id && (
+          <div class="s-box" style="margin:12px 0" data-discord-linked>
+            Linked: <strong>{m.discord_username || m.discord_user_id}</strong> {m.discord_verified ? <span class="s-badge">✓ verified</span> : <span class="s-badge">unverified</span>}
+            <form method="post" action={`${info.base}/community/discord/unlink`} style="display:inline;margin-left:10px"><button class="s-btn s-btn-ghost">Unlink</button></form>
+          </div>
+        )}
+        {oauth ? (
+          <p style="margin-top:16px"><a class="s-btn" href={`${info.base}/community/discord/connect`} data-discord-connect>{m.discord_user_id ? 'Re-connect with Discord' : 'Connect with Discord'}</a></p>
+        ) : (
+          <>
+            <p class="s-muted">In Discord: Settings → Advanced → enable Developer Mode, then right-click your name → Copy User ID. <strong>Manually entered IDs are unverified</strong> — the community admin can enable “Connect with Discord” to verify accounts.</p>
+            <form method="post" action={`${info.base}/community/discord`} class="s-form" style="margin-top:16px">
+              <input name="discord_user_id" value={m.discord_user_id || ''} placeholder="Your Discord user ID (e.g. 80351110224678912)" pattern="\d{15,21}" required />
+              <button class="s-btn">{m.discord_user_id ? 'Update & re-sync' : 'Link & sync roles (unverified)'}</button>
+            </form>
+          </>
+        )}
       </>
     ));
+  });
+
+  site.get('/community/discord/connect', async (c) => {
+    const info = await ctxInfo(c);
+    const err = requireWriter(info);
+    if (err) return SiteMessage(c, 'Not allowed', <p>{err}</p>, 403);
+    const oauth = discordCfg(info.pub) ? await discordOAuthCfg(c.env, info.pub) : null;
+    if (!oauth) return back(c, `${info.base}/community/discord`, 'Discord sign-in is not configured for this community.', 'err');
+    if (!(await rateLimit(c.env, `discordoauth:${info.sub!.id}`, 10, 3600))) return SiteMessage(c, 'Slow down', <p>Too many attempts. Try again later.</p>, 429);
+    const state = await issueToken(c.env, 'discord_oauth', 10 * 60_000, { pub_id: info.pub.id, subscriber_id: info.sub!.id, data: { back: `${info.base}/community/discord` } });
+    return c.redirect(discordAuthorizeUrl(c.env, oauth, state), 302);
   });
 
   site.post('/community/discord', async (c) => {
     const info = await ctxInfo(c);
     const err = requireWriter(info);
     if (err) return SiteMessage(c, 'Not allowed', <p>{err}</p>, 403);
+    if (await discordOAuthCfg(c.env, info.pub)) return back(c, `${info.base}/community/discord`, 'Use “Connect with Discord” to link your account.', 'err');
     const did = str((await form(c.req)).discord_user_id, 25);
     if (!/^\d{15,21}$/.test(did)) return back(c, `${info.base}/community/discord`, 'That does not look like a Discord user ID', 'err');
-    await run(c.env, 'UPDATE community_members SET discord_user_id = ? WHERE pub_id = ? AND subscriber_id = ?', did, info.pub.id, info.sub!.id);
+    await run(c.env, 'UPDATE community_members SET discord_user_id = ?, discord_username = NULL, discord_verified = 0 WHERE pub_id = ? AND subscriber_id = ?', did, info.pub.id, info.sub!.id);
     const r = await syncDiscordRoles(c.env, info.pub, info.sub!.id);
-    return back(c, `${info.base}/community/discord`, `Discord linked. ${r}`, r.startsWith('Synced') ? 'ok' : 'err');
+    return back(c, `${info.base}/community/discord`, `Discord linked (unverified). ${r}`, r.startsWith('Synced') ? 'ok' : 'err');
+  });
+
+  site.post('/community/discord/unlink', async (c) => {
+    const info = await ctxInfo(c);
+    const err = requireWriter(info);
+    if (err) return SiteMessage(c, 'Not allowed', <p>{err}</p>, 403);
+    await run(c.env, 'UPDATE community_members SET discord_user_id = NULL, discord_username = NULL, discord_verified = 0 WHERE pub_id = ? AND subscriber_id = ?', info.pub.id, info.sub!.id);
+    return back(c, `${info.base}/community/discord`, 'Discord unlinked');
   });
 
   // ── Reports & likes
@@ -254,7 +301,7 @@ export function registerCommunitySite(site: App) {
     const liked = info.sub ? !!(await one(c.env, 'SELECT 1 FROM community_likes WHERE post_id = ? AND subscriber_id = ?', p.id, info.sub.id)) : false;
     const writer = !requireWriter(info);
     const url = `${info.base}/community/${ch.slug}/${p.id}`;
-    const Author = ({ r }: { r: any }) => { const a = nameOf(r); return <><strong>{a.name}</strong>{a.team ? <span class="c-role">team</span> : a.role !== 'member' ? <span class="c-role">{a.role}</span> : null}</>; };
+    const Author = ({ r }: { r: any }) => { const a = nameOf(r); return <><strong>{r.author_subscriber_id && !a.team ? <a href={`${info.base}/community/u/${r.author_subscriber_id}`} style="color:inherit">{a.name}</a> : a.name}</strong>{a.team ? <span class="c-role">team</span> : a.role !== 'member' ? <span class="c-role">{a.role}</span> : null}</>; };
     const Thread = ({ parent, depth }: { parent: string | null; depth: number }): any => {
       const kids = comments.filter((x) => (x.parent_id || null) === parent);
       if (!kids.length) return null;
@@ -279,7 +326,7 @@ export function registerCommunitySite(site: App) {
       <article>
         <p class="c-meta"><a href={`${info.base}/community/${ch.slug}`}>← #{ch.name}</a></p>
         <h1>{p.pinned ? '📌 ' : ''}{p.title}</h1>
-        <div class="c-meta"><Author r={p} /><span>{ago(p.created_at)}</span>{p.status === 'hidden' && <span class="s-badge">hidden</span>}</div>
+        <div class="c-meta"><Author r={p} /><span>{ago(p.created_at)}</span>{p.status === 'hidden' && <span class="s-badge">hidden</span>}{writer && p.author_subscriber_id && p.author_subscriber_id !== info.sub?.id && <form method="post" action={`${info.base}/community/dm/start`} style="display:inline"><input type="hidden" name="to" value={p.author_subscriber_id} /><button style="background:none;border:0;color:var(--accent);cursor:pointer;font:inherit;padding:0" data-dm-author>✉ Message</button></form>}</div>
         <div class="c-body" style="margin:16px 0">{raw(renderBody(p.body))}</div>
         <div class="c-actions" style="font-size:15px;gap:16px">
           <form method="post" action={`${info.base}/community/like/${p.id}`}><button style={liked ? 'color:var(--accent);font-weight:700' : ''}>♥ {p.like_count}</button></form>

@@ -17,16 +17,17 @@ import { canModerate, notify, teamCommunityRole } from './shared';
 import { ctxInfo, Shell, Gate, requireWriter } from './site';
 import { roomAccess, roomsFor, roomMembers, ensureDefaultRoom, MAX_GROUP_MEMBERS, type ChatRoomRow } from './chatdata';
 import { chatStub, chatRoomChanged, chatKick } from '../../lib/chatroom';
+import { registerDmSite } from './dm';
 
 const EMOJIS = ['👍', '❤️', '😂', '🎉', '🔥', '👀'];
 
-function ChatUI(p: { cfg: Record<string, unknown>; room: ChatRoomRow; members?: Array<{ member_key: string; name: string; role: string }>; canAddMembers?: boolean; addAction?: string; leaveAction?: string; dash?: boolean }) {
+export function ChatUI(p: { cfg: Record<string, unknown>; room: ChatRoomRow; members?: Array<{ member_key: string; name: string; role: string }>; canAddMembers?: boolean; addAction?: string; leaveAction?: string; dash?: boolean }) {
   return (
     <div class={`cc ${p.dash ? 'cc-dash' : ''}`} id="cc">
       <div class="cc-main">
         <header class="cc-head">
           <div>
-            <strong class="cc-title">{p.room.kind === 'group' ? '' : '#'}{p.room.name}</strong>
+            <strong class="cc-title">{p.room.kind === 'public' ? '#' : ''}{p.room.name}</strong>
             <span class="cc-desc">{p.room.description}</span>
           </div>
           <div class="cc-head-r">
@@ -98,6 +99,8 @@ async function findRoom(c: Ctx, pubId: string, key: string) {
 const chatCss = <link rel="stylesheet" href="/static/community-chat.css" />;
 
 export function registerChatSite(site: App) {
+  // Member DMs, profiles and the events panel first: their paths must win over /community/:channel catch-alls.
+  registerDmSite(site);
   // ── Room list + create group chat
   site.get('/community/chat', async (c) => {
     const info = await ctxInfo(c);
@@ -191,6 +194,7 @@ export function registerChatSite(site: App) {
     headers.set('x-room', room.id);
     headers.set('x-pub', pub.id);
     if (c.req.query('as') === 'team') {
+      if (room.kind === 'dm') return c.text('Forbidden', 403); // member DMs are private; moderation works through reports
       const team = await teamIdentity(c, pub);
       if (!team) return c.text('Forbidden', 403);
       headers.set('x-key', 'u:' + team.user.id);
@@ -217,6 +221,7 @@ export function registerChatSite(site: App) {
     if (err) return Shell(c, 'Chat', 'chat', <><h1>Chat</h1><p class="s-muted">{err}</p><Gate base={info.base} pubName={info.pub.name} /></>);
     const room = await findRoom(c, info.pub.id, c.req.param('room'));
     if (!room || room.archived) return SiteMessage(c, 'Chat not found', <p>This chat doesn't exist or was archived. <a href={`${info.base}/community/chat`}>Back to chats</a></p>, 404);
+    if (room.kind === 'dm') return c.redirect(`${info.base}/community/dm/${room.slug}`);
     if (info.member?.chat_banned) return Shell(c, room.name, 'chat', <div class="s-box">You no longer have access to community chat.</div>);
     const key = 's:' + info.sub!.id;
     const acc = await roomAccess(c.env, room, key, info.sub, info.premium, false);
@@ -406,7 +411,7 @@ export function registerChatDash(dash: App) {
   dash.get('/chats/:id', async (c) => {
     const pub = c.get('pub');
     const room = await one<ChatRoomRow>(c.env, 'SELECT * FROM chat_rooms WHERE id = ? AND pub_id = ?', c.req.param('id'), pub.id);
-    if (!room) return c.notFound();
+    if (!room || room.kind === 'dm') return c.notFound();
     const user = c.get('user');
     const members = room.kind === 'group' ? await roomMembers(c.env, room.id) : undefined;
     const base = `/s/${pub.slug}/community/chat`;

@@ -8,6 +8,7 @@ import { rateLimit } from './guard';
 import { siteUrl } from './pub';
 import { id, now, esc, truncate } from './util';
 import { notify } from '../routes/community/shared';
+import { dmBlockedReason } from '../routes/community/chatdata';
 
 interface Att { key: string; name: string; mod: boolean; sub: string | null; user: string | null; room: string; pub: string; conn: string }
 export interface ChatMsg {
@@ -148,6 +149,14 @@ export class ChatRoom implements DurableObject {
     if (standing === 'muted') return this.send(ws, { type: 'error', code: 'muted', message: 'A moderator has muted you for now.', client_id: msg.client_id });
     const room = await one<any>(this.env, 'SELECT * FROM chat_rooms WHERE id = ?', me.room);
     if (!room || room.archived) return this.send(ws, { type: 'error', message: 'This chat is archived.', client_id: msg.client_id });
+    let dmTo: string | null = null;
+    if (room.kind === 'dm') {
+      // Re-checked on every message: blocks, DM opt-outs and bans apply immediately.
+      const other = await one<{ member_key: string }>(this.env, `SELECT member_key FROM chat_room_members WHERE room_id = ? AND member_key != ? AND joined = 1`, me.room, me.key);
+      dmTo = other?.member_key?.startsWith('s:') ? other.member_key.slice(2) : null;
+      const why = !me.sub || !dmTo ? 'This conversation is closed.' : await dmBlockedReason(this.env, me.pub, me.sub, dmTo);
+      if (why) return this.send(ws, { type: 'error', code: 'dm_blocked', message: why, client_id: msg.client_id });
+    }
     if (!me.mod && room.slow_mode_sec > 0) {
       const last = (await this.state.storage.get<number>('rl:' + me.key)) || 0;
       const wait = Math.ceil((last + room.slow_mode_sec * 1000 - now()) / 1000);
@@ -174,7 +183,20 @@ export class ChatRoom implements DurableObject {
     cache.push(m);
     await this.state.storage.put('recent', cache.slice(-CACHE));
     this.broadcast({ type: 'message', message: m, client_id: msg.client_id });
-    if (body.includes('@')) this.state.waitUntil(this.mentions(me, room, m).catch((e) => console.error('chat mentions', e)));
+    if (dmTo) this.state.waitUntil(this.dmNotify(me, room, m, dmTo).catch((e) => console.error('dm notify', e)));
+    else if (body.includes('@')) this.state.waitUntil(this.mentions(me, room, m).catch((e) => console.error('chat mentions', e)));
+  }
+
+  /** Email the DM recipient when they aren't in the conversation (at most once per 15 minutes per conversation). */
+  private async dmNotify(me: Att, room: any, m: ChatMsg, to: string) {
+    if (this.online().some((o) => o.key === 's:' + to)) return;
+    if (!(await rateLimit(this.env, `dmnotify:${room.id}:${to}`, 1, 900))) return;
+    const [pub, target] = await Promise.all([
+      one<Publication>(this.env, 'SELECT * FROM publications WHERE id = ?', me.pub),
+      one<any>(this.env, 'SELECT email FROM subscribers WHERE id = ?', to),
+    ]);
+    if (!pub || !target) return;
+    await notify(this.env, pub, target.email, `${me.name} sent you a message`, `<p><strong>${esc(me.name)}</strong> sent you a direct message in the ${esc(pub.name)} community:</p><blockquote style="border-left:3px solid #e5e7eb;margin:8px 0;padding:4px 12px;color:#374151">${esc(truncate(m.body || '[image]', 300))}</blockquote><p style="font-size:13px;color:#6b7280">You can turn off direct messages or block members from your community inbox.</p>`, `${siteUrl(this.env, pub)}/community/dm/${room.slug}`);
   }
 
   /** @mention emails (only to people not currently in the room; at most one per recipient per room per 10 min). */

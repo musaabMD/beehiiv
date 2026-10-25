@@ -10,7 +10,7 @@ import { DashLayout } from '../../ui/layout';
 import { Card, Table, Btn, Field, Input, Textarea, Select, Modal, OpenBtn, ActionForm, Status, Empty, back, Help, Stats, Stat, Tabs, LineChart, Toggle, Check, Badge, Grid } from '../../ui/components';
 import { id, now, form, str, num, ago, parseJSON, slugify, truncate, DAY, esc } from '../../lib/util';
 import { ensureDefaultChannel, notify, renderBody, authorNames, createCommunityPost, teamCommunityRole, CROLES, type Channel } from './shared';
-import { discordCfg, testDiscord, syncDiscordRoles, linkedMembers } from '../../lib/discord';
+import { discordCfg, testDiscord, syncDiscordRoles, linkedMembers, discordOAuthCfg, discordRedirectUri } from '../../lib/discord';
 import { patchSettings } from '../grow/shared';
 import { chatRemoved, chatKick } from '../../lib/chatroom';
 
@@ -297,7 +297,7 @@ export function registerCommunityDash(dash: App) {
               <span class="row">{(['active', 'invited', 'banned'] as const).map((s) => <a href={`/app/community/members?status=${s}`} class={`btn btn-sm ${status === s ? 'btn-secondary' : 'btn-ghost'}`}>{s} ({cnt(s)})</a>)}</span>
             } actions={<form method="get" class="row"><input type="hidden" name="status" value={status} /><input class="input" name="q" value={q} placeholder="Search members" style="width:200px;height:30px" /></form>}>
               <Table rows={members} empty={status === 'active' ? 'No members yet — invite your most engaged readers.' : 'Nobody here.'} cols={[
-                { h: 'Member', r: (m) => <><a href={`/app/audience/subscribers/${m.subscriber_id}`}>{m.display_name || m.name || m.email}</a><div class="muted small">{m.email}{m.discord_user_id ? ' · Discord linked' : ''}</div></> },
+                { h: 'Member', r: (m) => <><a href={`/app/audience/subscribers/${m.subscriber_id}`}>{m.display_name || m.name || m.email}</a><div class="muted small">{m.email}{m.discord_user_id ? (m.discord_verified ? ' · Discord verified' : ' · Discord linked (unverified)') : ''}</div></> },
                 { h: 'Tier', r: (m) => <Status s={m.tier} /> },
                 { h: 'Role', r: (m) => can(c.get('role'), 'manage') && m.status === 'active' ? <form method="post" action={`/app/community/members/${m.subscriber_id}/role`}><Select name="role" value={m.role} options={CROLES} autosubmit class="" /></form> : m.role },
                 { h: 'Activity', class: 'right', r: (m) => <span class="small">{m.posts} posts · {m.comments} comments</span> },
@@ -393,7 +393,7 @@ export function registerCommunityDash(dash: App) {
     const items = await Promise.all(reports.map(async (r) => {
       const t = r.target_kind === 'post' ? await one<any>(c.env, 'SELECT id, title, body, status, author_subscriber_id, author_user_id, id AS post_id, channel_id FROM community_posts WHERE id = ?', r.target_id)
         : r.target_kind === 'comment' ? await one<any>(c.env, 'SELECT id, body, status, author_subscriber_id, author_user_id, post_id FROM community_comments WHERE id = ?', r.target_id)
-        : r.target_kind === 'chat' ? await one<any>(c.env, `SELECT m.id, CASE WHEN m.image_url IS NOT NULL THEN m.body || ' [image: ' || m.image_url || ']' ELSE m.body END AS body, m.status, m.author_subscriber_id, m.author_user_id, m.room_id, r.name AS room_name FROM chat_messages m LEFT JOIN chat_rooms r ON r.id = m.room_id WHERE m.id = ?`, r.target_id)
+        : r.target_kind === 'chat' ? await one<any>(c.env, `SELECT m.id, CASE WHEN m.image_url IS NOT NULL THEN m.body || ' [image: ' || m.image_url || ']' ELSE m.body END AS body, m.status, m.author_subscriber_id, m.author_user_id, m.room_id, r.name AS room_name, r.kind AS room_kind FROM chat_messages m LEFT JOIN chat_rooms r ON r.id = m.room_id WHERE m.id = ?`, r.target_id)
         : await one<any>(c.env, `SELECT id, body, subscriber_id AS author_subscriber_id, NULL AS author_user_id, 'visible' AS status FROM direct_messages WHERE id = ?`, r.target_id);
       return { ...r, t };
     }));
@@ -402,7 +402,7 @@ export function registerCommunityDash(dash: App) {
       <Page c={c} title="Moderation" tab="/app/community/moderation">
         <div class="row" style="margin-bottom:12px">{(['open', 'actioned', 'dismissed'] as const).map((s) => <a href={`/app/community/moderation?status=${s}`} class={`btn btn-sm ${status === s ? 'btn-secondary' : 'btn-ghost'}`}>{s}</a>)}</div>
         {!items.length ? <Card><Empty title="Queue is clear" body="Reported posts, comments and messages show up here." icon="✓" /></Card> : items.map((r) => (
-          <Card title={<>{r.target_kind} reported {ago(r.created_at)} <small class="muted">by {r.reporter || 'a member'}</small></>} actions={<Status s={r.status} />}>
+          <Card title={<>{r.target_kind === 'chat' && r.t?.room_kind === 'dm' ? 'direct message' : r.target_kind} reported {ago(r.created_at)} <small class="muted">by {r.reporter || 'a member'}</small></>} actions={<Status s={r.status} />}>
             {r.reason && <p><strong>Reason:</strong> {r.reason}</p>}
             {r.t ? <>
               <div class="muted small">By {nameOf(r.t).name} · currently <Status s={r.t.status} /></div>
@@ -415,7 +415,8 @@ export function registerCommunityDash(dash: App) {
                   <ActionForm action={`/app/community/moderation/${r.id}`} fields={{ action: 'dismiss' }} label="Dismiss" kind="ghost" />
                   {r.target_kind === 'comment' && <a class="btn btn-ghost btn-sm" href={`/app/community/posts/${r.t.post_id}`}>View thread</a>}
                   {r.target_kind === 'post' && <a class="btn btn-ghost btn-sm" href={`/app/community/posts/${r.t.id}`}>View post</a>}
-                  {r.target_kind === 'chat' && <a class="btn btn-ghost btn-sm" href={`/app/community/chats/${r.t.room_id}`}>Open #{r.t.room_name || 'chat'}</a>}
+                  {r.target_kind === 'chat' && r.t.room_kind !== 'dm' && <a class="btn btn-ghost btn-sm" href={`/app/community/chats/${r.t.room_id}`}>Open #{r.t.room_name || 'chat'}</a>}
+                  {r.target_kind === 'chat' && r.t.room_kind === 'dm' && <span class="muted small">Private member DM — only the reported message is shown.</span>}
                 </div>
               )}
             </> : <p class="muted">The reported content no longer exists.</p>}
@@ -519,6 +520,8 @@ export function registerCommunityDash(dash: App) {
     const tiers = await all<any>(c.env, `SELECT id, name FROM tiers WHERE pub_id = ? AND status != 'archived' ORDER BY position`, pub.id);
     const linked = await linkedMembers(c.env, pub.id);
     const roles = d.tier_roles || {};
+    const oa = cfg.discord_oauth || {};
+    const oauth = await discordOAuthCfg(c.env, pub);
     return c.html(
       <Page c={c} title="Community settings" tab="/app/community/settings">
         <Grid cols={2}>
@@ -529,7 +532,7 @@ export function registerCommunityDash(dash: App) {
               <div class="form-actions"><Btn>Save</Btn></div>
             </form>
           </Card>
-          <Card title="Discord integration" actions={discordCfg(pub) ? <Badge tone="green">configured</Badge> : <Badge>off</Badge>}>
+          <Card title="Discord integration" actions={discordCfg(pub) ? <Badge tone="green">{oauth ? 'configured · verified linking' : 'configured'}</Badge> : <Badge>off</Badge>}>
             <form method="post" action="/app/community/settings">
               <input type="hidden" name="section" value="discord" />
               <Help>Create a bot at discord.com/developers, enable the Server Members intent, invite it with “Manage Roles”, and place its role above the tier roles. Members link their Discord account at <code>/community/discord</code>; roles then follow their subscription tier.</Help>
@@ -538,6 +541,11 @@ export function registerCommunityDash(dash: App) {
               <Field label="Role for all subscribers (optional)"><Input name="role_free" value={roles.free || ''} placeholder="Role ID" /></Field>
               <Field label="Role for any premium subscriber"><Input name="role_premium" value={roles.premium || ''} placeholder="Role ID" /></Field>
               {tiers.map((t) => <Field label={`Role for tier “${t.name}”`}><Input name={`role_${t.id}`} value={roles[t.id] || ''} placeholder="Role ID" /></Field>)}
+              <hr />
+              <strong>Verified linking (“Connect with Discord”)</strong>
+              <Help>Members prove which Discord account is theirs with Discord sign-in (OAuth2, <code>identify</code> scope) instead of typing a user ID. In your Discord application → OAuth2, add the redirect <code>{discordRedirectUri(c.env)}</code> and paste the client ID and secret here.{oauth?.source === 'instance' ? ' This instance already provides a shared Discord app — leave these empty to use it.' : ''}</Help>
+              <Field label="OAuth2 client ID"><Input name="oauth_client_id" value={oa.client_id || ''} placeholder={oauth?.source === 'instance' ? 'Using the instance app' : 'Client ID'} /></Field>
+              <Field label="OAuth2 client secret"><Input name="oauth_client_secret" type="password" value={oa.client_secret ? '••••••••' : ''} placeholder="Client secret" /></Field>
               <div class="form-actions"><Btn>Save & test connection</Btn></div>
             </form>
             {linked.length > 0 && <><hr /><p class="small">{linked.length} member{linked.length === 1 ? '' : 's'} linked.</p><ActionForm action="/app/community/settings/discord-sync" label="Re-sync all roles" /></>}
@@ -559,7 +567,10 @@ export function registerCommunityDash(dash: App) {
     for (const [k, v] of Object.entries(f)) if (k.startsWith('role_') && str(v)) tier_roles[k.slice(5)] = str(v, 40);
     const token = str(f.bot_token, 200);
     const discord = { bot_token: token && !token.startsWith('••') ? token : cur.bot_token, guild_id: str(f.guild_id, 40), tier_roles };
-    await patchSettings(c.env, pub, { discord: discord.bot_token || discord.guild_id ? discord : undefined });
+    const curOa = parseJSON<any>(pub.settings, {}).discord_oauth || {};
+    const secret = str(f.oauth_client_secret, 200);
+    const oauthCfg = { client_id: str(f.oauth_client_id, 40), client_secret: secret && !secret.startsWith('••') ? secret : curOa.client_secret };
+    await patchSettings(c.env, pub, { discord: discord.bot_token || discord.guild_id ? discord : undefined, discord_oauth: oauthCfg.client_id && oauthCfg.client_secret ? oauthCfg : undefined });
     await audit(c, 'community.discord.update');
     if (discord.bot_token && discord.guild_id) {
       const t = await testDiscord(discord);

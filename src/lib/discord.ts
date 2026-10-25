@@ -3,7 +3,8 @@
 import type { Env, Publication } from '../types';
 import { one, all } from './db';
 import { onEvent } from './events';
-import { settings, getPub } from './pub';
+import { settings, getPub, appUrl } from './pub';
+import { integration } from './integrations';
 import { logError } from './jobs';
 
 const API = 'https://discord.com/api/v10';
@@ -77,4 +78,44 @@ onEvent(async (env, e) => {
 
 export async function linkedMembers(env: Env, pubId: string) {
   return all<any>(env, `SELECT cm.*, s.email, s.tier FROM community_members cm JOIN subscribers s ON s.id = cm.subscriber_id WHERE cm.pub_id = ? AND cm.discord_user_id IS NOT NULL`, pubId);
+}
+
+// ───────── Discord OAuth2 (identify scope): members prove which Discord account is theirs ─────────
+// Credentials come from (in order) the publication's community settings (settings.discord_oauth), an active
+// "discord" integration row with client_id/client_secret, or the instance env DISCORD_CLIENT_ID/DISCORD_CLIENT_SECRET.
+// Every publication uses the same redirect URI: <APP_URL>/oauth/discord/callback (register it in the Discord app).
+export interface DiscordOAuth { client_id: string; client_secret: string; source: 'publication' | 'integration' | 'instance' }
+
+export async function discordOAuthCfg(env: Env, pub: Publication): Promise<DiscordOAuth | null> {
+  const s = settings(pub).discord_oauth as { client_id?: string; client_secret?: string } | undefined;
+  if (s?.client_id && s.client_secret) return { client_id: s.client_id, client_secret: s.client_secret, source: 'publication' };
+  const i = await integration(env, pub.id, 'discord').catch(() => null);
+  if (i?.client_id && i?.client_secret) return { client_id: String(i.client_id), client_secret: String(i.client_secret), source: 'integration' };
+  if (env.DISCORD_CLIENT_ID && env.DISCORD_CLIENT_SECRET) return { client_id: env.DISCORD_CLIENT_ID, client_secret: env.DISCORD_CLIENT_SECRET, source: 'instance' };
+  return null;
+}
+
+export const discordRedirectUri = (env: Env) => appUrl(env, '/oauth/discord/callback');
+const oauthBase = (env: Env) => (env.DISCORD_API_BASE || 'https://discord.com/api').replace(/\/$/, '');
+
+export function discordAuthorizeUrl(env: Env, cfg: DiscordOAuth, state: string): string {
+  const q = new URLSearchParams({ client_id: cfg.client_id, response_type: 'code', scope: 'identify', redirect_uri: discordRedirectUri(env), state, prompt: 'consent' });
+  return `https://discord.com/oauth2/authorize?${q}`;
+}
+
+/** Exchange an authorization code for the member's Discord identity (id + username). */
+export async function discordIdentify(env: Env, cfg: DiscordOAuth, code: string): Promise<{ id: string; username: string }> {
+  const tr = await fetch(`${oauthBase(env)}/oauth2/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+    body: new URLSearchParams({ client_id: cfg.client_id, client_secret: cfg.client_secret, grant_type: 'authorization_code', code, redirect_uri: discordRedirectUri(env) }),
+  });
+  const tok: any = await tr.json().catch(() => ({}));
+  if (!tr.ok || !tok.access_token) throw new Error(`Discord token exchange failed (${tok.error_description || tok.error || 'HTTP ' + tr.status})`);
+  const ur = await fetch(`${oauthBase(env)}/users/@me`, { headers: { authorization: `${tok.token_type || 'Bearer'} ${tok.access_token}` } });
+  const u: any = await ur.json().catch(() => ({}));
+  if (!ur.ok || !/^\d{15,21}$/.test(String(u.id || ''))) throw new Error(`Discord did not return your account (HTTP ${ur.status})`);
+  // Best effort: we only needed one call; revoke the token so nothing long-lived is kept.
+  await fetch(`${oauthBase(env)}/oauth2/token/revoke`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: tok.access_token, token_type_hint: 'access_token', client_id: cfg.client_id, client_secret: cfg.client_secret }) }).catch(() => {});
+  return { id: String(u.id), username: String(u.global_name || u.username || u.id).slice(0, 80) };
 }
