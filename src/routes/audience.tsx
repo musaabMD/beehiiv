@@ -14,6 +14,7 @@ import root from './audience/embed';
 
 const dash = new Hono<AppEnv>();
 dash.use('*', requirePerm('manage'));
+dash.get('/subscribers/:id', (c) => c.redirect('/app/audience/s/' + c.req.param('id'), 301));
 dash.route('/', segments);
 dash.route('/', lists);
 dash.route('/', forms);

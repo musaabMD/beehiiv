@@ -17,6 +17,7 @@ import { registerEmail } from './settings/email';
 import { registerDomains } from './settings/domains';
 import { registerDevelopers } from './settings/developers';
 import { registerAccount } from './settings/account';
+import { registerMonitoring } from './settings/monitoring';
 import '../lib/domains';
 import '../lib/integrations';
 
@@ -539,6 +540,7 @@ registerEmail(dash);
 registerDomains(dash);
 registerDevelopers(dash);
 registerAccount(dash);
+registerMonitoring(dash);
 
 const root = new Hono<AppEnv>();
 export default { dash, root } satisfies Module;

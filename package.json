@@ -2,7 +2,7 @@
   "name": "openhive",
   "version": "1.0.0",
   "private": true,
-  "description": "OpenHive — open-source newsletter platform on Cloudflare Workers",
+  "description": "OpenHive \u2014 open-source newsletter platform on Cloudflare Workers",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
@@ -10,7 +10,10 @@
     "db:migrate:remote": "wrangler d1 migrations apply openhive --remote",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/e2e.mjs",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "build:docs": "node scripts/build-docs.mjs",
+    "build:landing": "node scripts/build-landing.mjs",
+    "seed": "node scripts/seed.mjs > .wrangler/seed.sql && wrangler d1 execute openhive --local --file .wrangler/seed.sql"
   },
   "dependencies": {
     "hono": "^4.13.13"
