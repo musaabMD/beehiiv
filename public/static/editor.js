@@ -177,6 +177,7 @@
     poll: { label: 'Poll', icon: '📊', group: 'Grow', keys: 'poll vote survey question', feature: 'polls', data: () => ({ poll_id: '' }) },
     referral: { label: 'Referral block', icon: '🎁', group: 'Grow', keys: 'referral share refer rewards', data: () => ({ title: '' }) },
     recommendations: { label: 'Recommendations', icon: '★', group: 'Grow', keys: 'recommendations newsletters recommend', data: () => ({ title: '', limit: 3 }) },
+    ad_auto: { label: 'Programmatic ad', icon: '¤', group: 'Grow', keys: 'ad auto programmatic network sponsor', data: () => ({ label: 'Sponsored' }) },
     ad: { label: 'Ad / sponsor slot', icon: '$', group: 'Grow', keys: 'ad sponsor sponsorship advertisement', data: () => ({ label: 'Together with', headline: '', body: '', url: '', image: '', cta: 'Learn more' }) },
     product: { label: 'Product', icon: '🛍', group: 'Grow', keys: 'product shop digital download sell', data: () => ({ product_id: '' }) },
     event: { label: 'Event', icon: '📅', group: 'Grow', keys: 'event webinar ticket', data: () => ({ event_id: '' }) },
@@ -1237,6 +1238,10 @@
     fields() { return [{ k: 'label', label: 'Button label', type: 'text' }]; }
     emptyState() { return `<div class="oh-subscribe-inline"><input type="email" placeholder="you@example.com" disabled><button class="oh-btn">${esc(this.d.label || 'Subscribe')}</button></div><p class="ohe-hint">Shown on the web only — hidden in emails.</p>`; }
   }
+  class AdAutoView extends CardView {
+    fields() { return [{ k: 'label', label: 'Label', type: 'text', ph: 'Sponsored' }]; }
+    emptyState() { return `<div class="ohe-ph">¤ <strong>Programmatic ad</strong> — filled automatically at send time with the best-paying approved campaign (Monetize → Ad network → Programmatic).</div>`; }
+  }
   class ReferralView extends CardView { fields() { return [{ k: 'title', label: 'Title', type: 'text', ph: 'Share this newsletter, earn rewards' }]; } }
   class RecsView extends CardView {
     fields() { return [{ k: 'title', label: 'Title', type: 'text', ph: 'Newsletters we recommend' }, { k: 'limit', label: 'Show', type: 'number', min: 1, max: 6 }]; }
@@ -1599,7 +1604,7 @@
     paragraph: ParagraphView, heading: HeadingView, list: ListView, checklist: ChecklistView, quote: QuoteView, code: CodeView, html: HtmlView,
     image: ImageView, gallery: GalleryView, video: FileView, audio: FileView, attachment: FileView, embed: EmbedView, table: TableView,
     columns: ColumnsView, section: SectionView, dynamic: DynamicView, button: ButtonView, divider: DividerView, spacer: SpacerView, toc: TocView,
-    paywall: PaywallView, subscribe: SubscribeView, poll: PollView, referral: ReferralView, recommendations: RecsView, ad: AdView,
+    paywall: PaywallView, subscribe: SubscribeView, poll: PollView, referral: ReferralView, recommendations: RecsView, ad: AdView, ad_auto: AdAutoView,
     podcast: PodcastView, product: ProductView, event: EventView,
   };
 

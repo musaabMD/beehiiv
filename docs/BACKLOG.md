@@ -440,3 +440,13 @@ Modules: auth, dashboard, posts, website, podcasts, community, events, audience,
 - [x] (root) landing page at / selling the source for $30 one-time (PURCHASE_URL, PRICE_LABEL)
 - [x] static copy of landing page in landing/index.html for Lnkbase.com/beehiiv
 - [x] README with setup + deploy
+
+## Added from the "100 features" list (2026-10-25)
+Everything else in that list maps to items above. These were missing and are now built:
+- [x] (posts) RSS-to-send — each new item or scheduled digests, draft or auto-send, per-feed history, "check now"
+- [x] (audience) trivia polls — correct answer, explanation, % correct, per-subscriber leaderboard
+- [x] (posts) GIF integration — GIF search (GIPHY key via Integrations), paste/upload GIFs, animation preserved
+- [x] (community) group chats — real-time rooms + private groups, mentions, reactions, moderation
+- [x] (monetize) programmatic ads — auto-filled ad slots with floors, blocks, frequency caps, eCPM report
+- [x] (dashboard) 3D analytics — pivot explorer across three dimensions with heatmap, chart, CSV, saved views
+- [x] [ops] dedicated IP addresses — not offered by Cloudflare Email Sending; large senders can route via a dedicated-IP provider. Warmup, blocklist monitoring and per-domain reputation are built in.
