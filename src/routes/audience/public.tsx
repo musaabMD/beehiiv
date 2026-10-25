@@ -344,7 +344,8 @@ site.get('/poll/:id', async (c) => {
   const poll = await one<any>(c.env, 'SELECT * FROM polls WHERE id = ? AND pub_id = ?', c.req.param('id'), c.get('pub').id);
   if (!poll) return SiteMessage(c, 'Poll not found', <p>This poll does not exist.</p>, 404);
   const reader = c.get('reader');
-  let mine = c.req.query('voted') || getCookie(c, 'oh_pv_' + poll.id) || null;
+  // For trivia the answer is only revealed after a real vote (cookie or recorded subscriber vote), never from ?voted=.
+  let mine = (poll.kind === 'trivia' ? null : c.req.query('voted')) || getCookie(c, 'oh_pv_' + poll.id) || null;
   if (reader?.subscriber) mine = (await one<any>(c.env, 'SELECT option_id FROM poll_votes WHERE poll_id = ? AND subscriber_id = ?', poll.id, reader.subscriber.id))?.option_id || mine;
   return pollResults(c, poll, mine, c.req.query('voted') && poll.kind !== 'trivia' ? 'Thanks for voting!' : undefined);
 });
@@ -362,6 +363,7 @@ site.get('/poll/:id/vote', async (c) => {
   if (subId) {
     await castVote(c, poll, o, subId, d ? 'email' : 'web', c.req.query('post') || null);
     const mine = (await one<any>(c.env, 'SELECT option_id FROM poll_votes WHERE poll_id = ? AND subscriber_id = ?', poll.id, subId))?.option_id;
+    if (mine) setCookie(c, 'oh_pv_' + poll.id, mine, { path: '/', maxAge: 365 * 86400, sameSite: 'Lax' });
     return c.redirect(`${siteUrl(c.env, pub)}/poll/${poll.id}?voted=${encodeURIComponent(mine || o)}`, 303);
   }
   if (!getCookie(c, 'oh_pv_' + poll.id) && (await castVote(c, poll, o, null, 'web', c.req.query('post') || null))) setCookie(c, 'oh_pv_' + poll.id, o, { path: '/', maxAge: 365 * 86400, sameSite: 'Lax' });
@@ -375,8 +377,11 @@ site.post('/poll/:id/vote', async (c) => {
   const f = await form(c.req);
   const o = str(f.o, 40);
   const subId = c.get('reader')?.subscriber?.id || null;
-  if (subId) await castVote(c, poll, o, subId, 'web', str(f.post, 40) || null);
-  else if (!getCookie(c, 'oh_pv_' + poll.id) && (await castVote(c, poll, o, null, 'web', str(f.post, 40) || null))) setCookie(c, 'oh_pv_' + poll.id, o, { path: '/', maxAge: 365 * 86400, sameSite: 'Lax' });
+  if (subId) {
+    await castVote(c, poll, o, subId, 'web', str(f.post, 40) || null);
+    const mine = (await one<any>(c.env, 'SELECT option_id FROM poll_votes WHERE poll_id = ? AND subscriber_id = ?', poll.id, subId))?.option_id;
+    if (mine) setCookie(c, 'oh_pv_' + poll.id, mine, { path: '/', maxAge: 365 * 86400, sameSite: 'Lax' });
+  } else if (!getCookie(c, 'oh_pv_' + poll.id) && (await castVote(c, poll, o, null, 'web', str(f.post, 40) || null))) setCookie(c, 'oh_pv_' + poll.id, o, { path: '/', maxAge: 365 * 86400, sameSite: 'Lax' });
   const ref = c.req.header('referer');
   if ((c.req.header('accept') || '').includes('json')) return c.json({ ok: true });
   // Trivia always goes to the result page so the reader sees whether they were right.

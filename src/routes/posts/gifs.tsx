@@ -26,7 +26,7 @@ app.get('/gifs', async (c) => {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     const j: any = await r.json().catch(() => ({}));
-    if (!r.ok) return c.json({ configured: true, results: [], error: j?.meta?.msg || `GIPHY returned ${r.status}` }, 502);
+    if (!r.ok) return c.json({ configured: true, results: [], error: `GIPHY: ${j?.meta?.msg || 'error ' + r.status}` });
     const results = (j.data || []).map((g: any) => ({
       id: g.id,
       title: g.title || 'GIF',
@@ -37,7 +37,7 @@ app.get('/gifs', async (c) => {
     })).filter((g: any) => g.preview && g.url);
     return c.json({ configured: true, results, next: (j.pagination?.offset || 0) + results.length < (j.pagination?.total_count || 0) ? offset + results.length : null });
   } catch (e: any) {
-    return c.json({ configured: true, results: [], error: 'Could not reach GIPHY: ' + (e?.message || e) }, 502);
+    return c.json({ configured: true, results: [], error: 'Could not reach GIPHY: ' + (e?.message || e) });
   }
 });
 
