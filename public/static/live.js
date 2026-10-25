@@ -310,6 +310,8 @@
         btn('camera').disabled = true;
         enable();
         if (S.status === 'live') { if (SFU) publishSFU(); else for (const p of S.people.keys()) offerTo(p); }
+        // Host reloaded the studio while already live: resume automatic recording as a new session.
+        if (S.status === 'live' && cfg.autoRecord) S.startRecording?.(true);
       } catch (err) { toast('Camera/mic unavailable: ' + err.message); }
     };
     btn('mic').onclick = () => {
@@ -345,6 +347,7 @@
       send({ type: 'stream', status: 'live' });
       if (SFU) publishSFU(); else for (const p of S.people.keys()) offerTo(p);
       toast(SFU ? 'You are live — relayed through Cloudflare' : 'You are live!');
+      if (cfg.autoRecord) startRecording(true);
     };
     btn('end').onclick = () => {
       if (!confirm('End the event for everyone?')) return;
@@ -352,18 +355,41 @@
       if (SFU) { sfuPost({ action: 'unpublish' }).catch(() => {}); closeSfu(); }
       for (const pc of S.peers.values()) try { pc.close(); } catch {}
       S.peers.clear();
-      if (S.recorder && S.recorder.state !== 'inactive') S.recorder.stop();
+      stopRecording();
     };
 
-    // Recording: composite whatever is on stage (camera or screen) via a canvas, plus mic audio.
-    btn('record').onclick = () => {
-      if (S.recorder && S.recorder.state !== 'inactive') { S.recorder.stop(); return; }
+    // Recording: composite whatever is on stage (camera or screen) via a canvas, plus mic audio. Chunks (every 4 s) are
+    // uploaded as they are produced, so a closed tab loses at most a few seconds; the server stitches them on finish.
+    const REC = { id: null, chunkUrl: null, finishUrl: null, seq: 0, queue: Promise.resolve(), timer: null, failed: 0, starting: false };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    function uploadChunk(blob) {
+      const seq = REC.seq++, url = REC.chunkUrl;
+      REC.queue = REC.queue.then(async () => {
+        for (let attempt = 0; attempt < 6; attempt++) {
+          try {
+            const r = await fetch(`${url}?seq=${seq}`, { method: 'POST', body: blob, headers: { 'content-type': 'application/octet-stream', accept: 'application/json' }, credentials: 'same-origin' });
+            if (r.ok || r.status === 409) return;
+          } catch {}
+          await sleep(Math.min(1000 * 2 ** attempt, 15000));
+        }
+        REC.failed++;
+        toast('A piece of the recording failed to upload — check your connection.');
+      });
+    }
+    async function startRecording(auto) {
+      if (REC.starting || (S.recorder && S.recorder.state !== 'inactive') || !S.localStream || !window.MediaRecorder) return;
+      REC.starting = true;
+      const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
+      try {
+        const r = await fetch(`${cfg.recordBase}/start`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ auto: !!auto, mime: mime || 'video/webm' }) });
+        const j = await r.json();
+        if (!r.ok || !j.id) throw new Error(j.error || r.status);
+        Object.assign(REC, { id: j.id, chunkUrl: j.chunkUrl, finishUrl: j.finishUrl, seq: 0, failed: 0 });
+      } catch (err) { REC.starting = false; toast('Could not start recording: ' + err.message); return; }
       const canvas = document.createElement('canvas');
       canvas.width = 1280; canvas.height = 720;
       const ctx = canvas.getContext('2d');
-      let drawing = true;
       const draw = () => {
-        if (!drawing) return;
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         if (video.videoWidth) {
@@ -372,33 +398,41 @@
           ctx.drawImage(video, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
         }
       };
-      const timer = setInterval(draw, 1000 / 30);
+      REC.timer = setInterval(draw, 1000 / 30);
       const recStream = canvas.captureStream(30);
       if (S.micTrack) recStream.addTrack(S.micTrack);
-      const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
-      S.chunks = [];
       S.recorder = new MediaRecorder(recStream, mime ? { mimeType: mime, videoBitsPerSecond: 2_500_000 } : undefined);
-      S.recorder.ondataavailable = (e) => { if (e.data.size) S.chunks.push(e.data); };
-      S.recorder.onstop = async () => {
-        drawing = false;
-        clearInterval(timer);
+      S.recorder.ondataavailable = (e) => { if (e.data.size) uploadChunk(e.data); };
+      S.recorder.onstop = () => {
+        clearInterval(REC.timer);
         $('#live-rec').classList.add('hide');
         btn('record').textContent = '⏺ Record';
-        const blob = new Blob(S.chunks, { type: 'video/webm' });
-        if (!blob.size) return;
-        toast('Uploading recording…');
-        const fd = new FormData();
-        fd.append('file', new File([blob], 'recording.webm', { type: 'video/webm' }));
-        try {
-          const r = await fetch(cfg.recordUrl, { method: 'POST', body: fd, headers: { accept: 'application/json' }, credentials: 'same-origin' });
-          const j = await r.json();
-          toast(r.ok ? 'Recording saved — find it under Recording & replay' : 'Upload failed: ' + (j.error || r.status));
-        } catch (err) { toast('Upload failed: ' + err.message); }
+        const finishUrl = REC.finishUrl;
+        REC.id = null;
+        toast('Saving recording…');
+        REC.queue = REC.queue.then(async () => {
+          try {
+            const r = await fetch(finishUrl, { method: 'POST', headers: { accept: 'application/json' }, credentials: 'same-origin' });
+            toast(r.ok ? 'Recording saved — it will appear under Recording & replay in a moment' : 'Saving the recording failed (' + r.status + ')');
+          } catch (err) { toast('Saving the recording failed: ' + err.message); }
+        });
       };
-      S.recorder.start(5000);
+      S.recorder.start(4000);
+      REC.starting = false;
       $('#live-rec').classList.remove('hide');
+      $('#live-rec').textContent = auto ? '● REC (auto)' : '● REC';
       btn('record').textContent = '⏹ Stop recording';
-    };
+    }
+    function stopRecording() { if (S.recorder && S.recorder.state !== 'inactive') S.recorder.stop(); }
+    S.startRecording = startRecording;
+    S.stopRecording = stopRecording;
+    btn('record').onclick = () => { if (S.recorder && S.recorder.state !== 'inactive') stopRecording(); else startRecording(false); };
+    // Tab closing mid-session: flush what we have and ask the server to stitch it (it also sweeps abandoned sessions).
+    window.addEventListener('pagehide', () => {
+      if (!REC.id || !S.recorder || S.recorder.state === 'inactive') return;
+      try { S.recorder.requestData(); } catch {}
+      try { navigator.sendBeacon(REC.finishUrl + '?late=1'); } catch {}
+    });
     setInterval(() => send({ type: 'peers' }), 30000);
   }
 
