@@ -10,11 +10,15 @@ import media from './posts/media';
 import templates from './posts/templates';
 import editor from './posts/editor';
 import analytics from './posts/analytics';
+import rss from './posts/rss';
+import gifs from './posts/gifs';
 
 const dash = new Hono<AppEnv>();
 const root = new Hono<AppEnv>();
 
 dash.use('*', requirePerm('draft'));
+dash.route('/', rss);
+dash.route('/', gifs);
 dash.route('/', list);
 dash.route('/', media);
 dash.route('/', templates);

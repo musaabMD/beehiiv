@@ -40,6 +40,7 @@
       $('#pe-comment-body').focus();
     },
   });
+  document.querySelector('[data-gif]')?.addEventListener('click', () => editor.insertGif());
   window.OHEditor.active = editor;
   editor.on('remote-meta', (m) => {
     if (typeof m.title === 'string' && document.activeElement !== title) { title.value = m.title; autosize(title); }

@@ -6,6 +6,7 @@ export interface Env {
   ASSETS: Fetcher;
   COLLAB: DurableObjectNamespace;
   LIVE: DurableObjectNamespace;
+  CHAT: DurableObjectNamespace;
   EMAIL?: SendEmail;
   AI?: Ai;
   APP_NAME: string;
@@ -24,6 +25,7 @@ export interface Env {
   REALTIME_APP_ID?: string;   // Cloudflare Realtime SFU app (large live events)
   REALTIME_APP_TOKEN?: string;
   REALTIME_API_BASE?: string; // override for testing / self-hosted SFU
+  GIPHY_API_KEY?: string;     // GIF search in the editor (or per-publication in Integrations)
 }
 
 export type Role = 'owner' | 'admin' | 'member' | 'contributor';

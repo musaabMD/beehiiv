@@ -4,6 +4,7 @@ import type { Env, Publication, Post, Subscriber } from '../types';
 import { all, one } from './db';
 import { inline, sanitizeHtml } from './sanitize';
 import { esc, parseJSON, slugify, stripTags, fmtDate } from './util';
+import { fillSlot, autoInsert } from './programmatic';
 
 export interface Block { id?: string; type: string; data: any }
 export interface Doc { blocks: Block[] }
@@ -134,7 +135,7 @@ function emailEmbed(e: { provider: string; id: string; url: string }, caption: s
 }
 
 // ───────── main renderer ─────────
-interface State { ctx: RenderCtx; s: StyleTokens; footnotes: string[]; headings: Rendered['headings']; paywalled: boolean; usedIds: Set<string> }
+interface State { ctx: RenderCtx; s: StyleTokens; footnotes: string[]; headings: Rendered['headings']; paywalled: boolean; usedIds: Set<string>; adsShown: string[] }
 
 function headingId(st: State, text: string) {
   let base = slugify(stripTags(text), 60), i = 2, idv = base;
@@ -390,9 +391,9 @@ async function renderBlock(st: State, b: Block): Promise<string> {
       const opts = parseJSON<Array<{ id: string; label: string }>>(poll.options, []);
       if (E) {
         const base = `${ctx.siteUrl}/poll/${poll.id}`;
-        return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${s.spacing}px;border:1px solid ${s.border};border-radius:${s.radius}px"><tr><td style="padding:16px;font-family:${s.font}"><p style="margin:0 0 12px;font-size:17px;font-weight:700;color:${s.text}">${esc(poll.question)}</p>${opts.map((o) => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 8px"><tr><td style="border:1px solid ${s.border};border-radius:${s.radius}px"><a href="${esc(`${base}/vote?o=${o.id}${ctx.deliveryId ? `&d=${ctx.deliveryId}` : ''}${ctx.post ? `&post=${ctx.post.id}` : ''}`)}" style="display:block;padding:10px 14px;color:${s.text};text-decoration:none;font-size:15px">${esc(o.label)}</a></td></tr></table>`).join('')}</td></tr></table>`;
+        return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${s.spacing}px;border:1px solid ${s.border};border-radius:${s.radius}px"><tr><td style="padding:16px;font-family:${s.font}">${poll.kind === 'trivia' ? `<p style="margin:0 0 6px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:${s.muted}">Trivia</p>` : ''}<p style="margin:0 0 12px;font-size:17px;font-weight:700;color:${s.text}">${esc(poll.question)}</p>${opts.map((o) => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 8px"><tr><td style="border:1px solid ${s.border};border-radius:${s.radius}px"><a href="${esc(`${base}/vote?o=${o.id}${ctx.deliveryId ? `&d=${ctx.deliveryId}` : ''}${ctx.post ? `&post=${ctx.post.id}` : ''}`)}" style="display:block;padding:10px 14px;color:${s.text};text-decoration:none;font-size:15px">${esc(o.label)}</a></td></tr></table>`).join('')}</td></tr></table>`;
       }
-      return `<div class="oh-poll" data-poll="${esc(poll.id)}"><p class="oh-poll-q">${esc(poll.question)}</p><form method="post" action="${esc(ctx.siteUrl)}/poll/${esc(poll.id)}/vote">${ctx.post ? `<input type="hidden" name="post" value="${esc(ctx.post.id)}">` : ''}${opts.map((o) => `<button class="oh-poll-opt" name="o" value="${esc(o.id)}">${esc(o.label)}</button>`).join('')}</form></div>`;
+      return `<div class="oh-poll${poll.kind === 'trivia' ? ' oh-trivia' : ''}" data-poll="${esc(poll.id)}">${poll.kind === 'trivia' ? '<small class="oh-poll-kind">Trivia</small>' : ''}<p class="oh-poll-q">${esc(poll.question)}</p><form method="post" action="${esc(ctx.siteUrl)}/poll/${esc(poll.id)}/vote">${ctx.post ? `<input type="hidden" name="post" value="${esc(ctx.post.id)}">` : ''}${opts.map((o) => `<button class="oh-poll-opt" name="o" value="${esc(o.id)}">${esc(o.label)}</button>`).join('')}</form></div>`;
     }
     case 'referral': {
       const sub = ctx.subscriber;
@@ -415,6 +416,13 @@ async function renderBlock(st: State, b: Block): Promise<string> {
       if (E)
         return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${s.spacing}px;border:1px solid ${s.border};border-radius:${s.radius}px"><tr><td style="padding:16px;font-family:${s.font}"><p style="margin:0 0 10px;font-weight:700;font-size:16px;color:${s.text}">${esc(title)}</p>${items.map((x) => `<p style="margin:0 0 10px;font-size:15px;color:${s.text}"><a href="${esc(x.url)}" style="color:${s.link};font-weight:600">${esc(x.name)}</a><br><span style="color:${s.muted};font-size:14px">${esc(x.desc)}</span></p>`).join('')}</td></tr></table>`;
       return `<div class="oh-recs"><h4>${esc(title)}</h4>${items.map((x) => `<a class="oh-rec" href="${esc(x.url)}">${x.logo ? `<img src="${esc(x.logo)}" alt="">` : ''}<span><strong>${esc(x.name)}</strong><small>${esc(x.desc)}</small></span></a>`).join('')}</div>`;
+    }
+    case 'ad_auto': {
+      // Programmatic slot: filled with the best eligible network campaign at render/send time (lib/programmatic.ts).
+      const fill = await fillSlot({ env: ctx.env, pub: ctx.pub, post: ctx.post, subscriber: ctx.subscriber, deliveryId: ctx.deliveryId, mode: ctx.mode, preview: ctx.preview, access: ctx.access }, st.adsShown);
+      if (!fill) return ctx.preview ? (E ? '' : `<div class="oh-paywall-marker">Programmatic ad slot — filled automatically when sent</div>`) : '';
+      st.adsShown.push(fill.campaignId);
+      return renderBlock(st, { type: 'ad', data: { opportunity_id: fill.opportunityId, campaign_id: fill.opportunityId ? undefined : fill.campaignId, label: d.label || 'Sponsored' } });
     }
     case 'ad': {
       const ad = d.opportunity_id
@@ -503,7 +511,8 @@ export function parseDoc(json: string | null | undefined): Doc {
 /** Render a document. Returns body HTML (not wrapped in an email layout). */
 export async function renderDoc(doc: Doc, ctx: RenderCtx): Promise<Rendered> {
   const s = ctx.style || styleFor(ctx.pub);
-  const st: State = { ctx, s, footnotes: [], headings: [], paywalled: false, usedIds: new Set() };
+  const st: State = { ctx, s, footnotes: [], headings: [], paywalled: false, usedIds: new Set(), adsShown: [] };
+  doc = autoInsert(doc, ctx.pub, ctx.post, ctx.mode);
   let html = await renderBlocks(st, doc.blocks || []);
   html = html.replace('<!--OH_TOC-->', tocHtml(st)).replace(/<!--OH_TOC-->/g, '');
   html += footnotesHtml(st);

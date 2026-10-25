@@ -293,6 +293,7 @@ async function pollResults(c: Ctx, poll: any, mine: string | null, msg?: string)
   const counts = await all<{ option_id: string; n: number }>(c.env, 'SELECT option_id, COUNT(*) AS n FROM poll_votes WHERE poll_id = ? GROUP BY option_id', poll.id);
   const total = counts.reduce((a, b) => a + b.n, 0);
   const base = siteUrl(c.env, c.get('pub'));
+  const trivia = poll.kind === 'trivia' && !!poll.correct_option_id;
   return c.html(
     await SiteLayout({
       c, title: poll.question, noindex: true,
@@ -300,6 +301,7 @@ async function pollResults(c: Ctx, poll: any, mine: string | null, msg?: string)
         <section class="s-wrap s-narrow s-section">
           {msg && <div class="s-flash s-flash-ok" style="margin:0 0 16px">{msg}</div>}
           <div class="oh-poll">
+            {trivia && <p class="s-badge" style="margin:0 0 8px">Trivia</p>}
             <p class="oh-poll-q">{poll.question}</p>
             {!mine && !poll.closed ? (
               <form method="post" action={`${base}/poll/${poll.id}/vote`}>
@@ -307,12 +309,19 @@ async function pollResults(c: Ctx, poll: any, mine: string | null, msg?: string)
               </form>
             ) : (
               <>
+                {trivia && mine && (
+                  <div class={`s-flash ${mine === poll.correct_option_id ? 's-flash-ok' : 's-flash-err'}`} style="margin:0 0 12px">
+                    {mine === poll.correct_option_id ? '🎉 Correct!' : `Not quite — the answer is “${opts.find((o) => o.id === poll.correct_option_id)?.label || ''}”.`}
+                    {poll.explanation ? <div style="margin-top:6px;font-weight:400">{poll.explanation}</div> : null}
+                  </div>
+                )}
                 {opts.map((o) => {
                   const n = counts.find((x) => x.option_id === o.id)?.n || 0;
                   const pct = total ? Math.round((n / total) * 100) : 0;
-                  return <div class="oh-poll-result"><i style={`width:${pct}%`} /><span><span>{o.label}{mine === o.id ? ' ✓' : ''}</span><strong>{pct}%</strong></span></div>;
+                  const mark = trivia && (mine || poll.closed) ? (o.id === poll.correct_option_id ? ' ✅' : mine === o.id ? ' ❌' : '') : mine === o.id ? ' ✓' : '';
+                  return <div class="oh-poll-result"><i style={`width:${pct}%`} /><span><span>{o.label}{mark}</span><strong>{pct}%</strong></span></div>;
                 })}
-                <p class="s-muted s-small">{total} vote{total === 1 ? '' : 's'}{poll.closed ? ' · poll closed' : ''}</p>
+                <p class="s-muted s-small">{total} vote{total === 1 ? '' : 's'}{trivia && total ? ` · ${Math.round(((counts.find((x) => x.option_id === poll.correct_option_id)?.n || 0) / total) * 100)}% got it right` : ''}{poll.closed ? ' · poll closed' : ''}</p>
               </>
             )}
           </div>
@@ -337,7 +346,7 @@ site.get('/poll/:id', async (c) => {
   const reader = c.get('reader');
   let mine = c.req.query('voted') || getCookie(c, 'oh_pv_' + poll.id) || null;
   if (reader?.subscriber) mine = (await one<any>(c.env, 'SELECT option_id FROM poll_votes WHERE poll_id = ? AND subscriber_id = ?', poll.id, reader.subscriber.id))?.option_id || mine;
-  return pollResults(c, poll, mine, c.req.query('voted') ? 'Thanks for voting!' : undefined);
+  return pollResults(c, poll, mine, c.req.query('voted') && poll.kind !== 'trivia' ? 'Thanks for voting!' : undefined);
 });
 
 // one-click vote from an email
@@ -370,7 +379,8 @@ site.post('/poll/:id/vote', async (c) => {
   else if (!getCookie(c, 'oh_pv_' + poll.id) && (await castVote(c, poll, o, null, 'web', str(f.post, 40) || null))) setCookie(c, 'oh_pv_' + poll.id, o, { path: '/', maxAge: 365 * 86400, sameSite: 'Lax' });
   const ref = c.req.header('referer');
   if ((c.req.header('accept') || '').includes('json')) return c.json({ ok: true });
-  return c.redirect(ref && ref.includes('/p/') ? ref : `${siteUrl(c.env, pub)}/poll/${poll.id}?voted=${encodeURIComponent(o)}`, 303);
+  // Trivia always goes to the result page so the reader sees whether they were right.
+  return c.redirect(ref && ref.includes('/p/') && poll.kind !== 'trivia' ? ref : `${siteUrl(c.env, pub)}/poll/${poll.id}?voted=${encodeURIComponent(o)}`, 303);
 });
 
 // ───── surveys ─────

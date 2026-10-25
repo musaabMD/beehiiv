@@ -12,6 +12,7 @@ import { id, now, form, str, ago, truncate, esc } from '../../lib/util';
 import { channelAccess, getMember, ensureDefaultChannel, renderBody, authorNames, createCommunityPost, notify, canModerate, canManage, type Channel } from './shared';
 import { discordCfg, syncDiscordRoles } from '../../lib/discord';
 import { pubAdminEmails } from '../grow/shared';
+import { chatUnreadTotal } from './chatdata';
 
 const CSS = `.c-layout{display:grid;grid-template-columns:220px 1fr;gap:28px;padding:32px 20px}.c-side a{display:flex;justify-content:space-between;padding:7px 10px;border-radius:8px;text-decoration:none;color:var(--muted)}.c-side a.on,.c-side a:hover{background:var(--surface);color:var(--text)}.c-side h4{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:16px 10px 6px}
 .c-post{border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;margin-bottom:12px;background:var(--bg);display:block;text-decoration:none;color:inherit}.c-post:hover{border-color:var(--accent)}.c-post h3{margin:0 0 4px;font-size:18px}.c-post p{margin:0;color:var(--muted);font-size:15px}
@@ -20,7 +21,7 @@ const CSS = `.c-layout{display:grid;grid-template-columns:220px 1fr;gap:28px;pad
 .c-msg{max-width:78%;padding:10px 14px;border-radius:14px;margin:0 0 10px;background:var(--surface)}.c-msg.me{margin-left:auto;background:color-mix(in srgb,var(--accent) 18%,var(--bg))}
 @media(max-width:760px){.c-layout{grid-template-columns:1fr}.c-side{display:flex;gap:6px;overflow-x:auto}.c-side h4{display:none}}`;
 
-async function ctxInfo(c: Ctx) {
+export async function ctxInfo(c: Ctx) {
   const pub = c.get('pub');
   const reader = c.get('reader');
   const sub = reader?.subscriber || null;
@@ -32,15 +33,16 @@ async function findChannel(c: Ctx, key: string) {
   return one<Channel>(c.env, 'SELECT * FROM channels WHERE pub_id = ? AND (slug = ? OR id = ?)', c.get('pub').id, key, key);
 }
 
-function Gate({ reason, base, pubName }: { reason?: string; base: string; pubName: string }) {
+export function Gate({ reason, base, pubName }: { reason?: string; base: string; pubName: string }) {
   if (reason === 'upgrade') return <div class="s-box"><strong>This channel is for paid subscribers.</strong><p class="s-muted">Upgrade to join the conversation.</p><a class="s-btn" href={base + '/upgrade'}>Upgrade</a></div>;
   return <div class="s-box"><strong>Join the {pubName} community</strong><p class="s-muted">Subscribe or log in to read and post.</p><button class="s-btn" data-modal="subscribe">Subscribe</button> <button class="s-btn s-btn-ghost" data-modal="login">Log in</button></div>;
 }
 
-async function Shell(c: Ctx, title: string, active: string, content: any) {
+export async function Shell(c: Ctx, title: string, active: string, content: any) {
   const { pub, sub, member, premium, base } = await ctxInfo(c);
   const chans = await all<Channel>(c.env, 'SELECT * FROM channels WHERE pub_id = ? ORDER BY position, created_at', pub.id);
   const unread = sub ? (await one<{ n: number }>(c.env, `SELECT COUNT(*) AS n FROM direct_messages WHERE pub_id = ? AND subscriber_id = ? AND from_side = 'publication' AND read_at IS NULL`, pub.id, sub.id))?.n || 0 : 0;
+  const chatUnread = sub && member?.status === 'active' ? await chatUnreadTotal(c.env, pub.id, sub.id) : 0;
   return c.html(await SiteLayout({
     c, title, head: <style>{raw(CSS)}</style>,
     children: (
@@ -51,7 +53,7 @@ async function Shell(c: Ctx, title: string, active: string, content: any) {
             const acc = channelAccess(ch, sub, premium);
             return <a href={`${base}/community/${ch.slug}`} class={active === ch.slug ? 'on' : ''}><span>#{ch.name}</span>{ch.access !== 'free' && !acc.ok ? <span>🔒</span> : null}</a>;
           })}
-          {member?.status === 'active' && <><h4>You</h4><a href={`${base}/community/messages`} class={active === 'messages' ? 'on' : ''}><span>Messages</span>{unread ? <span class="s-badge">{unread}</span> : null}</a>{discordCfg(pub) && <a href={`${base}/community/discord`} class={active === 'discord' ? 'on' : ''}>Discord</a>}</>}
+          {member?.status === 'active' && <><h4>You</h4><a href={`${base}/community/chat`} class={active === 'chat' ? 'on' : ''}><span>Chats</span>{chatUnread ? <span class="s-badge" data-chat-unread>{chatUnread > 99 ? '99+' : chatUnread}</span> : null}</a><a href={`${base}/community/messages`} class={active === 'messages' ? 'on' : ''}><span>Messages</span>{unread ? <span class="s-badge">{unread}</span> : null}</a>{discordCfg(pub) && <a href={`${base}/community/discord`} class={active === 'discord' ? 'on' : ''}>Discord</a>}</>}
         </aside>
         <section style="min-width:0">{content}</section>
       </div>
@@ -59,7 +61,7 @@ async function Shell(c: Ctx, title: string, active: string, content: any) {
   }));
 }
 
-function requireWriter(info: Awaited<ReturnType<typeof ctxInfo>>): string | null {
+export function requireWriter(info: Awaited<ReturnType<typeof ctxInfo>>): string | null {
   if (!info.sub || info.sub.status !== 'active') return 'Subscribe or log in to participate.';
   if (!info.member) return 'Join the community first.';
   if (info.member.status === 'banned') return 'You have been removed from this community.';

@@ -14,6 +14,7 @@ export const PROVIDERS: Record<string, { name: string; blurb: string; fields: Ar
   discord: { name: 'Discord', blurb: 'Sync Discord roles with paid tiers.', fields: [{ key: 'guild_id', label: 'Server (guild) ID' }, { key: 'bot_token', label: 'Bot token', secret: true }] },
   luma: { name: 'Luma', blurb: 'Sync events with your Luma calendar.', fields: [{ key: 'api_key', label: 'Luma API key', secret: true }, { key: 'calendar_id', label: 'Calendar ID', hint: 'Optional' }] },
   cloudflare_realtime: { name: 'Cloudflare Realtime (live events at scale)', blurb: 'Relays webinar video through Cloudflare\'s SFU so audiences of thousands watch from the nearest edge instead of the host\'s browser. Create an SFU app in the Cloudflare dashboard → Realtime.', fields: [{ key: 'app_id', label: 'SFU App ID' }, { key: 'app_token', label: 'SFU App Secret', secret: true }] },
+  giphy: { name: 'GIPHY', blurb: 'Search and insert GIFs from the post editor. Get a free API key at developers.giphy.com.', fields: [{ key: 'api_key', label: 'GIPHY API key', secret: true }] },
   zapier: { name: 'Zapier / Make / n8n', blurb: 'Create subscribers from any app (inbound API) and trigger workflows from OpenHive events (webhooks).', fields: [] },
 };
 

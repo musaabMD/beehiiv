@@ -99,20 +99,28 @@ const PV_DIMS: Record<string, [string, string]> = {
   channel: ['Channel', 't.channel'], country: ['Country', 't.country'], device: ['Device', 't.device'], os: ['OS', 't.os'], browser: ['Browser', 't.browser'],
   path: ['Page', 't.path'], referrer: ['Referrer', `COALESCE(NULLIF(substr(t.referrer, instr(t.referrer, '://') + 3, CASE WHEN instr(substr(t.referrer, instr(t.referrer, '://') + 3), '/') > 0 THEN instr(substr(t.referrer, instr(t.referrer, '://') + 3), '/') - 1 ELSE 200 END), ''), '(direct)')`],
   utm_source: ['UTM source', 't.utm_source'], utm_medium: ['UTM medium', 't.utm_medium'], utm_campaign: ['UTM campaign', 't.utm_campaign'],
+  visitor_type: ['Visitor type (signed-up vs anonymous)', "CASE WHEN t.subscriber_id IS NOT NULL THEN 'subscriber' ELSE 'anonymous' END"],
 };
 const SUB_DIMS: Record<string, [string, string]> = {
   source: ['Acquisition source', 't.source'], country: ['Country', 't.country'], tier: ['Tier', 't.tier'], status: ['Status', 't.status'],
   utm_source: ['UTM source', 't.utm_source'], utm_medium: ['UTM medium', 't.utm_medium'], utm_campaign: ['UTM campaign', 't.utm_campaign'], landing_path: ['Landing page', 't.landing_path'],
 };
 const POST_TITLE = `(SELECT p.title FROM sends se JOIN posts p ON p.id = se.post_id WHERE se.id = t.send_id)`;
+const DELIVERY_DIMS: Record<string, [string, string]> = {
+  provider: ['Mailbox provider', 't.provider'], post: ['Post', POST_TITLE], variant: ['Variant', 't.variant'],
+  source: ['Acquisition source', '(SELECT s.source FROM subscribers s WHERE s.id = t.subscriber_id)'],
+  tier: ['Tier', '(SELECT s.tier FROM subscribers s WHERE s.id = t.subscriber_id)'],
+  country: ['Subscriber country', '(SELECT s.country FROM subscribers s WHERE s.id = t.subscriber_id)'],
+};
 
 export const METRICS: Record<string, MetricDef> = {
   subscribers: { label: 'New subscribers', from: 'subscribers t', time: 't.created_at', value: 'COUNT(*)', dims: SUB_DIMS },
   unsubscribes: { label: 'Unsubscribes', from: 'subscribers t', time: 't.unsubscribed_at', value: 'COUNT(*)', where: 't.unsubscribed_at IS NOT NULL', dims: SUB_DIMS },
   page_views: { label: 'Page views', from: 'page_views t', time: 't.created_at', value: 'COUNT(*)', dims: PV_DIMS },
   visitors: { label: 'Unique visitors', from: 'page_views t', time: 't.created_at', value: 'COUNT(DISTINCT t.visitor_id)', dims: PV_DIMS },
-  emails: { label: 'Emails delivered', from: 'deliveries t', time: 't.created_at', value: 'COUNT(*)', where: "t.status = 'sent'", dims: { provider: ['Mailbox provider', 't.provider'], post: ['Post', POST_TITLE], variant: ['Variant', 't.variant'] } },
-  opens: { label: 'Unique opens', from: 'deliveries t', time: 't.opened_at', value: 'COUNT(*)', where: 't.opened_at IS NOT NULL', dims: { provider: ['Mailbox provider', 't.provider'], post: ['Post', POST_TITLE], variant: ['Variant', 't.variant'] } },
+  emails: { label: 'Emails delivered', from: 'deliveries t', time: 't.created_at', value: 'COUNT(*)', where: "t.status = 'sent'", dims: DELIVERY_DIMS },
+  opens: { label: 'Unique opens', from: 'deliveries t', time: 't.opened_at', value: 'COUNT(*)', where: 't.opened_at IS NOT NULL', dims: DELIVERY_DIMS },
+  open_events: { label: 'Opens by device (human)', from: 'opens t', time: 't.created_at', value: 'COUNT(*)', where: 't.is_bot = 0', dims: { device: ['Device', 't.device'], country: ['Country', 't.country'], post: ['Post', POST_TITLE] } },
   clicks: { label: 'Clicks (bot-filtered)', from: 'clicks t', time: 't.created_at', value: 'COUNT(*)', where: 't.is_bot = 0', dims: { url: ['Link', 't.url'], post: ['Post', POST_TITLE], country: ['Country', 't.country'] } },
   revenue: { label: 'Revenue', from: 'orders t', time: 't.paid_at', value: 'COALESCE(SUM(t.amount_cents), 0)', where: "t.status = 'paid'", money: true, dims: { kind: ['Revenue source', 't.kind'], currency: ['Currency', 't.currency'] } },
   downloads: { label: 'Podcast downloads', from: 'episode_downloads t', time: 't.created_at', value: 'COUNT(*)', where: 't.is_bot = 0', dims: { app: ['App', 't.app'], device: ['Device', 't.device'], country: ['Country', 't.country'], episode: ['Episode', '(SELECT title FROM episodes e WHERE e.id = t.episode_id)'] } },
@@ -160,6 +168,91 @@ export async function runReport(env: Env, pubId: string, spec: ReportSpec): Prom
   const dim = def.dims[spec.group] || Object.values(def.dims)[0];
   const res = await all<{ k: string | null; v: number }>(env, `SELECT ${dim[1]} AS k, ${def.value} AS v ${base} GROUP BY k ORDER BY v DESC LIMIT ?`, ...params, spec.limit ?? 25);
   return { rows: res.map((r) => ({ key: r.k ?? '(none)', label: r.k ?? '(none)', value: Number(r.v) || 0 })), total, money: !!def.money, label: def.label };
+}
+
+// ───────── 3D pivot (up to three dimensions) ─────────
+export const TIME_DIMS: Record<string, [string, Bucket]> = { day: ['Day', 'day'], week: ['Week', 'week'], month: ['Month', 'month'] };
+
+/** Dimensions available to the 3D explorer for a metric: time buckets + the metric's own dimensions (allow-list). */
+export function pivotDims(metric: string): Array<[string, string]> {
+  return [...Object.entries(TIME_DIMS).map(([k, [l]]) => [k, l] as [string, string]), ...dimsFor(metric)];
+}
+
+function dimExpr(def: MetricDef, key: string): string | null {
+  if (TIME_DIMS[key]) return bucketSql(def.time, TIME_DIMS[key][1]);
+  return def.dims[key]?.[1] ?? null;
+}
+
+export interface PivotSpec { metric: string; dims: string[]; range: Range; filters?: Filter[]; limits?: [number, number, number] }
+export interface PivotResult {
+  label: string; money: boolean; dims: Array<{ key: string; label: string }>;
+  d1: string[]; d2: string[]; d3: string[];
+  leaf: Map<string, number>;   // `${a}\u0001${b}\u0001${c}`
+  cell: Map<string, number>;   // `${a}\u0001${b}` (exact d1×d2 subtotal)
+  row: Map<string, number>;    // d1 subtotal (exact)
+  row3: Map<string, number>;   // `${a}\u0001${c}` (d1×d3 subtotal, exact)
+  col: Map<string, number>;    // d2 subtotal (exact)
+  total: number;
+}
+
+const OTHER = '(other)';
+const K = (...p: string[]) => p.join('\u0001');
+
+/**
+ * Pivot a metric by 1–3 dimensions. Every subtotal is its own GROUP BY query, so distinct-count metrics
+ * (unique visitors / listeners) stay exact. High-cardinality dimensions keep their top values; the rest roll into "(other)".
+ */
+export async function runPivot(env: Env, pubId: string, spec: PivotSpec): Promise<PivotResult> {
+  const def = METRICS[spec.metric] || METRICS.page_views;
+  const allowed = new Set(pivotDims(spec.metric).map(([k]) => k));
+  const dims = [...new Set(spec.dims.filter((d) => allowed.has(d)))].slice(0, 3);
+  if (!dims.length) dims.push(pivotDims(spec.metric)[3]?.[0] || 'day');
+  const exprs = dims.map((d) => dimExpr(def, d)!);
+  const f = filterSql(def, spec.filters);
+  const base = `FROM ${def.from} WHERE t.pub_id = ? AND ${def.time} >= ? AND ${def.time} <= ?${def.where ? ' AND ' + def.where : ''}${f.sql}`;
+  const params = [pubId, spec.range.from, spec.range.to, ...f.params];
+  const [l1, l2, l3] = spec.limits || [25, 12, 8];
+  const label = (k: string) => (TIME_DIMS[k] ? TIME_DIMS[k][0] : def.dims[k]?.[0] || k);
+  const norm = (v: unknown) => (v === null || v === undefined || v === '' ? '(none)' : String(v));
+
+  const top = async (i: number, limit: number): Promise<string[]> => {
+    const time = !!TIME_DIMS[dims[i]];
+    const rows = await all<{ k: unknown; v: number }>(env, `SELECT ${exprs[i]} AS k, ${def.value} AS v ${base} GROUP BY k ORDER BY ${time ? 'k' : 'v DESC'} LIMIT ?`, ...params, time ? 400 : limit);
+    return rows.map((r) => norm(r.k));
+  };
+  const d1 = await top(0, l1);
+  const d2 = dims[1] ? await top(1, l2) : [];
+  const d3 = dims[2] ? await top(2, l3) : [];
+  const keep = (list: string[], v: unknown) => { const n = norm(v); return list.includes(n) ? n : OTHER; };
+
+  const group = async (idx: number[]) => {
+    const sel = idx.map((i, j) => `${exprs[i]} AS g${j}`).join(', ');
+    const by = idx.map((_, j) => `g${j}`).join(', ');
+    return all<any>(env, `SELECT ${sel}, ${def.value} AS v ${base} GROUP BY ${by} LIMIT 20000`, ...params);
+  };
+  const lists = [d1, d2, d3];
+  const fold = (rows: any[], idx: number[]) => {
+    const m = new Map<string, number>();
+    for (const r of rows) {
+      const key = K(...idx.map((i, j) => keep(lists[i], r['g' + j])));
+      m.set(key, (m.get(key) || 0) + (Number(r.v) || 0));
+    }
+    return m;
+  };
+  const row = fold(await group([0]), [0]);
+  const col = dims[1] ? fold(await group([1]), [1]) : new Map<string, number>();
+  const cell = dims[1] ? fold(await group([0, 1]), [0, 1]) : new Map<string, number>();
+  const row3 = dims[2] ? fold(await group([0, 2]), [0, 2]) : new Map<string, number>();
+  const leaf = dims[2] ? fold(await group([0, 1, 2]), [0, 1, 2]) : new Map<string, number>();
+  const total = Number(await val(env, `SELECT ${def.value} ${base}`, ...params)) || 0;
+  // "(other)" buckets only exist if something was folded into them
+  const withOther = (list: string[], maps: Array<Map<string, number>>, pos: number) =>
+    maps.some((m) => [...m.keys()].some((k) => k.split('\u0001')[pos] === OTHER)) ? [...list, OTHER] : list;
+  return {
+    label: def.label, money: !!def.money, dims: dims.map((k) => ({ key: k, label: label(k) })),
+    d1: withOther(d1, [row], 0), d2: withOther(d2, [col], 0), d3: withOther(d3, [row3], 1),
+    leaf, cell, row, row3, col, total,
+  };
 }
 
 export function dimsFor(metric: string): Array<[string, string]> {

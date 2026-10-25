@@ -12,8 +12,9 @@ import { id, now, form, str, num, ago, parseJSON, slugify, truncate, DAY, esc } 
 import { ensureDefaultChannel, notify, renderBody, authorNames, createCommunityPost, teamCommunityRole, CROLES, type Channel } from './shared';
 import { discordCfg, testDiscord, syncDiscordRoles, linkedMembers } from '../../lib/discord';
 import { patchSettings } from '../grow/shared';
+import { chatRemoved, chatKick } from '../../lib/chatroom';
 
-const TABS = (active: string): Array<[string, string]> => [['/app/community', 'Overview'], ['/app/community/channels', 'Channels'], ['/app/community/members', 'Members'], ['/app/community/moderation', 'Moderation'], ['/app/community/messages', 'Messages'], ['/app/community/settings', 'Settings']];
+const TABS = (active: string): Array<[string, string]> => [['/app/community', 'Overview'], ['/app/community/channels', 'Channels'], ['/app/community/chats', 'Chats'], ['/app/community/members', 'Members'], ['/app/community/moderation', 'Moderation'], ['/app/community/messages', 'Messages'], ['/app/community/settings', 'Settings']];
 
 function Page(p: { c: Ctx; title: string; tab: string; children: any; actions?: any; crumbs?: Array<[string, string]> }) {
   return (
@@ -379,7 +380,7 @@ export function registerCommunityDash(dash: App) {
 
   dash.post('/members/:sid/:action{ban|unban}', async (c) => {
     const banned = c.req.param('action') === 'ban';
-    await run(c.env, `UPDATE community_members SET status = ? WHERE pub_id = ? AND subscriber_id = ?`, banned ? 'banned' : 'active', c.get('pub').id, c.req.param('sid'));
+    await run(c.env, `UPDATE community_members SET status = ?, chat_banned = CASE WHEN ? THEN chat_banned ELSE 0 END, chat_muted_until = CASE WHEN ? THEN chat_muted_until ELSE NULL END WHERE pub_id = ? AND subscriber_id = ?`, banned ? 'banned' : 'active', banned ? 1 : 0, banned ? 1 : 0, c.get('pub').id, c.req.param('sid'));
     await audit(c, `community.member.${c.req.param('action')}`, c.req.param('sid'));
     return back(c, c.req.header('referer') || '/app/community/members', banned ? 'Member banned' : 'Member unbanned');
   });
@@ -392,6 +393,7 @@ export function registerCommunityDash(dash: App) {
     const items = await Promise.all(reports.map(async (r) => {
       const t = r.target_kind === 'post' ? await one<any>(c.env, 'SELECT id, title, body, status, author_subscriber_id, author_user_id, id AS post_id, channel_id FROM community_posts WHERE id = ?', r.target_id)
         : r.target_kind === 'comment' ? await one<any>(c.env, 'SELECT id, body, status, author_subscriber_id, author_user_id, post_id FROM community_comments WHERE id = ?', r.target_id)
+        : r.target_kind === 'chat' ? await one<any>(c.env, `SELECT m.id, CASE WHEN m.image_url IS NOT NULL THEN m.body || ' [image: ' || m.image_url || ']' ELSE m.body END AS body, m.status, m.author_subscriber_id, m.author_user_id, m.room_id, r.name AS room_name FROM chat_messages m LEFT JOIN chat_rooms r ON r.id = m.room_id WHERE m.id = ?`, r.target_id)
         : await one<any>(c.env, `SELECT id, body, subscriber_id AS author_subscriber_id, NULL AS author_user_id, 'visible' AS status FROM direct_messages WHERE id = ?`, r.target_id);
       return { ...r, t };
     }));
@@ -413,6 +415,7 @@ export function registerCommunityDash(dash: App) {
                   <ActionForm action={`/app/community/moderation/${r.id}`} fields={{ action: 'dismiss' }} label="Dismiss" kind="ghost" />
                   {r.target_kind === 'comment' && <a class="btn btn-ghost btn-sm" href={`/app/community/posts/${r.t.post_id}`}>View thread</a>}
                   {r.target_kind === 'post' && <a class="btn btn-ghost btn-sm" href={`/app/community/posts/${r.t.id}`}>View post</a>}
+                  {r.target_kind === 'chat' && <a class="btn btn-ghost btn-sm" href={`/app/community/chats/${r.t.room_id}`}>Open #{r.t.room_name || 'chat'}</a>}
                 </div>
               )}
             </> : <p class="muted">The reported content no longer exists.</p>}
@@ -427,15 +430,25 @@ export function registerCommunityDash(dash: App) {
     const r = await one<any>(c.env, 'SELECT * FROM community_reports WHERE id = ? AND pub_id = ?', c.req.param('id'), pub.id);
     if (!r) return c.notFound();
     const action = (await form(c.req)).action;
-    const table = r.target_kind === 'post' ? 'community_posts' : r.target_kind === 'comment' ? 'community_comments' : null;
+    const table = r.target_kind === 'post' ? 'community_posts' : r.target_kind === 'comment' ? 'community_comments' : r.target_kind === 'chat' ? 'chat_messages' : null;
     if (action === 'dismiss') {
       await run(c.env, `UPDATE community_reports SET status = 'dismissed' WHERE id = ?`, r.id);
       return back(c, '/app/community/moderation', 'Report dismissed');
     }
     if (table && (action === 'hide' || action === 'remove' || action === 'ban')) await run(c.env, `UPDATE ${table} SET status = ? WHERE id = ? AND pub_id = ?`, action === 'hide' ? 'hidden' : 'removed', r.target_id, pub.id);
+    if (r.target_kind === 'chat' && (action === 'hide' || action === 'remove' || action === 'ban')) {
+      const msg = await one<any>(c.env, 'SELECT room_id FROM chat_messages WHERE id = ?', r.target_id);
+      if (msg) await chatRemoved(c.env, msg.room_id, r.target_id, action === 'hide' ? 'hidden' : 'removed').catch(() => {});
+    }
     if (action === 'ban') {
       const author = table ? await one<any>(c.env, `SELECT author_subscriber_id AS a FROM ${table} WHERE id = ?`, r.target_id) : await one<any>(c.env, 'SELECT subscriber_id AS a FROM direct_messages WHERE id = ?', r.target_id);
-      if (author?.a) await run(c.env, `UPDATE community_members SET status = 'banned' WHERE pub_id = ? AND subscriber_id = ?`, pub.id, author.a);
+      if (author?.a) {
+        await run(c.env, `UPDATE community_members SET status = 'banned' WHERE pub_id = ? AND subscriber_id = ?`, pub.id, author.a);
+        if (r.target_kind === 'chat') {
+          const msg = await one<any>(c.env, 'SELECT room_id FROM chat_messages WHERE id = ?', r.target_id);
+          if (msg) await chatKick(c.env, msg.room_id, 's:' + author.a, 'You have been removed from this community.').catch(() => {});
+        }
+      }
     }
     await run(c.env, `UPDATE community_reports SET status = 'actioned' WHERE pub_id = ? AND target_id = ? AND status = 'open'`, pub.id, r.target_id);
     await audit(c, 'community.moderate', r.target_id, { action });

@@ -8,6 +8,8 @@ import { requirePerm } from '../../lib/auth';
 import { isBotClick, rateLimit, clientIP } from '../../lib/guard';
 import { recordClick } from '../../lib/tracking';
 import { creditAd } from '../../lib/billing';
+import { progSettings, programmaticReport, candidates, PROG_DEFAULTS } from '../../lib/programmatic';
+import { Toggle, Check } from '../../ui/components';
 import { DashLayout } from '../../ui/layout';
 import { Card, Stats, Stat, Table, Btn, Field, Input, Textarea, Select, Status, Empty, Modal, OpenBtn, ActionForm, back, Grid, Tabs, Badge, Help } from '../../ui/components';
 import { id, now, money, num, pct, fmtDate, form, str, int, cents, parseJSON, sha256, DAY } from '../../lib/util';
@@ -22,7 +24,7 @@ function isAdmin(c: Ctx) {
 async function materialize(c: Ctx) {
   const pub = c.get('pub');
   const t = now();
-  const camps = await all<any>(c.env, `SELECT c.id FROM ad_campaigns c WHERE c.owner_pub_id IS NULL AND c.review_status = 'approved' AND c.status = 'active' AND (c.ends_at IS NULL OR c.ends_at > ?) AND (c.budget_cents = 0 OR c.spent_cents < c.budget_cents) AND NOT EXISTS (SELECT 1 FROM ad_opportunities o WHERE o.campaign_id = c.id AND o.pub_id = ?)`, t, pub.id);
+  const camps = await all<any>(c.env, `SELECT c.id FROM ad_campaigns c WHERE c.owner_pub_id IS NULL AND c.review_status = 'approved' AND c.status = 'active' AND (c.ends_at IS NULL OR c.ends_at > ?) AND (c.budget_cents = 0 OR c.spent_cents < c.budget_cents) AND NOT EXISTS (SELECT 1 FROM ad_opportunities o WHERE o.campaign_id = c.id AND o.pub_id = ? AND o.programmatic = 0)`, t, pub.id);
   for (const k of camps) await insert(c.env, 'ad_opportunities', { id: id(), campaign_id: k.id, pub_id: pub.id, status: 'available', created_at: t });
 }
 
@@ -63,7 +65,7 @@ export function registerAds(dash: Hono<AppEnv>, root: Hono<AppEnv>) {
     const placements = opps.filter((o) => ['accepted', 'placed', 'completed'].includes(o.status));
     const history = opps.filter((o) => o.status !== 'available');
     const byPost = await all<any>(c.env, `SELECT p.id, p.title, p.published_at, COUNT(o.id) AS ads, SUM(o.impressions) AS imp, SUM(o.clicks) AS clicks, SUM(o.bot_clicks) AS bots, SUM(o.earned_cents) AS earned FROM ad_opportunities o JOIN posts p ON p.id = o.post_id WHERE o.pub_id = ? GROUP BY p.id ORDER BY p.published_at DESC LIMIT 100`, pub.id);
-    const tabs: Array<[string, string]> = [['?tab=available', `Available (${available.length})`], ['?tab=placements', 'Placements & earnings'], ['?tab=report', 'Revenue by post'], ['?tab=history', 'History'], ...(isAdmin(c) ? [['?tab=network', 'Network admin'] as [string, string]] : [])];
+    const tabs: Array<[string, string]> = [['?tab=available', `Available (${available.length})`], ['?tab=programmatic', 'Programmatic'], ['?tab=placements', 'Placements & earnings'], ['?tab=report', 'Revenue by post'], ['?tab=history', 'History'], ...(isAdmin(c) ? [['?tab=network', 'Network admin'] as [string, string]] : [])];
     const oppCard = (o: any) => (
       <Card title={<>{o.logo_url && <img src={o.logo_url} alt="" width="20" height="20" style="vertical-align:middle;border-radius:4px;margin-right:6px" />}{o.advertiser} · {o.cname}</>} actions={<Badge tone="green">{priceLabel(o)}</Badge>}>
         <Grid>
@@ -86,6 +88,7 @@ export function registerAds(dash: Hono<AppEnv>, root: Hono<AppEnv>) {
     );
     let body;
     if (tab === 'network' && isAdmin(c)) body = await networkAdmin(c);
+    else if (tab === 'programmatic') body = await programmaticTab(c);
     else if (tab === 'placements') body = (
       <Card pad={false}>
         <Table rows={placements} empty="No placements yet — claim an available ad." cols={[
@@ -140,6 +143,82 @@ export function registerAds(dash: Hono<AppEnv>, root: Hono<AppEnv>) {
     );
   });
 
+  async function programmaticTab(c: Ctx) {
+    const pub = c.get('pub');
+    const cfg = progSettings(pub);
+    const days = Math.min(365, Math.max(1, int(c.req.query('days'), 30)));
+    const rep = await programmaticReport(c.env, pub.id, now() - days * DAY);
+    const eligible = await candidates(c.env, pub, { ...cfg, enabled: true });
+    const names = new Map((await all<any>(c.env, `SELECT c.id, c.name, a.name AS advertiser FROM ad_campaigns c JOIN advertisers a ON a.id = c.advertiser_id WHERE c.owner_pub_id IS NULL AND c.programmatic = 1`)).map((r) => [r.id, r]));
+    const advertisers = await all<any>(c.env, `SELECT DISTINCT a.id, a.name FROM advertisers a JOIN ad_campaigns c ON c.advertiser_id = a.id WHERE c.owner_pub_id IS NULL AND c.programmatic = 1 ORDER BY a.name`);
+    const ecpm = rep.emailImps ? Math.round((rep.earned / rep.emailImps) * 1000) : 0;
+    return (
+      <>
+        <div class={`callout ${cfg.enabled ? 'ok' : ''}`}>
+          {cfg.enabled
+            ? <>Programmatic ads are <strong>on</strong>: every email {cfg.placement === 'manual' ? 'with a programmatic ad block' : `gets an auto-filled slot at the ${cfg.placement}`} shows the best-paying eligible campaign. {eligible.length} campaign{eligible.length === 1 ? '' : 's'} currently eligible.</>
+            : <>Turn on programmatic ads to earn from every send automatically — no need to claim each campaign. Approved network campaigns fill the slot by highest expected earnings.</>}
+        </div>
+        <Stats>
+          <Stat label={`Impressions (${days}d)`} value={num(rep.imps)} sub={`${num(rep.emailImps)} email · ${num(rep.webImps)} web`} />
+          <Stat label="Verified clicks" value={num(rep.clicks)} sub={`${num(rep.bots)} bot clicks filtered · CTR ${pct(rep.clicks, rep.imps)}`} />
+          <Stat label="eCPM" value={money(ecpm)} sub="earnings per 1,000 email impressions" />
+          <Stat label="Programmatic earnings" value={money(rep.earned)} href="/app/monetize/wallet" />
+        </Stats>
+        <Grid>
+          <Card title="Settings">
+            <form method="post" action="/app/monetize/ads/programmatic" class="stack-sm">
+              <Toggle name="enabled" checked={cfg.enabled} label="Enable programmatic ads" hint="Auto-fill ad slots with approved network campaigns" />
+              <Field label="Placement" hint="Auto-insert is skipped in posts that already contain an ad block">
+                <Select name="placement" value={cfg.placement} options={[['top', 'Top of the email'], ['middle', 'Middle of the email'], ['bottom', 'Bottom (before any paywall)'], ['manual', 'Only where I place a programmatic ad block']]} />
+              </Field>
+              <Grid>
+                <Field label="Floor CPM" hint="Minimum per 1,000 impressions"><Input name="floor_cpm" type="number" step="0.01" min="0" value={(cfg.floor_cpm_cents / 100).toFixed(2)} /></Field>
+                <Field label="Floor CPC" hint="Minimum per verified click"><Input name="floor_cpc" type="number" step="0.01" min="0" value={(cfg.floor_cpc_cents / 100).toFixed(2)} /></Field>
+                <Field label="Max ads per email"><Input name="max_ads" type="number" min="1" max="5" value={cfg.max_ads} /></Field>
+                <Field label="Slot label"><Input name="label" value={cfg.label} maxlength={40} /></Field>
+                <Field label="Frequency cap" hint="Same campaign at most this many times per reader…"><Input name="freq_cap" type="number" min="0" max="50" value={cfg.freq_cap} /></Field>
+                <Field label="…within days"><Input name="freq_days" type="number" min="1" max="365" value={cfg.freq_days} /></Field>
+              </Grid>
+              <Field label="Blocked categories"><Select name="blocked_categories[]" multiple options={CATEGORIES} values={cfg.blocked_categories} /></Field>
+              {advertisers.length > 0 && <Field label="Blocked advertisers"><Select name="blocked_advertisers[]" multiple options={advertisers.map((a) => [a.id, a.name] as [string, string])} values={cfg.blocked_advertisers} /></Field>}
+              <Toggle name="hide_for_premium" checked={cfg.hide_for_premium} label="Hide ads from premium subscribers" />
+              <div class="form-actions"><Btn>Save settings</Btn></div>
+            </form>
+          </Card>
+          <Card title="Eligible right now" pad={false}>
+            <Table rows={eligible.slice(0, 15)} empty="No eligible campaigns with these settings. Lower your floors or unblock categories." cols={[
+              { h: 'Campaign', r: (k: any) => <>{names.get(k.id)?.advertiser}<br /><small class="muted">{names.get(k.id)?.name}</small></> },
+              { h: 'Pricing', r: (k: any) => (k.pricing === 'cpm' ? `${money(k.rate_cents)} CPM` : `${money(k.rate_cents)} / click`) },
+              { h: 'Expected eCPM', class: 'right', r: (k: any) => money(Math.round(k.ecpm)) },
+            ]} />
+          </Card>
+        </Grid>
+        <Card title="Programmatic revenue by post" actions={<span class="row">{[7, 30, 90, 365].map((d) => <a class={`btn btn-sm ${d === days ? 'btn-secondary' : 'btn-ghost'}`} href={`?tab=programmatic&days=${d}`}>{d}d</a>)}</span>} pad={false}>
+          <Table rows={rep.byPost} empty="Earnings appear here after your first send with programmatic ads on." cols={[
+            { h: 'Post', r: (r: any) => (r.post_id ? <a href={`/app/posts/${r.post_id}`}>{r.title || '(untitled)'}</a> : <span class="muted">Website</span>) },
+            { h: 'Campaigns', r: (r: any) => num(r.campaigns) },
+            { h: 'Impressions', r: (r: any) => num(r.imps) },
+            { h: 'Verified clicks', r: (r: any) => <>{num(r.clicks)}{r.bots ? <small class="muted"> (+{r.bots} bots)</small> : null}</> },
+            { h: 'eCPM', r: (r: any) => money(r.imps ? Math.round((r.earned / r.imps) * 1000) : 0) },
+            { h: 'Earned', class: 'right', r: (r: any) => <strong>{money(r.earned)}</strong> },
+          ]} />
+        </Card>
+        <Card title="By campaign" pad={false}>
+          <Table rows={rep.byCampaign} empty="No programmatic campaigns served yet." cols={[
+            { h: 'Campaign', r: (r: any) => <>{r.advertiser}<br /><small class="muted">{r.name}</small></> },
+            { h: 'Pricing', r: (r: any) => (r.pricing === 'cpm' ? `${money(r.rate_cents)} CPM` : `${money(r.rate_cents)} / click`) },
+            { h: 'Impressions', r: (r: any) => num(r.imps) },
+            { h: 'Clicks', r: (r: any) => num(r.clicks) },
+            { h: 'CTR', r: (r: any) => pct(r.clicks, r.imps) },
+            { h: 'Earned', class: 'right', r: (r: any) => <strong>{money(r.earned)}</strong> },
+          ]} />
+        </Card>
+        <Help>Programmatic slots use the block <code>{'{"type":"ad_auto","data":{"label":"Sponsored"}}'}</code>; place it in a post to control the exact position. Email impressions are billed (CPM); clicks are bot-filtered and paid once per reader (CPC). Web impressions are reported but not billed.</Help>
+      </>
+    );
+  }
+
   async function networkAdmin(c: Ctx) {
     const advertisers = await all<any>(c.env, 'SELECT * FROM advertisers WHERE owner_pub_id IS NULL ORDER BY name');
     const camps = await all<any>(c.env, `SELECT c.*, a.name AS advertiser, (SELECT COUNT(*) FROM ad_opportunities o WHERE o.campaign_id = c.id AND o.status IN ('accepted','placed','completed')) AS placements, (SELECT SUM(clicks) FROM ad_opportunities o WHERE o.campaign_id = c.id) AS clicks FROM ad_campaigns c JOIN advertisers a ON a.id = c.advertiser_id WHERE c.owner_pub_id IS NULL ORDER BY c.review_status = 'pending' DESC, c.created_at DESC`);
@@ -154,6 +233,7 @@ export function registerAds(dash: Hono<AppEnv>, root: Hono<AppEnv>) {
             { h: 'Budget', r: (k) => (k.budget_cents ? `${money(k.spent_cents)} / ${money(k.budget_cents)}` : `${money(k.spent_cents)} spent`) },
             { h: 'Placements', r: (k) => `${num(k.placements)} · ${num(k.clicks || 0)} clicks` },
             { h: 'Brand safety', r: (k) => <><Status s={k.review_status} />{k.review_notes && <><br /><small class="muted">{k.review_notes}</small></>}</> },
+            { h: 'Programmatic', r: (k) => <form method="post" action={`/app/monetize/ads/campaigns/${k.id}/programmatic`} class="inline-form"><button class={`btn btn-sm ${k.programmatic ? 'btn-secondary' : 'btn-ghost'}`} type="submit" title={k.pricing === 'flat' ? 'Flat-priced campaigns are not auto-filled' : ''}>{k.programmatic ? 'On' : 'Off'}</button>{parseJSON<string[]>(k.target_categories, []).length ? <><br /><small class="muted">targets {parseJSON<string[]>(k.target_categories, []).join(', ')}</small></> : null}</form> },
             { h: '', class: 'right', r: (k) => (
               <form method="post" action={`/app/monetize/ads/review/${k.id}`} class="row end">
                 <Input name="notes" placeholder="Review notes" />
@@ -192,7 +272,9 @@ export function registerAds(dash: Hono<AppEnv>, root: Hono<AppEnv>) {
                 <Field label="Rate"><Input name="rate" type="number" step="0.01" min="0" required /></Field>
                 <Field label="Total budget" hint="0 = unlimited"><Input name="budget" type="number" step="0.01" min="0" value="0" /></Field>
                 <Field label="Ends"><Input name="ends" type="date" /></Field>
+                <Field label="Target publication categories" hint="Empty = all publications"><Select name="target_categories[]" multiple options={CATEGORIES} /></Field>
               </Grid>
+              <Check name="programmatic" checked label="Available for programmatic auto-fill" hint="CPM and CPC campaigns only" />
               <div class="form-actions"><Btn>Create (pending review)</Btn></div>
             </form>
           ) : <p>Add an advertiser first.</p>}
@@ -243,9 +325,36 @@ export function registerAds(dash: Hono<AppEnv>, root: Hono<AppEnv>) {
     await insert(c.env, 'ad_campaigns', {
       id: id(), advertiser_id: str(f.advertiser_id), owner_pub_id: null, name: str(f.name, 120), headline: str(f.headline, 120), body: str(f.body, 600), image_url: str(f.image_url, 1000) || null,
       cta_label: str(f.cta_label, 40) || 'Learn more', url: str(f.url, 2000), link_params: str(f.link_params, 300), pricing: ['cpc', 'cpm', 'flat'].includes(f.pricing) ? f.pricing : 'cpc',
-      rate_cents: cents(f.rate), budget_cents: cents(f.budget), categories: JSON.stringify(f.categories || []), review_status: 'pending', ends_at: ends && !isNaN(ends) ? ends : null, status: 'active', created_at: now(),
+      rate_cents: cents(f.rate), budget_cents: cents(f.budget), categories: JSON.stringify(f.categories || []), target_categories: JSON.stringify(f.target_categories || []), programmatic: f.programmatic ? 1 : 0, review_status: 'pending', ends_at: ends && !isNaN(ends) ? ends : null, status: 'active', created_at: now(),
     });
     return back(c, '/app/monetize/ads?tab=network', 'Campaign created — review it for brand safety to publish');
+  });
+
+  dash.post('/ads/programmatic', requirePerm('manage'), async (c) => {
+    const pub = c.get('pub');
+    const f = await form(c.req);
+    const cfg = {
+      ...PROG_DEFAULTS,
+      enabled: !!f.enabled,
+      placement: ['top', 'middle', 'bottom', 'manual'].includes(f.placement) ? f.placement : 'middle',
+      floor_cpm_cents: cents(f.floor_cpm), floor_cpc_cents: cents(f.floor_cpc),
+      max_ads: Math.min(5, Math.max(1, int(f.max_ads, 1))),
+      freq_cap: Math.min(50, Math.max(0, int(f.freq_cap, 3))), freq_days: Math.min(365, Math.max(1, int(f.freq_days, 30))),
+      blocked_categories: (f.blocked_categories || []).filter((x: string) => CATEGORIES.includes(x)),
+      blocked_advertisers: (f.blocked_advertisers || []).map((x: string) => str(x, 40)).filter(Boolean),
+      hide_for_premium: !!f.hide_for_premium,
+      label: str(f.label, 40) || 'Sponsored',
+    };
+    const fresh = await one<{ settings: string }>(c.env, 'SELECT settings FROM publications WHERE id = ?', pub.id);
+    const merged = { ...parseJSON<any>(fresh?.settings, {}), programmatic: cfg };
+    await run(c.env, 'UPDATE publications SET settings = ? WHERE id = ?', JSON.stringify(merged), pub.id);
+    return back(c, '/app/monetize/ads?tab=programmatic', cfg.enabled ? 'Programmatic ads are on' : 'Programmatic settings saved');
+  });
+
+  dash.post('/ads/campaigns/:id/programmatic', requirePerm('manage'), async (c) => {
+    if (!isAdmin(c)) return c.text('Instance admins only', 403);
+    await run(c.env, `UPDATE ad_campaigns SET programmatic = CASE WHEN programmatic = 1 OR pricing = 'flat' THEN 0 ELSE 1 END WHERE id = ? AND owner_pub_id IS NULL`, c.req.param('id'));
+    return back(c, '/app/monetize/ads?tab=network', 'Programmatic availability updated');
   });
 
   dash.post('/ads/review/:id', requirePerm('manage'), async (c) => {

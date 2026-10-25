@@ -161,6 +161,7 @@
     embed: { label: 'Embed (YouTube, X, TikTok…)', icon: '▶', group: 'Media', keys: 'embed youtube twitter x tiktok instagram bluesky stocktwits spotify vimeo loom video social', data: () => ({ url: '', caption: '' }) },
     video: { label: 'Video file', icon: '🎬', group: 'Media', keys: 'video mp4 upload', data: () => ({ src: '', poster: '', caption: '' }) },
     audio: { label: 'Audio file', icon: '🎧', group: 'Media', keys: 'audio mp3 sound music voice', data: () => ({ src: '', title: '' }) },
+    gif: { label: 'GIF', icon: 'GIF', group: 'Media', keys: 'gif giphy animated meme reaction', pseudo: true },
     attachment: { label: 'File attachment', icon: '📎', group: 'Media', keys: 'file attachment pdf download', data: () => ({ url: '', name: '', size: 0 }) },
     podcast: { label: 'Podcast episode', icon: '🎙', group: 'Media', keys: 'podcast episode player', data: () => ({ episode_id: '' }) },
     button: { label: 'Button', icon: '⬭', group: 'Layout', keys: 'button cta link call to action', data: () => ({ label: 'Read more', url: '', align: 'center' }) },
@@ -190,7 +191,7 @@
   class Editor {
     constructor(el, opts) {
       this.el = el;
-      this.opts = Object.assign({ features: {}, renderUrl: '/app/posts/render', uploadUrl: '/app/posts/media/upload', mediaUrl: '/app/posts/media.json', aiUrl: '/app/posts/ai', pickerUrl: '/app/posts/picker', pollsUrl: '/app/posts/polls' }, opts || {});
+      this.opts = Object.assign({ features: {}, renderUrl: '/app/posts/render', uploadUrl: '/app/posts/media/upload', mediaUrl: '/app/posts/media.json', aiUrl: '/app/posts/ai', pickerUrl: '/app/posts/picker', pollsUrl: '/app/posts/polls', gifsUrl: '/app/posts/gifs' }, opts || {});
       this.features = Object.assign({ paywall: true, dynamic: true, polls: true, ai: true, collab: false }, this.opts.features || {});
       this.listeners = {};
       this.history = [];
@@ -668,6 +669,18 @@
     }
 
     async pseudo(key, it) {
+      if (key === 'gif') {
+        const g = await gifPicker(this);
+        if (!g) return;
+        const list = it ? it.list : this.root;
+        let idx = it ? list.items.indexOf(it) + 1 : list.items.length;
+        if (it && it.block.type === 'paragraph' && !textOf(it.view.toJSON().data.html).trim()) { idx--; list.remove(it); }
+        const ni = list.insert({ id: uid(), type: 'image', data: { ...TYPES.image.data(), src: g.url, alt: g.alt || 'GIF' } }, idx);
+        if (!list.items[idx + 1]) list.insert(P(), idx + 1);
+        ni.el.classList.add('ohe-sel');
+        this.changed();
+        return;
+      }
       if (key === 'ai') {
         const prompt = await promptBox('Write with AI', 'What should I write about?', '', { multiline: true });
         if (!prompt) return;
@@ -1291,10 +1304,20 @@
     }
     autoOpen() { if (!this.d.poll_id) setTimeout(() => this.createPoll(), 50); }
     async createPoll() {
-      const res = await formBox('New poll', [{ k: 'question', label: 'Question', ph: 'What should I write about next?' }, { k: 'o1', label: 'Option 1' }, { k: 'o2', label: 'Option 2' }, { k: 'o3', label: 'Option 3 (optional)' }, { k: 'o4', label: 'Option 4 (optional)' }]);
+      const res = await formBox('New poll', [
+        { k: 'question', label: 'Question', ph: 'What should I write about next?' }, { k: 'o1', label: 'Option 1' }, { k: 'o2', label: 'Option 2' }, { k: 'o3', label: 'Option 3 (optional)' }, { k: 'o4', label: 'Option 4 (optional)' },
+        { k: 'kind', label: 'Type', type: 'select', options: [['standard', 'Standard poll'], ['trivia', 'Trivia — has a correct answer']] },
+        { k: 'correct', label: 'Correct answer (trivia)', type: 'select', options: [['1', 'Option 1'], ['2', 'Option 2'], ['3', 'Option 3'], ['4', 'Option 4']] },
+        { k: 'explanation', label: 'Explanation shown after answering (trivia, optional)' },
+      ]);
       if (!res) return;
       try {
-        const r = await postJSON(this.ed.opts.pollsUrl, { question: res.question, options: [res.o1, res.o2, res.o3, res.o4].filter(Boolean) });
+        const raw = [res.o1, res.o2, res.o3, res.o4];
+        const options = raw.filter(Boolean);
+        // map the chosen option number onto the filtered list
+        const correct = res.kind === 'trivia' ? options.indexOf(raw[Number(res.correct) - 1]) + 1 : 0;
+        if (res.kind === 'trivia' && correct < 1) { OHToast('The correct answer must be one of the options you filled in', 4000); return; }
+        const r = await postJSON(this.ed.opts.pollsUrl, { question: res.question, options, kind: res.kind, correct, explanation: res.explanation });
         this.d.poll_id = r.id;
         await this.loadOptions();
         this.doRefresh(); this.changed();
@@ -1324,6 +1347,7 @@
             h('button', { type: 'button', class: 'ohe-mini-btn', onclick: () => this.pick() }, 'Upload'),
             h('button', { type: 'button', class: 'ohe-mini-btn', onclick: () => this.library() }, 'Media library'),
             h('button', { type: 'button', class: 'ohe-mini-btn', onclick: () => this.fromUrl() }, 'From URL'),
+            h('button', { type: 'button', class: 'ohe-mini-btn', onclick: () => this.gif() }, 'GIF'),
             this.ed.features.ai ? h('button', { type: 'button', class: 'ohe-mini-btn', onclick: () => this.ai() }, '✨ AI') : null,
           ),
           this.progress = h('div', { class: 'ohe-progress' }),
@@ -1360,6 +1384,7 @@
         this.draw(); this.changed();
       } catch (e) { OHToast(e.message, 4000); if (this.progress) this.progress.textContent = ''; }
     }
+    async gif() { const g = await gifPicker(this.ed); if (g) { this.d.src = g.url; this.d.alt = this.d.alt || g.alt || 'GIF'; this.draw(); this.changed(); } }
     async library() { const m = await mediaPicker(this.ed, 'image'); if (m) { this.d.src = m.url; this.d.alt = this.d.alt || m.alt || ''; this.draw(); this.changed(); } }
     async fromUrl() {
       const url = await promptBox('Image from URL', 'https://…', '');
@@ -1672,7 +1697,8 @@
     return f ? f.querySelector('[name=v]').value.trim() : null;
   }
   async function formBox(title, fields) {
-    const body = h('div', { class: 'ohe-form' }, ...fields.map((f) => h('label', { class: 'field' }, h('span', { class: 'field-l', text: f.label }), h('input', { class: 'input', name: f.k, placeholder: f.ph || '' }))));
+    const body = h('div', { class: 'ohe-form' }, ...fields.map((f) => h('label', { class: 'field' }, h('span', { class: 'field-l', text: f.label }),
+      f.type === 'select' ? h('select', { class: 'input', name: f.k }, ...f.options.map(([v, l]) => h('option', { value: v }, l))) : h('input', { class: 'input', name: f.k, placeholder: f.ph || '' }))));
     const fm = await dialogBox(title, body, 'Create');
     if (!fm) return null;
     const out = {};
@@ -1691,6 +1717,43 @@
     const fd = new FormData(); fd.append('file', file);
     const r = await fetch(ed.opts.uploadUrl, { method: 'POST', body: fd, headers: { accept: 'application/json' } });
     const j = await r.json(); if (!r.ok) throw new Error(j.error || 'Upload failed'); return j;
+  }
+  /** GIF search (GIPHY via the server proxy) → imports the chosen GIF into the media library. Resolves {url, alt} or null. */
+  function gifPicker(ed) {
+    return new Promise((resolve) => {
+      const grid = h('div', { class: 'ohe-mgrid ohe-gif-grid' }, h('p', { class: 'ohe-hint' }, 'Loading…'));
+      const search = h('input', { class: 'input', placeholder: 'Search GIFs…', 'aria-label': 'Search GIFs' });
+      const urlIn = h('input', { class: 'input', placeholder: 'Or paste a GIF URL (https://…)', 'aria-label': 'GIF URL' });
+      let done = false;
+      const finish = (v) => { if (done) return; done = true; dlg.close(); resolve(v); };
+      const importUrl = async (url, alt) => {
+        grid.innerHTML = '<p class="ohe-hint">Adding to your media library…</p>';
+        try { const r = await postJSON(`${ed.opts.gifsUrl}/import`, { url, title: alt }); finish({ url: r.url, alt: alt || 'GIF' }); }
+        catch (e) { OHToast(e.message, 4000); load(); }
+      };
+      const dlg = h('dialog', { class: 'ohe-dialog ohe-media-dlg' },
+        h('div', { class: 'ohe-mhead' }, h('h3', { text: 'Insert a GIF' }), search,
+          h('button', { type: 'button', class: 'btn btn-secondary btn-sm', onclick: () => pickFile('image/gif', async (f) => { try { const r = await upload(ed, f); finish({ url: r.url, alt: f.name.replace(/\.gif$/i, '') }); } catch (e) { OHToast(e.message); } }) }, 'Upload .gif'),
+          h('button', { type: 'button', class: 'btn btn-ghost btn-sm', 'aria-label': 'Close', onclick: () => finish(null) }, '✕')),
+        h('div', { class: 'ohe-gif-url row' }, urlIn, h('button', { type: 'button', class: 'btn btn-secondary btn-sm', onclick: () => urlIn.value.trim() && importUrl(urlIn.value.trim(), 'GIF') }, 'Add')),
+        grid, h('p', { class: 'ohe-hint ohe-gif-attr' }, 'Powered by GIPHY'));
+      document.body.append(dlg);
+      dlg.addEventListener('close', () => { dlg.remove(); if (!done) { done = true; resolve(null); } });
+      dlg.showModal();
+      search.focus();
+      const load = async () => {
+        try {
+          const r = await getJSON(`${ed.opts.gifsUrl}?q=${encodeURIComponent(search.value.trim())}`);
+          grid.innerHTML = '';
+          if (!r.configured) { grid.append(h('p', { class: 'ohe-hint' }, r.help || 'GIF search is not configured.')); search.disabled = true; return; }
+          if (r.error) grid.append(h('p', { class: 'ohe-hint' }, r.error));
+          if (!r.results.length && !r.error) grid.append(h('p', { class: 'ohe-hint' }, 'No GIFs found.'));
+          r.results.forEach((g) => grid.append(h('button', { type: 'button', class: 'ohe-mitem', title: g.title, onclick: () => importUrl(g.url, g.title) }, h('img', { src: g.preview, alt: g.title, loading: 'lazy' }))));
+        } catch { grid.innerHTML = '<p class="ohe-hint">Could not load GIFs</p>'; }
+      };
+      search.addEventListener('input', debounce(load, 350));
+      load();
+    });
   }
   function mediaPicker(ed, type) {
     return new Promise(async (resolve) => {
@@ -1936,6 +1999,7 @@
       on: (ev, fn) => ed.on(ev, fn),
       sendMeta: (m) => ed.collab && ed.collab.send({ t: 'meta', ...m }),
       flush: () => ed.emitChange.flush(),
+      insertGif: () => ed.pseudo('gif', ed.lastFocused || null),
       _editor: ed,
     };
   }

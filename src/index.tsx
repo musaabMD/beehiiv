@@ -31,6 +31,7 @@ import api from './routes/api';
 
 export { CollabRoom } from './lib/collab';
 export { LiveRoom } from './lib/live';
+export { ChatRoom } from './lib/chatroom';
 
 const app = new Hono<AppEnv>();
 

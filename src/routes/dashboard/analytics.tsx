@@ -465,6 +465,12 @@ export function registerAnalytics(dash: App) {
     if (c.req.query('format') === 'csv') return csv(c, `report-${metric}-${group}`, [[group, report.label], ...report.rows.map((x) => [x.key, report.money ? (x.value / 100).toFixed(2) : x.value])]);
     const saved = await all<any>(c.env, 'SELECT * FROM saved_reports WHERE pub_id = ? ORDER BY created_at DESC', pub.id);
     const savedHref = (cfg: any) => {
+      if (cfg.type === 'pivot') {
+        const p = new URLSearchParams({ metric: cfg.metric, range: cfg.range || '30d' });
+        (cfg.dims || []).forEach((d: string, i: number) => p.set('d' + (i + 1), d));
+        for (const f of cfg.filters || []) p.append('f', `${f.field}:${f.op}:${f.value}`);
+        return '/app/analytics/explore?' + p.toString();
+      }
       const u = new URLSearchParams();
       u.set('metric', cfg.metric); u.set('group', cfg.group); if (cfg.range) u.set('range', cfg.range);
       for (const f of cfg.filters || []) u.append('f', `${f.field}:${f.op}:${f.value}`);

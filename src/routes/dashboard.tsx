@@ -12,6 +12,7 @@ import { DashLayout } from '../ui/layout';
 import { Card, Table, Empty, LinkBtn } from '../ui/components';
 import { Kpi, fmtPct, fmtNum, fmtUsd, DASH_STYLE, TrendChart } from './dashboard/parts';
 import { registerAnalytics } from './dashboard/analytics';
+import { registerExplore } from './dashboard/explore';
 import { ago, fmtDate, DAY, stripTags } from '../lib/util';
 
 const dash = new Hono<AppEnv>();
@@ -148,6 +149,7 @@ dash.get('/', async (c) => {
   );
 });
 
+registerExplore(dash);
 registerAnalytics(dash);
 
 // ───────── AI assistant (⌘J) ─────────

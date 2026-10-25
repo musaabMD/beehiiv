@@ -140,6 +140,7 @@ app.get('/:id/edit', async (c) => {
           <span class="grow" />
           <span class="pe-gauge" id="pe-gauge" title="Email size — Gmail clips emails over 102 KB"><span class="pe-gauge-bar"><i /></span><span class="pe-gauge-t">— KB</span></span>
           <span class="small muted" id="pe-words">0 words</span>
+          <button type="button" class="btn btn-ghost btn-sm" data-gif aria-label="Insert GIF" title="Insert a GIF">GIF</button>
           <button type="button" class="btn btn-ghost btn-sm" data-open="#pe-find" aria-label="Find and replace" title="Find & replace (⌘F)">{raw(icon('search', 16))}</button>
           <button type="button" class="btn btn-secondary btn-sm" id="pe-preview-btn">{raw(icon('eye', 16))} Preview</button>
           {canPublish ? (
@@ -661,7 +662,11 @@ app.post('/polls', async (c) => {
   const options = arr(b.options).map((l) => l.slice(0, 120)).filter(Boolean).slice(0, 8);
   if (!question || options.length < 2) return c.json({ error: 'A poll needs a question and at least two options' }, 400);
   const pid = id();
-  await insert(c.env, 'polls', { id: pid, pub_id: pub.id, question, options: JSON.stringify(options.map((label) => ({ id: id(6), label }))), purpose: ['topic', 'product', 'pricing'].includes(b.purpose) ? b.purpose : 'general', created_at: now() });
+  const opts = options.map((label) => ({ id: id(6), label }));
+  const trivia = b.kind === 'trivia';
+  const ci = Number(b.correct) - 1;
+  if (trivia && !(ci >= 0 && ci < opts.length)) return c.json({ error: 'Choose which option is the correct answer' }, 400);
+  await insert(c.env, 'polls', { id: pid, pub_id: pub.id, question, options: JSON.stringify(opts), purpose: ['topic', 'product', 'pricing'].includes(b.purpose) ? b.purpose : 'general', kind: trivia ? 'trivia' : 'standard', correct_option_id: trivia ? opts[ci].id : null, explanation: trivia ? str(b.explanation, 1000) : '', created_at: now() });
   return c.json({ id: pid, question });
 });
 
@@ -670,7 +675,7 @@ app.get('/picker/:kind', async (c) => {
   const k = c.req.param('kind');
   const postId = c.req.query('post') || '';
   let items: Array<{ id: string; label: string; sub?: string }> = [];
-  if (k === 'polls') items = (await all<any>(c.env, 'SELECT id, question FROM polls WHERE pub_id = ? ORDER BY created_at DESC LIMIT 100', pub.id)).map((r) => ({ id: r.id, label: r.question }));
+  if (k === 'polls') items = (await all<any>(c.env, 'SELECT id, question, kind FROM polls WHERE pub_id = ? ORDER BY created_at DESC LIMIT 100', pub.id)).map((r) => ({ id: r.id, label: r.question, sub: r.kind === 'trivia' ? 'Trivia' : undefined }));
   if (k === 'episodes') items = (await all<any>(c.env, `SELECT e.id, e.title, p.title AS show FROM episodes e JOIN podcasts p ON p.id = e.podcast_id WHERE e.pub_id = ? ORDER BY e.created_at DESC LIMIT 100`, pub.id)).map((r) => ({ id: r.id, label: r.title, sub: r.show }));
   if (k === 'products') items = (await all<any>(c.env, `SELECT id, name, price_cents FROM products WHERE pub_id = ? AND status != 'archived' ORDER BY created_at DESC LIMIT 100`, pub.id)).map((r) => ({ id: r.id, label: r.name, sub: r.price_cents ? `$${(r.price_cents / 100).toFixed(2)}` : 'Free' }));
   if (k === 'events') items = (await all<any>(c.env, `SELECT id, title, starts_at FROM live_events WHERE pub_id = ? ORDER BY starts_at DESC LIMIT 100`, pub.id)).map((r) => ({ id: r.id, label: r.title, sub: fmtDateTime(r.starts_at, pub.timezone) }));

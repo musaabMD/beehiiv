@@ -301,7 +301,7 @@ app.get('/polls', async (c) => {
     {rows.length ? (
       <Table<any> rows={rows} rowHref={(p) => `/app/audience/polls/${p.id}`} cols={[
         { h: 'Question', r: (p) => <a href={`/app/audience/polls/${p.id}`}>{p.question}</a> },
-        { h: 'Purpose', r: (p) => <Badge>{p.purpose}</Badge> },
+        { h: 'Type', r: (p) => p.kind === 'trivia' ? <Badge tone="purple">Trivia</Badge> : <Badge>{p.purpose}</Badge> },
         { h: 'Options', r: (p) => parseJSON<any[]>(p.options, []).length },
         { h: 'Votes', r: (p) => <strong>{num(p.votes)}</strong> },
         { h: 'Status', r: (p) => <Status s={p.closed ? 'ended' : 'active'} /> },
@@ -313,6 +313,9 @@ app.get('/polls', async (c) => {
         <Field label="Question"><Input name="question" required autofocus placeholder="What should next week's deep dive cover?" /></Field>
         <Field label="Options" hint="One per line (2–10)"><Textarea name="options" rows={4} required placeholder={'Option A\nOption B\nOption C'} /></Field>
         <Field label="Purpose"><Select name="purpose" options={[['general', 'General'], ['topic', 'Pick a topic'], ['product', 'Product research'], ['pricing', 'Pricing research']]} /></Field>
+        <Field label="Type" hint="Trivia polls have a correct answer: readers see if they got it right, and you get a leaderboard."><Select name="kind" options={[['standard', 'Standard poll'], ['trivia', 'Trivia (has a correct answer)']]} /></Field>
+        <Field label="Correct answer (trivia)" hint="Option number, e.g. 2 for the second line"><Input name="correct" type="number" min={1} max={10} placeholder="1" /></Field>
+        <Field label="Explanation (trivia, optional)" hint="Shown after answering"><Textarea name="explanation" rows={2} /></Field>
         <div class="form-actions"><Btn>Create poll</Btn></div>
       </form>
     </Modal>
@@ -324,7 +327,11 @@ app.post('/polls', async (c) => {
   const opts = str(f.options).split('\n').map((x) => x.trim()).filter(Boolean).slice(0, 10);
   if (opts.length < 2) return back(c, '/app/audience/polls', 'A poll needs at least two options', 'err');
   const pid = id(12);
-  await insert(c.env, 'polls', { id: pid, pub_id: c.get('pub').id, question: str(f.question, 300), options: JSON.stringify(opts.map((label) => ({ id: id(6), label: label.slice(0, 200) }))), purpose: ['general', 'topic', 'product', 'pricing'].includes(f.purpose) ? f.purpose : 'general', closed: 0, created_at: now() });
+  const options = opts.map((label) => ({ id: id(6), label: label.slice(0, 200) }));
+  const trivia = f.kind === 'trivia';
+  const ci = int(f.correct, 0) - 1;
+  if (trivia && (ci < 0 || ci >= options.length)) return back(c, '/app/audience/polls', 'Pick which option is the correct answer (its line number)', 'err');
+  await insert(c.env, 'polls', { id: pid, pub_id: c.get('pub').id, question: str(f.question, 300), options: JSON.stringify(options), purpose: ['general', 'topic', 'product', 'pricing'].includes(f.purpose) ? f.purpose : 'general', kind: trivia ? 'trivia' : 'standard', correct_option_id: trivia ? options[ci].id : null, explanation: trivia ? str(f.explanation, 1000) : '', closed: 0, created_at: now() });
   return back(c, `/app/audience/polls/${pid}`, 'Poll created — insert it into a post from the editor');
 });
 
@@ -339,6 +346,12 @@ app.get('/polls/:id', async (c) => {
   const email = counts.filter((x) => x.channel === 'email').reduce((a, b) => a + b.n, 0);
   const voters = await all<any>(c.env, `SELECT v.*, s.email, s.name FROM poll_votes v LEFT JOIN subscribers s ON s.id = v.subscriber_id WHERE v.poll_id = ? ORDER BY v.created_at DESC LIMIT 200`, p.id);
   const posts = await all<any>(c.env, `SELECT DISTINCT po.id, po.title FROM poll_votes v JOIN posts po ON po.id = v.post_id WHERE v.poll_id = ?`, p.id);
+  const trivia = p.kind === 'trivia' && !!p.correct_option_id;
+  const correctN = trivia ? byOpt(p.correct_option_id) : 0;
+  // Trivia leaderboard: correct answers across every trivia poll in this publication
+  const board = trivia ? await all<any>(c.env, `SELECT s.id, s.email, s.name, SUM(CASE WHEN v.option_id = tp.correct_option_id THEN 1 ELSE 0 END) AS correct, COUNT(*) AS answered
+    FROM poll_votes v JOIN polls tp ON tp.id = v.poll_id JOIN subscribers s ON s.id = v.subscriber_id
+    WHERE tp.pub_id = ? AND tp.kind = 'trivia' AND tp.correct_option_id IS NOT NULL GROUP BY s.id ORDER BY correct DESC, answered ASC LIMIT 25`, pub.id) : [];
   return page(c, {
     title: p.question, sub: 'polls', crumbs: [['/app/audience/polls', 'Polls']],
     actions: <>
@@ -353,11 +366,13 @@ app.get('/polls/:id', async (c) => {
       <Stat label="From email" value={num(email)} sub={pct(email, total)} />
       <Stat label="From web" value={num(total - email)} sub={pct(total - email, total)} />
       <Stat label="Identified voters" value={num(voters.filter((v) => v.subscriber_id).length)} />
+      {trivia && <Stat label="Answered correctly" value={pct(correctN, total, 0)} sub={`${num(correctN)} of ${num(total)}`} />}
     </Stats>
+    {trivia && p.explanation && <div class="callout">{p.explanation}</div>}
     <Card title="Results">
       {opts.map((o) => {
         const n = byOpt(o.id);
-        return <div class="bar-row poll-row"><span class="bar-l"><strong>{o.label}</strong></span><span class="bar-t"><span class="bar-f" style={`width:${total ? (n / total) * 100 : 0}%`} /></span><span class="bar-v">{pct(n, total, 0)} · {n}</span>
+        return <div class="bar-row poll-row"><span class="bar-l"><strong>{o.label}</strong>{trivia && o.id === p.correct_option_id ? <> <Badge tone="green">✓ correct</Badge></> : null}</span><span class="bar-t"><span class="bar-f" style={`width:${total ? (n / total) * 100 : 0}%`} /></span><span class="bar-v">{pct(n, total, 0)} · {n}</span>
           <span class="small muted nowrap">✉ {byOpt(o.id, 'email')} · 🌐 {byOpt(o.id, 'web')}</span>
           <form method="post" action={`/app/audience/polls/${p.id}/segment`} class="inline-form"><input type="hidden" name="option_id" value={o.id} /><button class="btn btn-ghost btn-sm">+ segment</button></form>
         </div>;
@@ -367,7 +382,7 @@ app.get('/polls/:id', async (c) => {
       <Card title="Voters" pad={false}>
         <Table<any> rows={voters} empty="No votes yet." cols={[
           { h: 'Reader', r: (v) => v.subscriber_id ? <a href={`/app/audience/s/${v.subscriber_id}`}>{v.email}</a> : <Muted>anonymous web visitor</Muted> },
-          { h: 'Answer', r: (v) => opts.find((o) => o.id === v.option_id)?.label || v.option_id },
+          { h: 'Answer', r: (v) => <>{opts.find((o) => o.id === v.option_id)?.label || v.option_id}{trivia ? (v.option_id === p.correct_option_id ? ' ✓' : ' ✗') : ''}</> },
           { h: 'Channel', r: (v) => v.channel },
           { h: 'When', r: (v) => ago(v.created_at) },
         ]} />
@@ -378,6 +393,15 @@ app.get('/polls/:id', async (c) => {
           <Field label="Direct link"><Copy value={`${siteUrl(c.env, pub)}/poll/${p.id}`} /></Field>
           <Field label="Poll ID"><Copy value={p.id} /></Field>
         </Card>
+        {trivia && (
+          <Card title="Trivia leaderboard" pad={false}>
+            <Table<any> rows={board} empty="No trivia answers from identified subscribers yet." cols={[
+              { h: '#', r: (r) => board.indexOf(r) + 1 },
+              { h: 'Reader', r: (r) => <a href={`/app/audience/s/${r.id}`}>{r.name || r.email}</a> },
+              { h: 'Score', r: (r) => <strong>{r.correct}/{r.answered}</strong> },
+            ]} />
+          </Card>
+        )}
         {posts.length > 0 && <Card title="Appears in">{posts.map((po) => <p><a href={`/app/posts/${po.id}`}>{po.title}</a></p>)}</Card>}
       </div>
     </div>

@@ -391,7 +391,7 @@ registerPeriodic('billing.lifecycle', 15 * MIN, async (env) => {
 
 /** Settle ad placements once their post has been sent: impressions, CPM / flat earnings. */
 registerPeriodic('ads.settle', 15 * MIN, async (env) => {
-  const opps = await all<any>(env, `SELECT o.*, c.pricing, c.rate_cents, c.name AS cname FROM ad_opportunities o JOIN ad_campaigns c ON c.id = o.campaign_id WHERE o.status IN ('accepted','placed') AND o.post_id IS NOT NULL AND o.settled_at IS NULL LIMIT 100`);
+  const opps = await all<any>(env, `SELECT o.*, c.pricing, c.rate_cents, c.name AS cname FROM ad_opportunities o JOIN ad_campaigns c ON c.id = o.campaign_id WHERE o.status IN ('accepted','placed') AND o.post_id IS NOT NULL AND o.settled_at IS NULL AND o.programmatic = 0 LIMIT 100`);
   for (const o of opps) {
     const send = await one<any>(env, `SELECT id FROM sends WHERE post_id = ? AND kind = 'post' AND status = 'sent' ORDER BY created_at DESC LIMIT 1`, o.post_id);
     const published = await one<any>(env, `SELECT 1 FROM posts WHERE id = ? AND status = 'published' AND platform = 'web'`, o.post_id);
