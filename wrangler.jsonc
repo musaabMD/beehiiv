@@ -7,7 +7,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "directory": "public", "binding": "ASSETS" },
   "d1_databases": [
-    { "binding": "DB", "database_name": "openhive", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "openhive", "database_id": "0cb903a8-7d0b-4a6c-b163-abe66a14e9a0", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "openhive-media" }],
   "durable_objects": { "bindings": [{ "name": "COLLAB", "class_name": "CollabRoom" }, { "name": "LIVE", "class_name": "LiveRoom" }, { "name": "CHAT", "class_name": "ChatRoom" }] },
