@@ -52,6 +52,13 @@ export interface SiteProps {
   scripts?: string[];
 }
 
+/** site.css inlined into every page (5–6 KB gzipped) to save a render-blocking round trip. Loaded once per isolate. */
+let SITE_CSS: Promise<string> | null = null;
+function siteCss(env: any): Promise<string> {
+  if (!SITE_CSS) SITE_CSS = env.ASSETS.fetch(new Request('https://assets.local/static/site.css')).then((r: Response) => (r.ok ? r.text() : '')).catch(() => '');
+  return SITE_CSS!.then((t) => { if (!t) SITE_CSS = null; return t; });
+}
+
 export async function SiteLayout(p: SiteProps) {
   const { c } = p;
   const pub = c.get('pub');
@@ -59,10 +66,14 @@ export async function SiteLayout(p: SiteProps) {
   const cfg = settings(pub);
   const base = siteUrl(c.env, pub);
   const reader = c.get('reader');
-  const navLinks = await all<{ label: string; url: string; location: string }>(c.env, 'SELECT label, url, location FROM nav_links WHERE pub_id = ? ORDER BY position', pub.id);
+  const [navLinks, navPages, css] = await Promise.all([
+    all<{ label: string; url: string; location: string }>(c.env, 'SELECT label, url, location FROM nav_links WHERE pub_id = ? ORDER BY position', pub.id),
+    all<{ title: string; slug: string }>(c.env, `SELECT title, slug FROM pages WHERE pub_id = ? AND status = 'published' AND show_in_nav = 1 AND slug != '' ORDER BY created_at`, pub.id),
+    siteCss(c.env),
+  ]);
   const header = navLinks.filter((n) => n.location === 'header');
   const footer = navLinks.filter((n) => n.location === 'footer');
-  const navPages = await all<{ title: string; slug: string }>(c.env, `SELECT title, slug FROM pages WHERE pub_id = ? AND status = 'published' AND show_in_nav = 1 AND slug != '' ORDER BY created_at`, pub.id);
+
   const popup = parseJSON<any>(cfg.popup as any, null);
   const flash = readFlash(c);
   const title = p.title ? `${p.title} | ${pub.name}` : pub.name;
@@ -92,7 +103,7 @@ export async function SiteLayout(p: SiteProps) {
           <link rel="alternate" type="application/rss+xml" title={pub.name} href={`${base}/feed.xml`} />
           <link rel="icon" href={pub.favicon_url || pub.logo_url || '/static/favicon.svg'} />
           {raw(fontLink(t))}
-          <link rel="stylesheet" href="/static/site.css" />
+          {css ? <style>{raw(css)}</style> : <link rel="stylesheet" href="/static/site.css" />}
           <style>{raw(`:root{${vars}}${t.dark_mode ? '@media(prefers-color-scheme:dark){:root{--bg:#0b0f17;--surface:#111827;--text:#e5e7eb;--muted:#9ca3af;--border:#1f2937}}' : ''}${(t.custom_css || '').replace(/<\/style/gi, '')}`)}</style>
           {p.jsonld && <script type="application/ld+json">{raw(JSON.stringify(p.jsonld).replace(/</g, '\\u003c'))}</script>}
           {cfg.ga_measurement_id && raw(`<script async src="https://www.googletagmanager.com/gtag/js?id=${esc(cfg.ga_measurement_id)}"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag('js',new Date());gtag('config','${esc(cfg.ga_measurement_id)}');</script>`)}
