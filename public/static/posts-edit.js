@@ -124,13 +124,15 @@
     const g = $('#pe-gauge');
     if (!g) return;
     try {
-      const r = isTemplate ? await json('/app/posts/render', { doc: editor.getDoc(), mode: 'email', title: title.value }) : await json(`${base}/preview`, { mode: 'email' });
-      const kb = r.bytes / 1024, clip = (data.gmailClip || 104448) / 1024;
+      // Measures the email as actually sent: layout, click-tracking URLs, open pixel and unsubscribe footer.
+      const r = isTemplate ? await json('/app/posts/render', { doc: editor.getDoc(), mode: 'email-size', title: title.value }) : await json(`${base}/email-size`, {});
+      const kb = r.bytes / 1024, clip = (r.clip || data.gmailClip || 104448) / 1024, warnAt = (r.warn_at || 92160) / 1024;
       $('.pe-gauge-t', g).textContent = `${kb.toFixed(0)} / ${clip.toFixed(0)} KB`;
       $('.pe-gauge-bar i', g).style.width = Math.min(100, (kb / clip) * 100) + '%';
-      g.classList.toggle('warn', kb >= 90 && kb < clip);
+      g.classList.toggle('warn', kb >= warnAt && kb < clip);
       g.classList.toggle('over', kb >= clip);
-      g.title = kb >= clip ? 'Gmail will clip this email (over 102 KB). Remove images/blocks or split the issue.' : kb >= 90 ? 'Close to Gmail’s 102 KB clipping limit' : 'Email size — Gmail clips emails over 102 KB';
+      g.title = (kb >= clip ? 'Gmail will clip this email (over 102 KB). Remove images/blocks or split the issue.' : kb >= warnAt ? 'Close to Gmail’s 102 KB clipping limit' : 'Email size as sent (incl. tracking links and footer) — Gmail clips emails over 102 KB')
+        + (r.free_bytes && r.premium_bytes && r.free_bytes !== r.premium_bytes ? ` · free ${(r.free_bytes / 1024).toFixed(0)} KB / premium ${(r.premium_bytes / 1024).toFixed(0)} KB` : '');
       lastBytes = r.bytes;
     } catch {}
   }, 2500);

@@ -7,7 +7,8 @@ import { storeFile, importFromUrl } from '../../lib/media';
 import { aiText, aiImage, aiEnabled, mediaUrl, AI_DISABLED_MSG } from '../../lib/ai';
 import { DashLayout } from '../../ui/layout';
 import { Card, Table, Btn, Empty, Input, Field, back, ActionForm, Modal, OpenBtn } from '../../ui/components';
-import { id, now, str, form, slugify, fmtDate, qs, num } from '../../lib/util';
+import { id, now, str, form, slugify, fmtDate, qs, num, stripTags } from '../../lib/util';
+import { inline } from '../../lib/sanitize';
 
 const app = new Hono<AppEnv>();
 
@@ -226,6 +227,18 @@ const PROMPTS: Record<string, (b: any) => string> = {
   write: (b) => `Write newsletter content (2-4 short paragraphs, separated by blank lines) about: ${b.prompt}\n\nContext from the draft so far:\n${(b.text || '').slice(0, 3000)}`,
 };
 
+const INLINE_ACTIONS = new Set(['rewrite', 'shorten', 'expand', 'fix', 'translate', 'tone']);
+
+/** Strip wrappers models like to add around an HTML fragment (code fences, a single <p>, newlines). */
+function cleanAiHtml(t: string): string {
+  let s = t.trim().replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/, '').trim();
+  s = s.replace(/^(?:here(?: is|'s)[^:\n]*:\s*)/i, '');
+  const one = s.match(/^<p[^>]*>([\s\S]*)<\/p>$/i);
+  if (one && !/<p[\s>]/i.test(one[1])) s = one[1];
+  s = s.replace(/<\/p>\s*<p[^>]*>/gi, '<br><br>').replace(/<\/?p[^>]*>/gi, '');
+  return s.replace(/\n{2,}/g, '<br><br>').replace(/\n/g, ' ').trim();
+}
+
 app.post('/ai', async (c) => {
   const pub = c.get('pub');
   const b = await c.req.json<any>().catch(() => ({}));
@@ -236,6 +249,21 @@ app.post('/ai', async (c) => {
   const p = PROMPTS[b.action];
   if (!p) return c.json({ error: 'Unknown action' }, 400);
   if (!aiEnabled(c.env)) return c.json({ error: AI_DISABLED_MSG }, 400);
+  if (typeof b.html === 'string' && INLINE_ACTIONS.has(b.action)) {
+    // In-place edit of rich text: the selection's inline HTML goes in, sanitized inline HTML comes out,
+    // so bold/italic/links/code survive. Footnotes arrive as ⟦fnN⟧ placeholders that the editor restores.
+    const html = inline(str(b.html, 12000)).trim();
+    if (!stripTags(html).trim()) return c.json({ error: 'Select some text (or click into a block) first' }, 400);
+    const r = await aiText(c.env, p({ ...b, text: html }),
+      `You are an expert newsletter editor for "${pub.name}". The text is an HTML fragment. Reply with the edited HTML fragment only — no preamble, no code fences, no quotes around it. ` +
+      `Keep every inline tag that wraps text you keep (<strong>, <em>, <u>, <s>, <a href="…">, <code>, <mark>, <sub>, <sup>, <br>) with the same attributes, around the corresponding words. ` +
+      `Copy placeholders like ⟦fn1⟧ through unchanged in the matching position. Do not add block tags (<p>, <div>, headings, lists) and do not add new links.`);
+    if (!r.ok) return c.json({ error: r.text }, 400);
+    const out = inline(cleanAiHtml(r.text));
+    if (!stripTags(out).trim()) return c.json({ error: 'The AI returned an empty result — try again' }, 400);
+    return c.json({ html: out, text: stripTags(out) });
+  }
+  if (INLINE_ACTIONS.has(b.action) && !str(b.text).trim()) return c.json({ error: 'Select some text (or click into a block) first' }, 400);
   const r = await aiText(c.env, p({ ...b, text: str(b.text, 12000), prompt: str(b.prompt, 2000) }), `You are an expert newsletter editor for "${pub.name}". Reply with the resulting text only — no preamble, no quotes around it.`);
   return r.ok ? c.json({ text: r.text }) : c.json({ error: r.text }, 400);
 });
