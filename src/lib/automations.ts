@@ -86,7 +86,7 @@ export function walk(steps: Step[], fn: (s: Step) => void) {
 }
 
 // ───────── enrollment ─────────
-export async function enroll(env: Env, automationId: string, subscriberId: string, data: Record<string, unknown> = {}, opts: { force?: boolean } = {}): Promise<{ ok: boolean; runId?: string; reason?: string }> {
+export async function enroll(env: Env, automationId: string, subscriberId: string, data: Record<string, unknown> = {}, opts: { force?: boolean; allowReentry?: boolean } = {}): Promise<{ ok: boolean; runId?: string; reason?: string }> {
   const a = await one<any>(env, 'SELECT * FROM automations WHERE id = ?', automationId);
   if (!a) return { ok: false, reason: 'automation not found' };
   if (a.status !== 'active' && !opts.force) return { ok: false, reason: 'automation is not active' };
@@ -94,7 +94,7 @@ export async function enroll(env: Env, automationId: string, subscriberId: strin
   if (!sub) return { ok: false, reason: 'subscriber not found' };
   if (['unsubscribed', 'bounced', 'complained'].includes(sub.status)) return { ok: false, reason: 'subscriber is not active' };
   const existing = await one<any>(env, `SELECT id, status FROM automation_runs WHERE automation_id = ? AND subscriber_id = ? ORDER BY created_at DESC LIMIT 1`, automationId, subscriberId);
-  if (existing && (['active', 'waiting'].includes(existing.status) || !a.allow_reentry)) return { ok: false, reason: 'already enrolled' };
+  if (existing && (['active', 'waiting'].includes(existing.status) || (!a.allow_reentry && !opts.allowReentry))) return { ok: false, reason: 'already enrolled' };
   const steps = parseJSON<Step[]>(a.steps, []);
   const rid = id();
   await insert(env, 'automation_runs', { id: rid, automation_id: a.id, pub_id: a.pub_id, subscriber_id: sub.id, status: steps.length ? 'active' : 'completed', step_path: '[0]', next_run_at: now(), data: JSON.stringify(data), created_at: now(), updated_at: now() });
@@ -327,10 +327,7 @@ registerPeriodic('automations.poll_triggers', 15 * MIN, async (env) => {
       for (const s of subs) {
         const today = new Date().toISOString().slice(0, 10);
         const already = await one(env, `SELECT 1 FROM automation_runs WHERE automation_id = ? AND subscriber_id = ? AND json_extract(data, '$.date') = ?`, a.id, s.id, today);
-        if (!already) {
-          await run(env, `UPDATE automations SET allow_reentry = 1 WHERE id = ?`, a.id);
-          await enroll(env, a.id, s.id, { trigger: 'date_field', date: today });
-        }
+        if (!already) await enroll(env, a.id, s.id, { trigger: 'date_field', date: today }, { allowReentry: true });
       }
     }
   }

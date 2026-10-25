@@ -33,6 +33,8 @@ export interface CheckoutInput {
   recurring?: { interval: 'month' | 'year'; trialDays?: number; trialAmountCents?: number } | null;
   successUrl?: string;
   cancelUrl?: string;
+  /** recurring discount from an offer: becomes a Stripe coupon (test mode charges the discounted amount instead) */
+  discount?: { percent_off?: number; amount_off_cents?: number; duration: 'once' | 'repeating' | 'forever'; months?: number | null } | null;
 }
 
 export function stripeEnabled(env: Env) {
@@ -70,6 +72,12 @@ export async function createCheckout(env: Env, input: CheckoutInput): Promise<{ 
   const base = siteUrl(env, input.pub);
   const success = input.successUrl || `${base}/order/${orderId}`;
   const cancel = input.cancelUrl || base;
+  if (input.successUrl) {
+    const row = await one<{ data: string }>(env, 'SELECT data FROM orders WHERE id = ?', orderId);
+    const d = JSON.parse(row?.data || '{}');
+    d.success_url = input.successUrl;
+    await run(env, 'UPDATE orders SET data = ? WHERE id = ?', JSON.stringify(d), orderId);
+  }
   if (input.amountCents <= 0 && !input.recurring?.trialAmountCents) {
     await markPaid(env, orderId, {});
     return { orderId, url: success };
@@ -101,6 +109,14 @@ export async function createCheckout(env: Env, input: CheckoutInput): Promise<{ 
       p['line_items[1][price_data][product_data][name]'] = `Trial: ${input.recurring.trialDays} days`;
     }
     if (feePct > 0 && acct) p['subscription_data[application_fee_percent]'] = String(feePct);
+    if (input.discount && (input.discount.percent_off || input.discount.amount_off_cents)) {
+      const cp: Record<string, string> = { duration: input.discount.duration };
+      if (input.discount.percent_off) cp.percent_off = String(input.discount.percent_off);
+      else { cp.amount_off = String(input.discount.amount_off_cents); cp.currency = currency; }
+      if (input.discount.duration === 'repeating') cp.duration_in_months = String(input.discount.months || 1);
+      const coupon = await stripe(env, 'coupons', cp, acct);
+      p['discounts[0][coupon]'] = coupon.id;
+    }
   } else {
     p['payment_intent_data[metadata][order_id]'] = orderId;
     if (feePct > 0 && acct) p['payment_intent_data[application_fee_amount]'] = String(Math.round((input.amountCents * feePct) / 100));

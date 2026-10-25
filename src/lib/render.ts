@@ -230,7 +230,16 @@ async function renderBlock(st: State, b: Block): Promise<string> {
     }
     case 'list': {
       const tag = d.ordered ? 'ol' : 'ul';
-      const items = (d.items || []).map((x: string) => (E ? `<li style="margin:0 0 6px">${rich(st, x)}</li>` : `<li>${rich(st, x)}</li>`)).join('');
+      // items: html strings, or {html, items} for nested (indented) lists
+      const renderItems = (list: any[], depth: number): string =>
+        list.map((x: any) => {
+          const html = typeof x === 'string' ? x : x?.html || '';
+          const kids = typeof x === 'object' && Array.isArray(x?.items) && x.items.length && depth < 4
+            ? (E ? `<${tag} style="margin:6px 0 0;padding-left:22px">${renderItems(x.items, depth + 1)}</${tag}>` : `<${tag}>${renderItems(x.items, depth + 1)}</${tag}>`)
+            : '';
+          return E ? `<li style="margin:0 0 6px">${rich(st, html)}${kids}</li>` : `<li>${rich(st, html)}${kids}</li>`;
+        }).join('');
+      const items = renderItems(d.items || [], 0);
       return E ? `<${tag} style="${EMAIL_P(s)};padding-left:26px">${items}</${tag}>` : `<${tag}>${items}</${tag}>`;
     }
     case 'checklist': {

@@ -25,6 +25,8 @@ export interface SendOptions {
   phase?: 'test' | 'main';
   winner?: string | null;
   only_subscriber_ids?: string[];
+  /** override subject line for this send (e.g. resend to non-openers) */
+  subject?: string | null;
 }
 
 const BATCH = 50;
@@ -134,7 +136,7 @@ export async function startSend(env: Env, pub: Publication, post: Post, override
   const total = o.only_subscriber_ids ? o.only_subscriber_ids.length : await countRecipients(env, pub.id, o);
   o.phase = o.ab ? 'test' : 'main';
   const sendId = id();
-  await insert(env, 'sends', { id: sendId, pub_id: pub.id, post_id: post.id, kind: 'post', subject: post.email_subject || post.title, status: o.ab ? 'testing' : 'sending', total, options: JSON.stringify(o), created_at: now(), started_at: now() });
+  await insert(env, 'sends', { id: sendId, pub_id: pub.id, post_id: post.id, kind: 'post', subject: o.subject || post.email_subject || post.title, status: o.ab ? 'testing' : 'sending', total, options: JSON.stringify(o), created_at: now(), started_at: now() });
   await enqueue(env, 'send.batch', { send_id: sendId });
   return sendId;
 }
@@ -171,7 +173,7 @@ registerJob('send.batch', async (env, p) => {
     last = sub.id;
     // A/B: test phase only takes the sample; main phase takes the rest
     let variant: string | null = null;
-    let subject = post.email_subject || post.title;
+    let subject = o.subject || post.email_subject || post.title;
     if (o.ab) {
       const b = await bucket(send.id + sub.id);
       const inSample = b < o.ab.sample_pct;
@@ -284,6 +286,21 @@ registerPeriodic('deliveries.retry', 5 * MIN, async (env) => {
     const sub = await one<Subscriber>(env, 'SELECT * FROM subscribers WHERE id = ?', d.subscriber_id);
     if (!pub || !sub || sub.status !== 'active') { await run(env, `UPDATE deliveries SET status = 'failed', error = 'subscriber inactive' WHERE id = ?`, d.id); continue; }
     const post = d.post_id ? await one<Post>(env, 'SELECT * FROM posts WHERE id = ?', d.post_id) : null;
+    if (!post && d.automation_id && d.step_id) {
+      // automation email: re-render from the live step config
+      const a = await one<{ steps: string }>(env, 'SELECT steps FROM automations WHERE id = ?', d.automation_id);
+      let step: any = null;
+      const find = (list: any[]): void => { for (const s of list || []) { if (s.id === d.step_id) step = s; find(s.yes); find(s.no); } };
+      find(parseJSON<any[]>(a?.steps, []));
+      if (!step) { await run(env, `UPDATE deliveries SET status = 'failed', error = 'content missing' WHERE id = ?`, d.id); continue; }
+      const c = step.config || {};
+      const content: Content = { title: c.title || '', subtitle: c.subtitle || '', doc: c.doc || { blocks: [] }, preview_text: c.preview_text || '', style: c.style ? JSON.stringify(c.style) : null, hideHeader: !c.title };
+      const built = await buildEmail(env, pub, content, sub, { deliveryId: d.id });
+      const from = await senderFor(env, pub, 'automations', c.sender_id);
+      const res = await sendMail(env, { to: sub.email, subject: d.send_subject, html: built.html, text: built.text, from, replyTo: pub.reply_to, pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
+      await applyResult(env, pub, d.id, sub, res);
+      continue;
+    }
     if (!post) { await run(env, `UPDATE deliveries SET status = 'failed', error = 'content missing' WHERE id = ?`, d.id); continue; }
     const content = await postContent(env, post);
     const built = await buildEmail(env, pub, content, sub, { deliveryId: d.id, post });
