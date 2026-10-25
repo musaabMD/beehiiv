@@ -1,0 +1,28 @@
+{
+  // OpenHive — open-source newsletter platform. See README.md for deploy steps.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "openhive",
+  "main": "src/index.tsx",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "directory": "public", "binding": "ASSETS" },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "openhive", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "openhive-media" }],
+  "durable_objects": { "bindings": [{ "name": "COLLAB", "class_name": "CollabRoom" }, { "name": "LIVE", "class_name": "LiveRoom" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CollabRoom", "LiveRoom"] }],
+  "send_email": [{ "name": "EMAIL" }],
+  // Workers AI powers the writing assistant. Uncomment after `wrangler login` (it always runs remotely).
+  // "ai": { "binding": "AI" },
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "APP_NAME": "OpenHive",
+    "APP_URL": "http://localhost:8787",
+    "MAIL_FROM": "newsletter@trstbase.com",
+    "PURCHASE_URL": "https://lnkbase.com/beehiiv",
+    "PRICE_LABEL": "$30 one-time",
+    "PLATFORM_FEE_PERCENT": "0"
+  },
+  "observability": { "enabled": true }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "openhive",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenHive — open-source newsletter platform on Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "db:migrate:local": "wrangler d1 migrations apply openhive --local",
+    "db:migrate:remote": "wrangler d1 migrations apply openhive --remote",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/e2e.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "^4.13.13"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261025.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.152.0"
+  }
+}
