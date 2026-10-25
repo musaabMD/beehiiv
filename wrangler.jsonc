@@ -14,7 +14,7 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CollabRoom", "LiveRoom"] }, { "tag": "v2", "new_sqlite_classes": ["ChatRoom"] }],
   "send_email": [{ "name": "EMAIL" }],
   // Workers AI powers the writing assistant. Uncomment after `wrangler login` (it always runs remotely).
-  // "ai": { "binding": "AI" },
+  "ai": { "binding": "AI" },
   "triggers": { "crons": ["* * * * *"] },
   "vars": {
     "APP_NAME": "OpenHive",

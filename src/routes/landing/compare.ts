@@ -21,16 +21,16 @@ function costCard(c: PageCtx, only?: Platform) {
     const max = Math.max(1, ...r.map((x) => x.v || 0));
     return r.sort((a, b) => (a.v ?? 1e9) - (b.v ?? 1e9)).map((x) => `<a href="${x.href}" style="display:grid;grid-template-columns:150px 1fr 150px 70px;gap:10px;align-items:center;padding:7px 0;${x.p === OH ? 'font-weight:700' : ''}">
       <span style="display:flex;gap:8px;align-items:center">${badge(x.p)}${esc(x.p.name)}</span>
-      <span style="height:6px;border-radius:4px;background:#232a36;position:relative;overflow:hidden"><i style="position:absolute;inset:0 auto 0 0;width:${x.v ? Math.max(2, (x.v / max) * 100) : 0}%;background:${x.p === OH ? 'var(--accent)' : '#6b7280'}"></i></span>
+      <span style="height:6px;border-radius:4px;background:#e7e5e4;position:relative;overflow:hidden"><i style="position:absolute;inset:0 auto 0 0;width:${x.v ? Math.max(2, (x.v / max) * 100) : 0}%;background:${x.p === OH ? 'var(--accent)' : '#78716c'}"></i></span>
       <span class="muted small">${esc(x.plan)}</span><span class="num" style="text-align:right">${x.v == null ? '<span class="muted">n/a</span>' : money(x.v)}</span></a>`).join('');
   };
   return `<div class="card" id="cost">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><h3 style="margin:0">What a list costs a month</h3>
-    <div role="tablist" style="display:flex;gap:4px;background:#0f1218;border:1px solid var(--line);border-radius:10px;padding:3px">${SIZES.map((s, i) => `<button role="tab" data-i="${i}" style="all:unset;cursor:pointer;padding:5px 11px;border-radius:7px;font-size:13.5px;${i === 1 ? 'background:#232a36;color:#fff' : 'color:#9aa3b2'}">${sizeLabel(s)}</button>`).join('')}</div></div>
+    <div role="tablist" style="display:flex;gap:4px;background:#f5f5f4;border:1px solid var(--line);border-radius:10px;padding:3px">${SIZES.map((s, i) => `<button role="tab" data-i="${i}" style="all:unset;cursor:pointer;padding:5px 11px;border-radius:7px;font-size:13.5px;${i === 1 ? 'background:#fff;color:#1c1917;box-shadow:0 1px 2px rgba(0,0,0,.08)' : 'color:#57534e'}">${sizeLabel(s)}</button>`).join('')}</div></div>
     ${SIZES.map((_, i) => `<div data-panel="${i}" ${i === 1 ? '' : 'hidden'}>${rows(i)}</div>`).join('')}
     <p class="small muted" style="margin:12px 0 0">The cheapest plan that fits one issue a week (about 4.3 emails per subscriber a month), billed monthly in US dollars, from each pricing page on ${checked}. OpenHive is ${money(once)} once, plus what Cloudflare charges for hosting and sending. <a href="#how" style="text-decoration:underline">How we priced OpenHive</a></p>
   </div>
-  <script>document.querySelectorAll('#cost [role=tab]').forEach(function(b){b.onclick=function(){var i=b.dataset.i;document.querySelectorAll('#cost [role=tab]').forEach(function(x){var on=x===b;x.style.background=on?'#232a36':'transparent';x.style.color=on?'#fff':'#9aa3b2'});document.querySelectorAll('#cost [data-panel]').forEach(function(p){p.hidden=p.dataset.panel!==i})}})</script>`;
+  <script>document.querySelectorAll('#cost [role=tab]').forEach(function(b){b.onclick=function(){var i=b.dataset.i;document.querySelectorAll('#cost [role=tab]').forEach(function(x){var on=x===b;x.style.background=on?'#fff':'transparent';x.style.color=on?'#1c1917':'#57534e'});document.querySelectorAll('#cost [data-panel]').forEach(function(p){p.hidden=p.dataset.panel!==i})}})</script>`;
 }
 
 const howPriced = () => `<section id="how" style="padding-top:8px"><div class="wrap narrow"><h2>How we priced OpenHive</h2>
@@ -53,7 +53,7 @@ export function compareIndex(c: PageCtx) {
 <section><div class="wrap"><h2>One page per platform</h2><p class="muted" style="margin-top:0">A feature table that says where each one does more, the price at five list sizes, and how to move.</p>
 <div class="grid" style="margin-top:20px">${PLATFORMS.map((p) => `<div class="card"><div style="display:flex;gap:10px;align-items:center;font-weight:800;font-size:18px">${badge(p)}${esc(p.name)}</div>
   <h3 style="margin:14px 0 8px">OpenHive vs ${esc(p.name)}</h3><p>${esc(p.summary)}</p>
-  <p class="small" style="margin:14px 0;padding:10px 12px;border-radius:10px;background:#0f1218">4,000 subscribers: <b>${money(OPENHIVE_COST[1])}/mo</b> + ${money(once)} once vs <b>${money(p.prices[1]?.usd)}${p.prices[1]?.usd ? '/mo' : ''}</b></p>
+  <p class="small" style="margin:14px 0;padding:10px 12px;border-radius:10px;background:#f5f5f4">4,000 subscribers: <b>${money(OPENHIVE_COST[1])}/mo</b> + ${money(once)} once vs <b>${money(p.prices[1]?.usd)}${p.prices[1]?.usd ? '/mo' : ''}</b></p>
   <p style="display:flex;gap:18px;margin:0"><a href="/compare/${p.slug}" style="color:var(--text);font-weight:700">Compare →</a><a href="/migrate/${p.slug}" class="muted">Migration guide</a></p></div>`).join('')}</div></div></section>
 
 <section id="guides"><div class="wrap" style="display:grid;grid-template-columns:1fr 1.2fr;gap:40px;align-items:start">

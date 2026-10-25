@@ -2,7 +2,7 @@
 import { esc } from '../../lib/util';
 import type { OpenStats, Week } from '../../lib/openstats';
 import { MIN_EMAILS } from '../../lib/openstats';
-import { FEATURE_AREAS, type FeatureArea } from './features-data';
+import { FEATURE_AREAS, featureCounts, norm, type FeatureArea } from './features-data';
 import { CHANGELOG } from './changelog-data';
 import { ic, tick } from './marketing';
 
@@ -16,32 +16,74 @@ const buyCta = (c: PageCtx, title = 'Own your newsletter platform', sub = 'Full 
 
 // ── Features ──────────────────────────────────────────────────────────────
 
+const BADGE: Record<string, string> = {
+  y: '<span class="st st-y" title="Built">✓</span>',
+  p: '<span class="st st-p" title="Partly built">◐</span>',
+  n: '<span class="st st-n" title="Not something software can include">–</span>',
+};
+const FEAT_CSS = `<style>
+.st{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:999px;font-size:12px;font-weight:800;flex:none;margin-top:2px}
+.st-y{background:#d1fae5;color:#047857}.st-p{background:#fef3c7;color:#b45309}.st-n{background:#f5f5f4;color:#78716c;border:1px solid #e7e5e4}
+.items{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:1fr 1fr;gap:2px 28px}
+.items li{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}.items li small{display:block;color:var(--muted);font-size:13.5px;margin-top:2px}
+.shot{margin:28px 0 0;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#fff;box-shadow:0 30px 80px rgba(28,25,23,.10)}
+.shot img{display:block;width:100%;height:auto}.shot figcaption{padding:10px 14px;font-size:13px;color:var(--muted);border-top:1px solid var(--line)}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:14px;color:var(--muted)}.legend span{display:inline-flex;gap:6px;align-items:center}
+.count{font-size:13px;color:var(--muted);margin-top:10px}
+@media(max-width:760px){.items{grid-template-columns:1fr}}
+</style>`;
+const legend = `<div class="legend">${BADGE.y} <span>Built</span> ${BADGE.p} <span>Partly built (it says what's missing)</span> ${BADGE.n} <span>Not something software can include</span></div>`;
+
+const STACK: Array<[string, string, 'y' | 'p' | 'n', string]> = [
+  ['Email sending', 'SendGrid, Amazon SES, Postmark', 'p', 'Cloudflare Email Sending (on your Cloudflare bill)'],
+  ['Web hosting', 'Vercel, AWS, Render', 'p', 'Cloudflare Workers (on your Cloudflare bill)'],
+  ['Database and queue', 'Supabase, Neon, RDS', 'p', 'Cloudflare D1 with a built-in job queue'],
+  ['Media storage and CDN', 'S3, R2, Vercel Blob', 'p', 'Cloudflare R2'],
+  ['Payments', 'Stripe, Memberful', 'p', 'Your own Stripe account (Stripe fees only, 0% platform fee)'],
+  ['Auth', 'Clerk, Auth0, Supabase Auth', 'y', 'Built in: passwords, magic links, device login'],
+  ['Monitoring and alerting', 'Sentry, Datadog, PagerDuty', 'y', 'Built in: error log, monitoring page, alert emails'],
+  ['Workflow engine', 'Inngest, Temporal, QStash', 'y', 'Built in: automations engine and job queue'],
+  ['Bot protection', 'Cloudflare', 'y', 'Built in, with optional Cloudflare Turnstile'],
+  ['Email validation', 'ZeroBounce, Kickbox', 'y', 'Built in: syntax, MX, disposable and typo checks'],
+  ['Click verification', 'Omnivery', 'y', 'Built in: bot clicks filtered from every report'],
+  ['Product analytics', 'PostHog, Mixpanel', 'y', 'Built in'],
+  ['Email rendering tests', 'Litmus, Email on Acid', 'n', 'Not replaced: OpenHive renders Outlook-safe HTML and previews it, but doesn\'t test across real email apps'],
+];
+
 export function featuresIndex(c: PageCtx) {
-  return `<section class="hero"><div class="wrap">
+  const t = featureCounts();
+  return `${FEAT_CSS}<section class="hero"><div class="wrap">
   <div class="eyebrow">Features</div>
   <h1>Everything a newsletter needs, in one codebase you own</h1>
-  <p class="lead">Fifteen areas, one dashboard. Each page lists what's built and what its limits are today.</p>
+  <p class="lead">${t.total} capabilities across ${FEATURE_AREAS.length} areas. ${t.y} are built and working, ${t.p} are partly built, and ${t.n} aren't things software can include. Each page lists them one by one, with a screenshot of the real app.</p>
+  ${legend}
 </div></section>
 <section style="padding-top:8px"><div class="wrap"><div class="grid">
-  ${FEATURE_AREAS.map((f) => `<a class="card" href="/features/${f.slug}"><div class="ic">${ic(f.icon)}</div><h3>${esc(f.title)}</h3><p>${esc(f.tagline)}</p></a>`).join('')}
-</div></div></section>${buyCta(c)}`;
+  ${FEATURE_AREAS.map((f) => { const its = f.items.map(norm); const y = its.filter((x) => x.s === 'y').length; return `<a class="card" href="/features/${f.slug}"><div class="ic">${ic(f.icon)}</div><h3>${esc(f.title)}</h3><p>${esc(f.tagline)}</p><div class="count">${y} of ${its.length} built</div></a>`; }).join('')}
+</div></div></section>
+<section><div class="wrap"><h2>The software you don't have to stitch together</h2><p class="muted" style="margin-top:0">What a home-made newsletter stack usually pays for, and what OpenHive uses instead.</p>
+<div class="tw" style="margin-top:18px"><table><tr><th>You need</th><th>Usually</th><th>With OpenHive</th></tr>
+${STACK.map(([a, b, st, d]) => `<tr><td><b>${a}</b></td><td class="muted">${b}</td><td><span style="display:flex;gap:8px">${BADGE[st === 'p' ? 'y' : st]}<span>${esc(d)}</span></span></td></tr>`).join('')}
+</table></div><p class="small muted" style="margin-top:10px">Still on your bills: Cloudflare (hosting, database, storage, email) and Stripe's card fees.</p></div></section>${buyCta(c)}`;
 }
 
 export function featurePage(c: PageCtx, f: FeatureArea) {
   const i = FEATURE_AREAS.indexOf(f);
   const next = FEATURE_AREAS[(i + 1) % FEATURE_AREAS.length];
-  return `<section class="hero"><div class="wrap">
+  const its = f.items.map(norm);
+  const y = its.filter((x) => x.s === 'y').length;
+  return `${FEAT_CSS}<section class="hero"><div class="wrap">
   <a class="eyebrow" href="/features">Features</a>
   <h1>${esc(f.title)}</h1>
   <p class="lead" style="font-size:22px;color:var(--text);margin-bottom:10px">${esc(f.tagline)}</p>
   <p class="lead">${esc(f.intro)}</p>
   <div class="ctas"><a class="btn btn-primary" href="/signup">Try it in the demo</a>${f.docs ? `<a class="btn btn-ghost" href="${f.docs.href}">${esc(f.docs.label)}</a>` : ''}</div>
+  ${f.shot ? `<figure class="shot"><img src="${f.shot.src}" alt="${esc(f.shot.alt)}" loading="eager" width="1360" height="850"><figcaption>${esc(f.shot.caption)} Live demo with sample data.</figcaption></figure>` : ''}
 </div></section>
-<section style="padding-top:8px"><div class="wrap"><div class="grid2">
-  ${f.groups.map((g) => `<div class="card"><h3>${esc(g.h)}</h3><ul class="ticks" style="margin-top:12px">${g.items.map((x) => tick(esc(x))).join('')}</ul></div>`).join('')}
-</div>
-${f.limits?.length ? `<div class="note" style="margin-top:20px"><b>Limits today.</b><ul style="margin:8px 0 0;padding-left:20px">${f.limits.map((l) => `<li>${esc(l)}</li>`).join('')}</ul></div>` : ''}
-<p style="margin-top:32px"><a class="btn btn-ghost" href="/features/${next.slug}">Next: ${esc(next.title)} →</a></p>
+<section style="padding-top:8px"><div class="wrap">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:12px"><h2 style="margin:0">${y} of ${its.length} built</h2>${legend}</div>
+  <ul class="items">${its.map((x) => `<li>${BADGE[x.s]}<span>${esc(x.t)}${x.note ? `<small>${esc(x.note)}</small>` : ''}</span></li>`).join('')}</ul>
+  <p style="margin-top:32px"><a class="btn btn-ghost" href="/features/${next.slug}">Next: ${esc(next.title)} →</a></p>
 </div></section>${buyCta(c)}`;
 }
 
@@ -61,9 +103,9 @@ function chart(weeks: Week[], value: (w: Week) => number | null, o: { kind: 'bar
   const y = (v: number) => H - 18 - ((Math.min(Math.max(v, min), max) - min) / (max - min || 1)) * (H - 30);
   const step = (W - P) / weeks.length;
   const x = (i: number) => P + i * step + step / 2;
-  const guides = (o.guides || []).map(([v, label]) => `<line x1="${P}" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="#f87171" stroke-dasharray="4 4" opacity=".7"/><text x="${W - 4}" y="${y(v) - 4}" text-anchor="end" fill="#f87171" font-size="11">${esc(label)}</text>`).join('');
-  const axis = [min, (min + max) / 2, max].map((v) => `<text x="${P - 6}" y="${y(v) + 4}" text-anchor="end" fill="#6b7280" font-size="10.5">${esc(o.fmt(v))}</text><line x1="${P}" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="#232a36"/>`).join('');
-  const labels = weeks.map((w, i) => (i % 3 === 2 ? `<text x="${x(i)}" y="${H - 2}" text-anchor="middle" fill="#6b7280" font-size="10.5">${day(w.start)}</text>` : '')).join('');
+  const guides = (o.guides || []).map(([v, label]) => `<line x1="${P}" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="#dc2626" stroke-dasharray="4 4" opacity=".7"/><text x="${W - 4}" y="${y(v) - 4}" text-anchor="end" fill="#dc2626" font-size="11">${esc(label)}</text>`).join('');
+  const axis = [min, (min + max) / 2, max].map((v) => `<text x="${P - 6}" y="${y(v) + 4}" text-anchor="end" fill="#78716c" font-size="10.5">${esc(o.fmt(v))}</text><line x1="${P}" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="#e7e5e4"/>`).join('');
+  const labels = weeks.map((w, i) => (i % 3 === 2 ? `<text x="${x(i)}" y="${H - 2}" text-anchor="middle" fill="#78716c" font-size="10.5">${day(w.start)}</text>` : '')).join('');
   let marks = '';
   if (o.kind === 'bar') marks = vals.map((v, i) => (v ? `<rect x="${x(i) - step * 0.32}" y="${y(v)}" width="${step * 0.64}" height="${Math.max(0, H - 18 - y(v))}" rx="3" fill="#f59e0b"><title>${day(weeks[i].start)}: ${esc(o.fmt(v))}</title></rect>` : '')).join('');
   else {

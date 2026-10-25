@@ -1,5 +1,6 @@
 // Sales landing page markup (self-contained: inline CSS + tiny inline JS). Used by `/` and to generate landing/index.html.
 import { esc } from '../../lib/util';
+import { featureCounts } from './features-data';
 
 export interface LandingOpts { purchaseUrl: string; priceLabel: string; loggedIn?: boolean; demo?: boolean; appName?: string; contact?: string; appUrl?: string }
 
@@ -37,6 +38,8 @@ const FEATURES: Array<[string, string, string]> = [
   ['trend', 'Growth engine', 'Referral rewards, recommendations network, boosts with fraud detection, magic subscribe links and a link-in-bio page.'],
   ['code', 'API + MCP server', 'REST API with cursor pagination and webhooks, plus an MCP server so Claude & ChatGPT can work inside your newsletter.'],
 ];
+
+const FEATURE_SLUGS = ["editor", "deliverability", "automations", "segments", "website", "subscriptions", "products", "events", "podcasts", "community", "recommendations", "api"];
 
 const STACK: Array<[string, string, string]> = [
   ['Email sending', 'SendGrid · Amazon SES · Postmark', 'Cloudflare Email Sending'],
@@ -87,17 +90,18 @@ export function landingHtml(o: LandingOpts): string {
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#111827"/><path d="M32 12l17 10v20L32 52 15 42V22z" fill="#f59e0b"/><path d="M32 22l8.5 5v10L32 42l-8.5-5V27z" fill="#111827"/></svg>')}">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#0b0d12;--bg2:#11141b;--card:#151922;--line:#232a36;--text:#f3f4f6;--muted:#9aa3b2;--accent:#f59e0b;--accent2:#fbbf24;--green:#34d399;--radius:16px}
+:root{--bg:#fafaf9;--bg2:#f5f5f4;--card:#ffffff;--line:#e7e5e4;--text:#1c1917;--muted:#57534e;--accent:#d97706;--accent2:#f59e0b;--green:#059669;--radius:16px}
 *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}img{max-width:100%}
 .wrap{max-width:1160px;margin:0 auto;padding:0 20px}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:46px;padding:0 22px;border-radius:12px;font-weight:700;font-size:15px;border:1px solid transparent;cursor:pointer;transition:transform .12s,background .12s,border-color .12s;white-space:nowrap}
 .btn:hover{transform:translateY(-1px)}
-.btn-primary{background:var(--accent);color:#111}.btn-primary:hover{background:var(--accent2)}
-.btn-ghost{border-color:var(--line);color:var(--text);background:rgba(255,255,255,.02)}.btn-ghost:hover{border-color:#3a4456}
+.btn-primary{background:#1c1917;color:#fff}.btn-primary:hover{background:#000}
+.btn-ghost{border-color:var(--line);color:var(--text);background:#fff}.btn-ghost:hover{border-color:#a8a29e}
 .btn-lg{height:54px;padding:0 28px;font-size:16px;border-radius:14px}
-header.top{position:sticky;top:0;z-index:10;background:rgba(11,13,18,.82);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.06)}
+header.top{position:sticky;top:0;z-index:10;background:rgba(250,250,249,.86);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,0,0,.07)}
 .top .wrap{display:flex;align-items:center;gap:24px;height:66px}
 .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-.01em}
 .brand svg{flex:none}
@@ -106,32 +110,32 @@ header.top{position:sticky;top:0;z-index:10;background:rgba(11,13,18,.82);backdr
 .hero{position:relative;padding:84px 0 40px;overflow:hidden}
 .hero::before{content:"";position:absolute;inset:-200px -200px auto;height:700px;background:radial-gradient(600px 300px at 50% 20%,rgba(245,158,11,.22),transparent 70%),radial-gradient(500px 260px at 85% 0%,rgba(99,102,241,.16),transparent 70%);pointer-events:none}
 .hero .wrap{position:relative;text-align:center}
-.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border:1px solid var(--line);border-radius:999px;font-size:13px;color:var(--muted);background:rgba(255,255,255,.03)}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border:1px solid var(--line);border-radius:999px;font-size:13px;color:var(--muted);background:rgba(0,0,0,.02)}
 .pill b{color:var(--accent)}
-h1{font-size:clamp(38px,6.4vw,74px);line-height:1.04;letter-spacing:-.035em;margin:22px auto 18px;max-width:900px;font-weight:850}
-h1 em{font-style:normal;background:linear-gradient(90deg,#fbbf24,#f59e0b 40%,#fb923c);-webkit-background-clip:text;background-clip:text;color:transparent}
+h1{font-family:Newsreader,ui-serif,Georgia,"Times New Roman",serif;font-size:clamp(42px,6.6vw,80px);line-height:1.02;letter-spacing:-.02em;margin:22px auto 18px;max-width:900px;font-weight:600}
+h1 em{font-style:normal;background:linear-gradient(90deg,#f59e0b,#d97706 45%,#c2410c);-webkit-background-clip:text;background-clip:text;color:transparent}
 .lead{font-size:clamp(17px,2.2vw,21px);color:var(--muted);max-width:720px;margin:0 auto 30px}
 .ctas{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
 .fine{margin-top:16px;font-size:13.5px;color:var(--muted);display:flex;gap:18px;justify-content:center;flex-wrap:wrap}
 .fine span{display:inline-flex;align-items:center;gap:6px}.fine svg{color:var(--green)}
-.shot{margin:56px auto 0;max-width:1000px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(180deg,#141821,#0f1218);box-shadow:0 40px 120px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.03) inset;overflow:hidden;text-align:left}
-.shot-bar{display:flex;gap:6px;padding:12px 14px;border-bottom:1px solid var(--line)}.shot-bar i{width:11px;height:11px;border-radius:50%;background:#2b3240}.shot-bar i:first-child{background:#ef4444aa}.shot-bar i:nth-child(2){background:#f59e0baa}.shot-bar i:nth-child(3){background:#22c55eaa}
+.shot{margin:56px auto 0;max-width:1000px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(180deg,#ffffff,#f5f5f4);box-shadow:0 40px 120px rgba(28,25,23,.10),0 0 0 1px rgba(0,0,0,.02) inset;overflow:hidden;text-align:left}
+.shot-bar{display:flex;gap:6px;padding:12px 14px;border-bottom:1px solid var(--line)}.shot-bar i{width:11px;height:11px;border-radius:50%;background:#d6d3d1}.shot-bar i:first-child{background:#ef4444aa}.shot-bar i:nth-child(2){background:#f59e0baa}.shot-bar i:nth-child(3){background:#22c55eaa}
 .shot-body{display:grid;grid-template-columns:200px 1fr 260px;min-height:360px}
 .shot-side{border-right:1px solid var(--line);padding:16px 12px;font-size:13px;color:var(--muted)}
-.shot-side div{padding:7px 10px;border-radius:8px;margin-bottom:2px}.shot-side .on{background:rgba(245,158,11,.14);color:#fde68a}
+.shot-side div{padding:7px 10px;border-radius:8px;margin-bottom:2px}.shot-side .on{background:rgba(245,158,11,.14);color:#92400e}
 .shot-main{padding:26px 30px}
 .shot-main .t{font-size:26px;font-weight:800;letter-spacing:-.02em;margin-bottom:6px}
 .shot-main .s{color:var(--muted);margin-bottom:18px}
-.ln{height:10px;border-radius:6px;background:#232a36;margin:10px 0}.ln.w8{width:80%}.ln.w6{width:60%}.ln.w9{width:92%}
-.slash{margin-top:18px;border:1px solid var(--line);border-radius:12px;background:#10141b;padding:8px;width:260px;font-size:13px}
-.slash div{padding:7px 10px;border-radius:8px;color:var(--muted)}.slash .on{background:#1c2230;color:var(--text)}
+.ln{height:10px;border-radius:6px;background:#e7e5e4;margin:10px 0}.ln.w8{width:80%}.ln.w6{width:60%}.ln.w9{width:92%}
+.slash{margin-top:18px;border:1px solid var(--line);border-radius:12px;background:#ffffff;padding:8px;width:260px;font-size:13px}
+.slash div{padding:7px 10px;border-radius:8px;color:var(--muted)}.slash .on{background:#f5f5f4;color:var(--text)}
 .shot-stats{border-left:1px solid var(--line);padding:20px}
 .kpi{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px}
 .kpi small{color:var(--muted);font-size:12px}.kpi b{display:block;font-size:22px;letter-spacing:-.02em}.kpi .up{color:var(--green);font-size:12px}
 .bars{display:flex;align-items:flex-end;gap:5px;height:60px;margin-top:6px}.bars i{flex:1;background:linear-gradient(180deg,#f59e0b,#b45309);border-radius:3px 3px 0 0;opacity:.85}
 section{padding:90px 0}
 .eyebrow{color:var(--accent);font-weight:700;font-size:13px;letter-spacing:.12em;text-transform:uppercase}
-h2{font-size:clamp(30px,4.2vw,48px);line-height:1.1;letter-spacing:-.03em;margin:10px 0 14px;font-weight:820}
+h2{font-family:Newsreader,ui-serif,Georgia,"Times New Roman",serif;font-size:clamp(32px,4.4vw,52px);line-height:1.08;letter-spacing:-.015em;margin:10px 0 14px;font-weight:600}
 .sub{color:var(--muted);font-size:18px;max-width:680px}
 .center{text-align:center}.center .sub{margin:0 auto}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:44px}
@@ -140,16 +144,16 @@ h2{font-size:clamp(30px,4.2vw,48px);line-height:1.1;letter-spacing:-.03em;margin
 .card h3{margin:0 0 6px;font-size:18px;letter-spacing:-.01em}.card p{margin:0;color:var(--muted);font-size:15px}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center}
 .ticks{list-style:none;padding:0;margin:22px 0 0;display:grid;gap:10px}
-.ticks li{display:flex;gap:10px;align-items:flex-start;color:#d1d5db}.ticks svg{flex:none;color:var(--green);margin-top:3px}
-.panel{border:1px solid var(--line);border-radius:20px;background:linear-gradient(180deg,#151a24,#10131a);padding:24px}
+.ticks li{display:flex;gap:10px;align-items:flex-start;color:#44403c}.ticks svg{flex:none;color:var(--green);margin-top:3px}
+.panel{border:1px solid var(--line);border-radius:20px;background:linear-gradient(180deg,#ffffff,#fafaf9);padding:24px}
 .mail{background:#fff;color:#111;border-radius:12px;padding:20px 22px;font-size:14px}
 .mail h4{margin:0 0 4px;font-size:20px}.mail p{margin:8px 0;color:#374151}.mail .btnm{display:inline-block;background:#111827;color:#fff;padding:9px 16px;border-radius:8px;font-weight:600;margin-top:6px}
 .mail .pay{margin-top:14px;border:1px dashed #f59e0b;border-radius:10px;padding:12px;text-align:center;color:#92400e;background:#fffbeb;font-weight:600}
 .badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}.badges span{font-size:12.5px;border:1px solid var(--line);border-radius:999px;padding:4px 10px;color:var(--muted)}
 table{width:100%;border-collapse:collapse;font-size:15px}
 .tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius);margin-top:40px;background:var(--card)}
-th,td{text-align:left;padding:14px 18px;border-bottom:1px solid var(--line)}th{font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;background:#121620}
-tr:last-child td{border-bottom:0}td.no{color:#f87171}td.yes{color:var(--green);font-weight:600}
+th,td{text-align:left;padding:14px 18px;border-bottom:1px solid var(--line)}th{font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;background:#f5f5f4}
+tr:last-child td{border-bottom:0}td.no{color:#dc2626}td.yes{color:var(--green);font-weight:600}
 .cost{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:40px}
 .cost .card{padding:30px}.cost .big{font-size:46px;font-weight:850;letter-spacing:-.03em}.cost .big small{font-size:16px;color:var(--muted);font-weight:500}
 .cost .hl{border-color:rgba(245,158,11,.5);box-shadow:0 0 0 1px rgba(245,158,11,.25),0 20px 60px rgba(245,158,11,.08)}
@@ -166,7 +170,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
 footer nav{display:flex;gap:18px;flex-wrap:wrap}
 .sticky-buy{display:none}
 @media(max-width:960px){.grid{grid-template-columns:repeat(2,1fr)}.shot-body{grid-template-columns:1fr}.shot-side,.shot-stats{display:none}.split{grid-template-columns:1fr;gap:28px}.top nav{display:none}}
-@media(max-width:620px){.grid,.cost{grid-template-columns:1fr}section{padding:64px 0}.hero{padding-top:56px}.hide-sm{display:none}.btn-lg{width:100%}.sticky-buy{display:flex;position:fixed;left:12px;right:12px;bottom:12px;width:auto!important;z-index:20;box-shadow:0 10px 30px rgba(0,0,0,.5)}footer{padding-bottom:90px}th,td{padding:12px}}
+@media(max-width:620px){.grid,.cost{grid-template-columns:1fr}section{padding:64px 0}.hero{padding-top:56px}.hide-sm{display:none}.btn-lg{width:100%}.sticky-buy{display:flex;position:fixed;left:12px;right:12px;bottom:12px;width:auto!important;z-index:20;box-shadow:0 10px 30px rgba(28,25,23,.18)}footer{padding-bottom:90px}th,td{padding:12px}}
 </style>
 </head>
 <body>
@@ -188,23 +192,7 @@ footer nav{display:flex;gap:18px;flex-wrap:wrap}
   </div>
   <div class="fine"><span>${ic('check', 16)} One-time payment</span><span>${ic('check', 16)} Unlimited newsletters &amp; subscribers</span><span>${ic('check', 16)} 0% platform fees</span><span>${ic('check', 16)} Deploy in ~15 minutes</span></div>
 
-  <div class="shot" aria-hidden="true">
-    <div class="shot-bar"><i></i><i></i><i></i></div>
-    <div class="shot-body">
-      <div class="shot-side"><div>Home</div><div class="on">Posts</div><div>Audience</div><div>Automations</div><div>Website</div><div>Grow</div><div>Monetize</div><div>Podcasts</div><div>Events</div><div>Community</div><div>Analytics</div></div>
-      <div class="shot-main">
-        <div class="t">The Sunday Signal — Issue #48</div>
-        <div class="s">Three ideas worth stealing this week</div>
-        <div class="ln w9"></div><div class="ln w8"></div><div class="ln w6"></div>
-        <div class="slash"><div class="on">/ Poll</div><div>/ Paywall break</div><div>/ Referral block</div><div>/ YouTube embed</div></div>
-      </div>
-      <div class="shot-stats">
-        <div class="kpi"><small>Subscribers</small><b>48,203</b><span class="up">▲ 1,284 this month</span></div>
-        <div class="kpi"><small>Open rate</small><b>58.4%</b><span class="up">bot opens filtered</span></div>
-        <div class="kpi"><small>MRR</small><b>$9,870</b><div class="bars"><i style="height:30%"></i><i style="height:42%"></i><i style="height:38%"></i><i style="height:55%"></i><i style="height:61%"></i><i style="height:72%"></i><i style="height:90%"></i></div></div>
-      </div>
-    </div>
-  </div>
+  <figure class="shot"><img src="${B}/static/shots/home.jpg" alt="The OpenHive dashboard" width="1360" height="850" style="display:block;width:100%;height:auto"><figcaption style="padding:10px 14px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);text-align:left">The real dashboard, from the live demo with sample data.</figcaption></figure>
 </div></section>
 
 <section id="features"><div class="wrap center">
@@ -212,7 +200,8 @@ footer nav{display:flex;gap:18px;flex-wrap:wrap}
   <h2>A whole newsletter business in one codebase</h2>
   <p class="sub">Not a starter kit. Every feature you'd expect from the big hosted platforms — built, wired together and documented.</p>
   <div class="grid" style="text-align:left">
-    ${FEATURES.map(([i, t, d]) => `<div class="card"><div class="ic">${ic(i)}</div><h3>${t}</h3><p>${d}</p></div>`).join('')}
+    ${FEATURES.map(([i, t, d], k) => `<a class="card" href="${B}/features/${FEATURE_SLUGS[k]}"><div class="ic">${ic(i)}</div><h3>${t}</h3><p>${d}</p></a>`).join('')}
+    </div><p style="margin-top:24px"><a class="btn btn-ghost" href="${B}/features">See all ${featureCounts().total} features, one by one →</a></p><div>
   </div>
 </div></section>
 

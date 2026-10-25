@@ -37,7 +37,10 @@ root.get('/features', async (c) => {
   return c.html(page(p, 'features', 'Features · OpenHive', 'Every OpenHive feature: editor, sending and deliverability, automations, audience, website, paid subscriptions, products, webinars, podcasts, community, growth, ads, analytics, API and MCP.', featuresIndex(p)));
 });
 root.get('/features/:slug', async (c) => {
-  const f = featureBySlug(c.req.param('slug'));
+  const ALIAS: Record<string, string> = { sending: 'deliverability', audience: 'segments', growth: 'recommendations', developers: 'api' };
+  const slug = c.req.param('slug');
+  if (ALIAS[slug]) return c.redirect(`/features/${ALIAS[slug]}`, 301);
+  const f = featureBySlug(slug);
   if (!f) return c.redirect('/features', 302);
   const p = await ctxFor(c);
   return c.html(page(p, 'features', `${f.title} · OpenHive`, `${f.tagline} ${f.intro}`, featurePage(p, f)));
