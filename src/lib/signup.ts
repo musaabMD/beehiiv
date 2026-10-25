@@ -31,7 +31,8 @@ export async function processSignup(env: Env, req: Request, pub: Publication, f:
   const humanOk = await humanTokenOk(env, email, f._human);
   if (!humanOk) {
     const ts = await verifyTurnstile(env, f['cf-turnstile-response'], ip);
-    const score = botScore({ honeypot: f.website, renderedAt: f._t, ua: req.headers.get('user-agent'), turnstileOk: ts });
+    // Missing render timestamp = not one of our forms (hand-written HTML, scripted POST): ask for one-click confirmation.
+    const score = botScore({ honeypot: f.website, renderedAt: f._t, ua: req.headers.get('user-agent'), turnstileOk: ts }) + (f._t ? 0 : 15);
     if (score >= 60) return { kind: 'ok', subscriber: null, pending: false, created: false, fake: true }; // silent drop
     if (score >= 30) return { kind: 'confirm_human', token: await humanToken(env, email, Date.now()), email };
   }

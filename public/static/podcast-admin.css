@@ -1,0 +1,5 @@
+.rte{border:1px solid var(--border-strong);border-radius:var(--radius-sm);overflow:hidden;background:#fff}
+.rte-bar{display:flex;gap:2px;padding:4px;border-bottom:1px solid var(--border);background:#fafafa}
+.rte-bar button{border:0;background:none;padding:4px 9px;border-radius:5px;cursor:pointer;font:inherit;font-size:13px}.rte-bar button:hover{background:var(--surface-2)}
+.rte-body{border:0!important;border-radius:0!important;min-height:180px;height:auto!important;padding:10px 12px!important;line-height:1.6;overflow:auto;box-shadow:none!important}
+.rte-body:focus{outline:none}

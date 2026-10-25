@@ -1,0 +1,23 @@
+.ev-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:40px;align-items:start}
+@media(max-width:860px){.ev-grid{grid-template-columns:1fr}}
+.ev-cover{width:100%;border-radius:var(--radius);margin-bottom:20px;aspect-ratio:16/9;object-fit:cover}
+.ev-page h1{font-size:clamp(28px,4vw,42px);margin:6px 0 12px}
+.ev-when{font-size:17px}
+.ev-box{position:sticky;top:84px;display:flex;flex-direction:column;gap:14px}
+.ev-box .s-form input{min-width:0;width:100%}
+.ev-form{flex-direction:column}
+.ev-price{font-size:30px;font-weight:800}
+.ev-countdown{display:flex;gap:10px;justify-content:center;margin:8px 0}
+.ev-countdown div{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 10px;min-width:58px;text-align:center}
+.ev-countdown b{display:block;font-size:22px}.ev-countdown small{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.ev-countdown-sm div{padding:4px 8px;min-width:44px}.ev-countdown-sm b{font-size:16px}
+.ev-slots{display:flex;flex-direction:column;gap:12px;max-height:380px;overflow:auto}
+.ev-slot-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.ev-slot-list button{border:1px solid var(--border);background:var(--bg);border-radius:8px;padding:6px 10px;font:inherit;font-size:14px;cursor:pointer;color:var(--text)}
+.ev-slot-list button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+.ev-date-tile{display:flex!important;flex-direction:column;align-items:center;justify-content:center;background:var(--accent)!important;color:var(--accent-text)}
+.ev-date-tile span{text-transform:uppercase;font-weight:700;letter-spacing:.1em}.ev-date-tile strong{font-size:48px;line-height:1}
+.ev-check{width:64px;height:64px;border-radius:50%;background:var(--accent);color:var(--accent-text);display:grid;place-items:center;font-size:32px;margin:0 auto 16px}
+.row-center{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:20px 0}
+.ev-replay{width:100%;border-radius:var(--radius);background:#000;margin-top:16px;aspect-ratio:16/9}
+.ev-live-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:16px}.ev-live-head h1{font-size:26px;margin:0}

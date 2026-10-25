@@ -136,7 +136,10 @@ export async function markPaid(env: Env, orderId: string, extra: { paymentIntent
   if (extra.stripeSubscriptionId) order.stripe_subscription_id = extra.stripeSubscriptionId;
   if (order.offer_id) await run(env, 'UPDATE offers SET redemptions = redemptions + 1 WHERE id = ?', order.offer_id);
   const f = fulfillers.get(order.kind);
-  if (f) await f(env, order, pub);
+  if (f) {
+    try { await f(env, order, pub); }
+    catch (e) { const { logError } = await import('./jobs'); await logError(env, 'fulfill:' + order.kind, e, pub.id); }
+  }
   const fresh = await one<any>(env, 'SELECT subscriber_id FROM orders WHERE id = ?', orderId);
   await emit(env, { pubId: pub.id, type: 'order.paid', subscriberId: fresh?.subscriber_id ?? order.subscriber_id, refId: order.ref_id, data: { order_id: order.id, kind: order.kind, ref_id: order.ref_id, amount_cents: order.amount_cents, currency: order.currency } });
 }

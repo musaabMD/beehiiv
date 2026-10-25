@@ -66,7 +66,7 @@ export async function SiteLayout(p: SiteProps) {
   const popup = parseJSON<any>(cfg.popup as any, null);
   const flash = readFlash(c);
   const title = p.title ? `${p.title} | ${pub.name}` : pub.name;
-  const desc = p.description || pub.description || `${pub.name} newsletter`;
+  const desc = p.description || (cfg.meta_description as string) || pub.description || `${pub.name} newsletter`;
   const href = (u: string) => (u.startsWith('/') ? base + u : u);
   const vars = `--font:${t.font};--hfont:${t.heading_font};--bg:${t.bg};--surface:${t.surface};--text:${t.text};--muted:${t.muted};--accent:${t.accent};--accent-text:${t.accent_text};--border:${t.border};--radius:${t.radius}px;--shadow:${t.shadow};--maxw:${t.max_width}px`;
   return (
@@ -80,6 +80,9 @@ export async function SiteLayout(p: SiteProps) {
           <meta name="description" content={desc} />
           {p.canonical && <link rel="canonical" href={p.canonical} />}
           {p.noindex && <meta name="robots" content="noindex" />}
+          {cfg.google_site_verification && <meta name="google-site-verification" content={String(cfg.google_site_verification)} />}
+          {cfg.bing_site_verification && <meta name="msvalidate.01" content={String(cfg.bing_site_verification)} />}
+          <meta name="theme-color" content={t.bg} />
           <meta property="og:title" content={p.title || pub.name} />
           <meta property="og:description" content={desc} />
           <meta property="og:site_name" content={pub.name} />

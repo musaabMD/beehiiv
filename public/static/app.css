@@ -180,6 +180,7 @@ dialog::backdrop { background: rgba(17,24,39,.45); }
 .palette ul { list-style: none; margin: 0; padding: 6px; max-height: 50vh; overflow-y: auto; }
 .palette li a { display: block; padding: 8px 12px; border-radius: 7px; text-decoration: none; } .palette li.on a, .palette li a:hover { background: var(--accent-soft); }
 .ai-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(420px, 100vw); background: var(--surface); border-left: 1px solid var(--border); box-shadow: var(--shadow-lg); z-index: 50; display: flex; flex-direction: column; }
+.ai-drawer[hidden] { display: none; }
 .ai-drawer header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .ai-drawer header strong { display: flex; gap: 6px; align-items: center; }
 .ai-log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }

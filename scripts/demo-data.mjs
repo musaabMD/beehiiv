@@ -10,7 +10,7 @@ const NOW = Date.now();
 const PUB = 'p_demo';
 const out = [];
 const rows = {};
-const add = (table, cols, vals) => { (rows[table] ||= { cols, vals: [] }).vals.push(vals); };
+const add = (table, cols, vals) => { (rows[table + '|' + cols.join(',')] ||= { cols, vals: [] }).vals.push(vals); };
 const id = (p, n) => `${p}${n.toString(36)}${Math.floor(rnd() * 1e6).toString(36)}`;
 
 const FIRST = ['Ava', 'Liam', 'Noah', 'Emma', 'Olivia', 'Mia', 'Lucas', 'Amir', 'Sara', 'Yusuf', 'Chen', 'Priya', 'Diego', 'Lena', 'Omar', 'Hana', 'Ivan', 'Zoe', 'Kai', 'Nora'];
@@ -143,7 +143,8 @@ for (let e = 0; e < 6; e++) {
 // activity (comments-style events) for feed
 subs.slice(-30).forEach((s, i) => add('activity', ['id', 'pub_id', 'subscriber_id', 'type', 'data', 'created_at'], [`ac${i}`, PUB, s.id, 'subscription.created', '{"source":"website"}', s.created]));
 
-for (const [table, { cols, vals }] of Object.entries(rows)) {
+for (const [key, { cols, vals }] of Object.entries(rows)) {
+  const table = key.split('|')[0];
   for (let i = 0; i < vals.length; i += 200) {
     out.push(`INSERT OR IGNORE INTO ${table} (${cols.join(',')}) VALUES\n${vals.slice(i, i + 200).map((v) => '(' + v.map(q).join(',') + ')').join(',\n')};`);
   }

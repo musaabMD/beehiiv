@@ -67,3 +67,15 @@
   // carousels: keyboard arrows
   $$('.oh-carousel').forEach((c) => c.setAttribute('tabindex', '0'));
 })();
+
+// page-builder carousels: prev/next buttons
+(() => {
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-carousel-prev],[data-carousel-next]');
+    if (!b) return;
+    const car = b.closest('.pb-in')?.querySelector('[data-carousel]');
+    if (!car) return;
+    const step = car.clientWidth * 0.85;
+    car.scrollBy({ left: b.hasAttribute('data-carousel-next') ? step : -step, behavior: 'smooth' });
+  });
+})();
