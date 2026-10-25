@@ -13,6 +13,8 @@ import { shell } from './landing/marketing';
 import { featuresIndex, featurePage, openPage, changelogPage, type PageCtx } from './landing/pages';
 import { featureBySlug } from './landing/features-data';
 import { openStats } from '../lib/openstats';
+import { compareIndex, comparePlatform, migratePage } from './landing/compare';
+import { platformBySlug } from './landing/compare-data';
 
 const root = new Hono<AppEnv>();
 
@@ -52,6 +54,22 @@ root.get('/open', async (c) => {
     try { c.executionCtx.waitUntil(cache?.put(key, new Response(JSON.stringify(stats), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=600' } })) || Promise.resolve()); } catch {}
   }
   return c.html(page(p, 'open', 'Deliverability: live delivery, bounce and spam rates · OpenHive', 'Live delivery, bounce, spam complaint and open rates for the email this OpenHive install sends, and how each number is counted.', openPage(p, stats)));
+});
+root.get('/compare', async (c) => {
+  const p = await ctxFor(c);
+  return c.html(page(p, 'compare', 'OpenHive vs beehiiv, Substack, Mailchimp, Kit and more · Compare', 'What a newsletter costs each month on beehiiv, Substack, Mailchimp, Kit, MailerLite, Buttondown, Ghost, EmailOctopus and MailCheap, next to OpenHive, with migration guides.', compareIndex(p)));
+});
+root.get('/compare/:slug', async (c) => {
+  const pl = platformBySlug(c.req.param('slug'));
+  if (!pl) return c.redirect('/compare', 302);
+  const p = await ctxFor(c);
+  return c.html(page(p, 'compare', `OpenHive vs ${pl.name} · Compare`, `OpenHive vs ${pl.name}: price at five list sizes, feature by feature, and what ${pl.name} has that OpenHive doesn't.`, comparePlatform(p, pl)));
+});
+root.get('/migrate/:slug', async (c) => {
+  const pl = platformBySlug(c.req.param('slug'));
+  if (!pl) return c.redirect('/compare#guides', 302);
+  const p = await ctxFor(c);
+  return c.html(page(p, 'compare', `Migrate from ${pl.name} to OpenHive`, `Export your list from ${pl.name} and import it into OpenHive, with unsubscribed and bounced readers kept out.`, migratePage(p, pl)));
 });
 root.get('/changelog', async (c) => {
   const p = await ctxFor(c);

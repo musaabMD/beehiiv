@@ -56,7 +56,7 @@ const STACK: Array<[string, string, string]> = [
 
 const FAQ: Array<[string, string]> = [
   ['What exactly do I get?', 'The complete source code of OpenHive (TypeScript, Hono, D1), database migrations, docs for deploying to Cloudflare, the REST API and MCP server, and future updates for the version you bought.'],
-  ['Is this a subscription?', 'No. You pay once and own your copy. Your only running cost is your Cloudflare usage — many newsletters fit in the free tier, and Workers Paid starts at $5/month.'],
+  ['Is this a subscription?', 'No. You pay once and own your copy. Your only running cost is your Cloudflare bill: sending email needs Workers Paid ($5/month, 3,000 emails included), then $0.35 per 1,000 emails. One weekly issue to 10,000 readers is about $19/month. See the compare page for the math.'],
   ['Do I need to know how to code?', 'You need to be comfortable running a few terminal commands. The deploy guide walks through every step: create the database, enable email sending for your domain, deploy.'],
   ['How does email sending work?', 'OpenHive sends through Cloudflare Email Sending on your own domain. Cloudflare publishes SPF and DKIM for you; the deliverability guide covers DMARC, warmup and feedback loops.'],
   ['Do I need Stripe?', 'Only to take real payments. Without Stripe keys everything runs in test mode so you can try paid tiers, products and tickets end to end. With Stripe Connect, creators get paid directly.'],
@@ -273,7 +273,7 @@ footer nav{display:flex;gap:18px;flex-wrap:wrap}
   <p class="sub">Hosted platforms charge more as you grow — and take a cut of what you earn.</p>
   <div class="cost" style="text-align:left">
     <div class="card"><div class="muted" style="color:var(--muted)">Typical hosted platform at 10,000 subscribers</div><div class="big">$100–$200<small>/month</small></div><p>…plus a percentage of paid subscriptions on many plans, plus add-ons for webinars, courses or podcasts. That's $1,200–$2,400+ every year.</p></div>
-    <div class="card hl"><div style="color:var(--accent);font-weight:700">OpenHive</div><div class="big">${amount}<small> once</small></div><p>Plus your Cloudflare usage — many newsletters fit the free tier; Workers Paid starts at $5/month. 0% platform fees on subscriptions, products and tickets.</p></div>
+    <div class="card hl"><div style="color:var(--accent);font-weight:700">OpenHive</div><div class="big">${amount}<small> once</small></div><p>Plus your Cloudflare bill: $5/month for Workers Paid, then $0.35 per 1,000 emails — about $19/month for a weekly issue to 10,000 readers. 0% platform fees on subscriptions, products and tickets.</p></div>
   </div>
 </div></section>
 
