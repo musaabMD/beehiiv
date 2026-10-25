@@ -153,4 +153,6 @@ for (const [key, { cols, vals }] of Object.entries(rows)) {
   }
 }
 if (downgraded.length) out.push(`UPDATE subscribers SET tier = 'free' WHERE id IN (${downgraded.map((x) => `'${x}'`).join(',')});`);
+// Send totals must match the delivery rows actually generated.
+out.push(`UPDATE sends SET total = (SELECT COUNT(*) FROM deliveries d WHERE d.send_id = sends.id), sent = (SELECT COUNT(*) FROM deliveries d WHERE d.send_id = sends.id AND d.status IN ('sent','complained')) WHERE pub_id = '${PUB}';`);
 console.log(out.join('\n'));
