@@ -1,5 +1,6 @@
 /** @jsxImportSource hono/jsx */
 // Post analytics: deliveries, bot-filtered opens/clicks, A/B + cohort results, links, providers, web views, polls, resend.
+import { postStats } from '../../lib/stats';
 import { Hono } from 'hono';
 import type { AppEnv } from '../../types';
 import { all, one, insert, run } from '../../lib/db';
@@ -20,9 +21,9 @@ app.get('/:id', async (c) => {
   const post = await loadPost(c, c.req.param('id'));
   if (!post) return c.notFound();
   const pid = post.id;
-  const sends = await all<any>(c.env, `SELECT * FROM sends WHERE post_id = ? ORDER BY created_at`, pid);
+  const sends = await all<any>(c.env, `SELECT * FROM sends WHERE post_id = ? AND kind != 'try' ORDER BY created_at`, pid);
   const totals = await one<any>(c.env, `SELECT COUNT(DISTINCT COALESCE(d.subscriber_id, d.email)) AS recipients,
-      COUNT(DISTINCT CASE WHEN d.status IN ('sent','deferred') THEN COALESCE(d.subscriber_id, d.email) END) AS delivered,
+      COUNT(DISTINCT CASE WHEN d.status IN ('sent','complained') THEN COALESCE(d.subscriber_id, d.email) END) AS delivered,
       COUNT(DISTINCT CASE WHEN d.opened_at IS NOT NULL THEN COALESCE(d.subscriber_id, d.email) END) AS opens,
       COUNT(DISTINCT CASE WHEN d.clicked_at IS NOT NULL THEN COALESCE(d.subscriber_id, d.email) END) AS clicks,
       SUM(CASE WHEN d.status = 'bounced' THEN 1 ELSE 0 END) AS bounces,
@@ -30,19 +31,19 @@ app.get('/:id', async (c) => {
       SUM(CASE WHEN d.status = 'suppressed' THEN 1 ELSE 0 END) AS suppressed,
       SUM(CASE WHEN d.status = 'deferred' THEN 1 ELSE 0 END) AS deferred,
       SUM(d.open_count) AS total_opens, SUM(d.click_count) AS total_clicks
-    FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ?`, pid) || {};
+    FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try')`, pid) || {};
   const firstSent = sends[0]?.started_at || post.published_at || now();
-  const unsubs = (await one<any>(c.env, `SELECT COUNT(DISTINCT a.subscriber_id) AS n FROM activity a WHERE a.pub_id = ? AND a.type = 'subscription.deleted' AND a.created_at BETWEEN ? AND ? AND a.subscriber_id IN (SELECT d.subscriber_id FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ?)`, pub.id, firstSent, firstSent + 7 * DAY, pid))?.n || 0;
-  const botOpens = (await one<any>(c.env, `SELECT COUNT(*) AS n FROM opens o JOIN sends s ON s.id = o.send_id WHERE s.post_id = ? AND o.is_bot = 1`, pid))?.n || 0;
-  const botClicks = (await one<any>(c.env, `SELECT COUNT(*) AS n FROM clicks k JOIN sends s ON s.id = k.send_id WHERE s.post_id = ? AND k.is_bot = 1`, pid))?.n || 0;
+  const unsubs = (await postStats(c.env, pub.id, pid)).unsubscribes;
+  const botOpens = (await one<any>(c.env, `SELECT COUNT(*) AS n FROM opens o JOIN sends s ON s.id = o.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND o.is_bot = 1`, pid))?.n || 0;
+  const botClicks = (await one<any>(c.env, `SELECT COUNT(*) AS n FROM clicks k JOIN sends s ON s.id = k.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND k.is_bot = 1`, pid))?.n || 0;
   const delivered = totals.delivered || 0;
   // opens over time (hourly for 48h)
-  const openRows = await all<any>(c.env, `SELECT CAST((o.created_at - ?) / ${HOUR} AS INTEGER) AS h, COUNT(DISTINCT o.delivery_id) AS n FROM opens o JOIN sends s ON s.id = o.send_id WHERE s.post_id = ? AND o.is_bot = 0 AND o.created_at >= ? GROUP BY h`, firstSent, pid, firstSent);
-  const clickRows = await all<any>(c.env, `SELECT CAST((k.created_at - ?) / ${HOUR} AS INTEGER) AS h, COUNT(DISTINCT k.delivery_id) AS n FROM clicks k JOIN sends s ON s.id = k.send_id WHERE s.post_id = ? AND k.is_bot = 0 AND k.created_at >= ? GROUP BY h`, firstSent, pid, firstSent);
+  const openRows = await all<any>(c.env, `SELECT CAST((o.created_at - ?) / ${HOUR} AS INTEGER) AS h, COUNT(DISTINCT o.delivery_id) AS n FROM opens o JOIN sends s ON s.id = o.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND o.is_bot = 0 AND o.created_at >= ? GROUP BY h`, firstSent, pid, firstSent);
+  const clickRows = await all<any>(c.env, `SELECT CAST((k.created_at - ?) / ${HOUR} AS INTEGER) AS h, COUNT(DISTINCT k.delivery_id) AS n FROM clicks k JOIN sends s ON s.id = k.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND k.is_bot = 0 AND k.created_at >= ? GROUP BY h`, firstSent, pid, firstSent);
   const hours = Array.from({ length: 48 }, (_, i) => i);
   const series = (rows: any[]) => hours.map((h) => rows.find((r) => r.h === h)?.n || 0);
   // A/B + cohorts
-  const variants = await all<any>(c.env, `SELECT d.variant AS v, COUNT(*) AS n, SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS op, SUM(CASE WHEN d.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS cl FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? AND d.variant IS NOT NULL GROUP BY d.variant ORDER BY d.variant`, pid);
+  const variants = await all<any>(c.env, `SELECT d.variant AS v, COUNT(*) AS n, SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS op, SUM(CASE WHEN d.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS cl FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND d.variant IS NOT NULL GROUP BY d.variant ORDER BY d.variant`, pid);
   const ab = parseJSON<any>(post.ab_test, null);
   const abRows = new Map<string, { n: number; op: number; cl: number }>();
   const cohortRows = new Map<string, { n: number; op: number; cl: number }>();
@@ -55,8 +56,8 @@ app.get('/:id', async (c) => {
       map.set(key, cur);
     }
   }
-  const links = await all<any>(c.env, `SELECT k.url, COUNT(DISTINCT k.delivery_id) AS uniq, COUNT(*) AS total FROM clicks k JOIN sends s ON s.id = k.send_id WHERE s.post_id = ? AND k.is_bot = 0 GROUP BY k.url ORDER BY uniq DESC LIMIT 50`, pid);
-  const providers = await all<any>(c.env, `SELECT COALESCE(d.provider,'other') AS provider, COUNT(*) AS n, SUM(CASE WHEN d.status IN ('sent','deferred') THEN 1 ELSE 0 END) AS delivered, SUM(CASE WHEN d.status = 'bounced' THEN 1 ELSE 0 END) AS bounced, SUM(CASE WHEN d.status = 'complained' THEN 1 ELSE 0 END) AS complained, SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS op FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? GROUP BY provider ORDER BY n DESC`, pid);
+  const links = await all<any>(c.env, `SELECT k.url, COUNT(DISTINCT k.delivery_id) AS uniq, COUNT(*) AS total FROM clicks k JOIN sends s ON s.id = k.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND k.is_bot = 0 GROUP BY k.url ORDER BY uniq DESC LIMIT 50`, pid);
+  const providers = await all<any>(c.env, `SELECT COALESCE(d.provider,'other') AS provider, COUNT(*) AS n, SUM(CASE WHEN d.status IN ('sent','complained') THEN 1 ELSE 0 END) AS delivered, SUM(CASE WHEN d.status = 'bounced' THEN 1 ELSE 0 END) AS bounced, SUM(CASE WHEN d.status = 'complained' THEN 1 ELSE 0 END) AS complained, SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS op FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') GROUP BY provider ORDER BY n DESC`, pid);
   const web = await one<any>(c.env, `SELECT COUNT(*) AS views, COUNT(DISTINCT visitor_id) AS visitors FROM page_views WHERE pub_id = ? AND ref_id = ?`, pub.id, pid);
   const webChannels = await all<any>(c.env, `SELECT COALESCE(channel,'direct') AS ch, COUNT(*) AS n FROM page_views WHERE pub_id = ? AND ref_id = ? GROUP BY ch ORDER BY n DESC`, pub.id, pid);
   const signups = (await one<any>(c.env, `SELECT COUNT(*) AS n FROM subscribers WHERE pub_id = ? AND instr(landing_path, ?) > 0`, pub.id, `/p/${post.slug}`))?.n || 0;
@@ -71,7 +72,7 @@ app.get('/:id', async (c) => {
     const opts = parseJSON<any[]>(poll.options, []).map((o) => ({ label: o.label, n: votes.find((v) => v.option_id === o.id)?.n || 0 }));
     polls.push({ q: poll.question, opts, total: opts.reduce((a, b) => a + b.n, 0) });
   }
-  const nonOpeners = (await one<any>(c.env, `SELECT COUNT(DISTINCT d.subscriber_id) AS n FROM deliveries d JOIN sends s ON s.id = d.send_id JOIN subscribers sb ON sb.id = d.subscriber_id WHERE s.post_id = ? AND d.status = 'sent' AND d.opened_at IS NULL AND sb.status = 'active' AND NOT EXISTS (SELECT 1 FROM deliveries d2 JOIN sends s2 ON s2.id = d2.send_id WHERE s2.post_id = ? AND d2.subscriber_id = d.subscriber_id AND d2.opened_at IS NOT NULL)`, pid, pid))?.n || 0;
+  const nonOpeners = (await one<any>(c.env, `SELECT COUNT(DISTINCT d.subscriber_id) AS n FROM deliveries d JOIN sends s ON s.id = d.send_id JOIN subscribers sb ON sb.id = d.subscriber_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND d.status = 'sent' AND d.opened_at IS NULL AND sb.status = 'active' AND NOT EXISTS (SELECT 1 FROM deliveries d2 JOIN sends s2 ON s2.id = d2.send_id WHERE s2.post_id = ? AND d2.subscriber_id = d.subscriber_id AND d2.opened_at IS NOT NULL)`, pid, pid))?.n || 0;
   const canPublish = can(c.get('role'), 'publish');
   const rate = (a: number, b: number) => (b ? pct(a, b) : '—');
   return c.html(
@@ -185,7 +186,7 @@ app.post('/:id/resend', async (c) => {
   // freeze non-openers into a static segment (keeps the send query small at any list size)
   const segId = id();
   await insert(c.env, 'segments', { id: segId, pub_id: pub.id, name: `Non-openers: ${(post.title || 'Untitled').slice(0, 60)} (${new Date().toISOString().slice(0, 10)})`, description: 'Created automatically for a resend', kind: 'static', rules: '{"op":"and","rules":[]}', created_at: now() });
-  await run(c.env, `INSERT OR IGNORE INTO segment_members (segment_id, subscriber_id) SELECT DISTINCT ?, d.subscriber_id FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? AND d.status = 'sent' AND d.subscriber_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM deliveries d2 JOIN sends s2 ON s2.id = d2.send_id WHERE s2.post_id = ? AND d2.subscriber_id = d.subscriber_id AND d2.opened_at IS NOT NULL)`, segId, post.id, post.id);
+  await run(c.env, `INSERT OR IGNORE INTO segment_members (segment_id, subscriber_id) SELECT DISTINCT ?, d.subscriber_id FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND d.status = 'sent' AND d.subscriber_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM deliveries d2 JOIN sends s2 ON s2.id = d2.send_id WHERE s2.post_id = ? AND d2.subscriber_id = d.subscriber_id AND d2.opened_at IS NOT NULL)`, segId, post.id, post.id);
   await startSend(c.env, pub, post, { segment_ids: [segId], exclude_segment_ids: [], list_id: null, audience: 'all', tier_ids: [], ab: null, cohorts: null, subject: str(f.subject, 200) || null });
   kick(c.env, c.executionCtx);
   await audit(c, 'post.resend', post.id);

@@ -24,7 +24,7 @@ export async function sendableDomains(c: Ctx): Promise<string[]> {
 export async function deliverabilityStats(c: Ctx) {
   const pub = c.get('pub');
   const since = now() - 30 * DAY;
-  const d = await one<any>(c.env, `SELECT COUNT(*) AS total, SUM(status IN ('sent','deferred')) AS delivered, SUM(status = 'bounced') AS bounced, SUM(status = 'complained' OR bounce_type = 'complaint') AS complained, SUM(status = 'deferred') AS deferred, SUM(opened_at IS NOT NULL) AS opened FROM deliveries WHERE pub_id = ? AND created_at > ?`, pub.id, since);
+  const d = await one<any>(c.env, `SELECT COUNT(*) AS total, SUM(status IN ('sent','complained')) AS delivered, SUM(status = 'bounced') AS bounced, SUM(status = 'complained' OR bounce_type = 'complaint') AS complained, SUM(status = 'deferred') AS deferred, SUM(opened_at IS NOT NULL) AS opened FROM deliveries WHERE pub_id = ? AND created_at > ?`, pub.id, since);
   const supp = await one<any>(c.env, `SELECT SUM(scope = 'pub') AS pub, (SELECT COUNT(*) FROM suppressions s2 JOIN subscribers sb ON sb.email = s2.email AND sb.pub_id = ? WHERE s2.scope = 'global' AND (s2.expires_at IS NULL OR s2.expires_at > ?)) AS global FROM suppressions WHERE pub_id = ? AND (expires_at IS NULL OR expires_at > ?)`, pub.id, now(), pub.id, now());
   const doms = await all<any>(c.env, `SELECT hostname, status, dns_report, blocklisted FROM domains WHERE pub_id = ? AND kind = 'email'`, pub.id);
   return { d: d || {}, supp: supp || {}, doms };

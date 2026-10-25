@@ -336,13 +336,13 @@ export async function postPerformance(env: Env, pubId: string, opts: { range?: R
   if (opts.ids?.length) { where.push(`p.id IN (${opts.ids.map(() => '?').join(',')})`); params.push(...opts.ids); }
   const rows = await all<any>(env, `
     SELECT p.id, p.title, p.slug, p.published_at, p.platform,
-      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id) AS recipients,
-      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id AND d.status IN ('sent','complained')) AS delivered,
-      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id AND d.opened_at IS NOT NULL) AS opened,
-      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id AND d.clicked_at IS NOT NULL) AS clicked,
-      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id AND d.status = 'bounced') AS bounced,
+      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id AND se.kind NOT IN ('test','try')) AS recipients,
+      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id AND se.kind NOT IN ('test','try') AND d.status IN ('sent','complained')) AS delivered,
+      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id AND se.kind NOT IN ('test','try') AND d.opened_at IS NOT NULL) AS opened,
+      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id AND se.kind NOT IN ('test','try') AND d.clicked_at IS NOT NULL) AS clicked,
+      (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE se.post_id = p.id AND se.kind NOT IN ('test','try') AND d.status = 'bounced') AS bounced,
       (SELECT COUNT(*) FROM deliveries d JOIN sends se ON se.id = d.send_id JOIN subscribers s ON s.id = d.subscriber_id
-         WHERE se.post_id = p.id AND s.unsubscribed_at BETWEEN se.created_at AND se.created_at + 259200000) AS unsubscribes,
+         WHERE se.post_id = p.id AND se.kind NOT IN ('test','try') AND s.unsubscribed_at BETWEEN se.created_at AND se.created_at + 604800000) AS unsubscribes,
       (SELECT COUNT(*) FROM page_views v WHERE v.pub_id = p.pub_id AND v.ref_id = p.id) AS web_views,
       (SELECT COALESCE(SUM(o.amount_cents), 0) FROM orders o WHERE o.pub_id = p.pub_id AND o.status = 'paid' AND json_extract(o.data, '$.post_id') = p.id) AS revenue
     FROM posts p WHERE ${where.join(' AND ')}

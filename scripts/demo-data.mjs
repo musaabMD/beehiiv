@@ -106,11 +106,14 @@ for (let i = 0; i < 3000; i++) {
 
 // tiers, subscriptions, orders, wallet
 add('tiers', ['id', 'pub_id', 'name', 'monthly_cents', 'annual_cents', 'status', 'created_at'], ['t_demo', PUB, 'Supporter', 800, 8000, 'active', NOW - 170 * DAY]);
+const downgraded = [];
 subs.filter((s) => s.tier === 'premium').forEach((s, i) => {
   const yearly = rnd() < 0.3;
   const canceled = rnd() < 0.12;
-  add('subscriptions', ['id', 'pub_id', 'subscriber_id', 'tier_id', 'interval', 'status', 'amount_cents', 'created_at', 'updated_at', 'canceled_at'],
-    [`sb${i}`, PUB, s.id, 't_demo', yearly ? 'year' : 'month', canceled ? 'canceled' : 'active', yearly ? 8000 : 800, s.created, s.created, canceled ? NOW - Math.floor(rnd() * 60 * DAY) : null]);
+  // A canceled subscription means the reader is back on the free tier, as the real cancel flow does.
+  if (canceled) downgraded.push(s.id);
+  add('subscriptions', ['id', 'pub_id', 'subscriber_id', 'tier_id', 'interval', 'status', 'amount_cents', 'created_at', 'updated_at', 'canceled_at', 'current_period_end'],
+    [`sb${i}`, PUB, s.id, 't_demo', yearly ? 'year' : 'month', canceled ? 'canceled' : 'active', yearly ? 8000 : 800, s.created, s.created, canceled ? NOW - Math.floor(rnd() * 60 * DAY) : null, canceled ? null : NOW + Math.floor(rnd() * 30 * DAY)]);
   const months = Math.max(1, Math.floor((NOW - s.created) / (30 * DAY)));
   for (let m = 0; m < (yearly ? 1 : months); m++) {
     const at = s.created + m * 30 * DAY;
@@ -149,4 +152,5 @@ for (const [key, { cols, vals }] of Object.entries(rows)) {
     out.push(`INSERT OR IGNORE INTO ${table} (${cols.join(',')}) VALUES\n${vals.slice(i, i + 200).map((v) => '(' + v.map(q).join(',') + ')').join(',\n')};`);
   }
 }
+if (downgraded.length) out.push(`UPDATE subscribers SET tier = 'free' WHERE id IN (${downgraded.map((x) => `'${x}'`).join(',')});`);
 console.log(out.join('\n'));

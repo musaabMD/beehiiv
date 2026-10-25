@@ -396,7 +396,7 @@ registerPeriodic('ads.settle', 15 * MIN, async (env) => {
     const send = await one<any>(env, `SELECT id FROM sends WHERE post_id = ? AND kind = 'post' AND status = 'sent' ORDER BY created_at DESC LIMIT 1`, o.post_id);
     const published = await one<any>(env, `SELECT 1 FROM posts WHERE id = ? AND status = 'published' AND platform = 'web'`, o.post_id);
     if (!send && !published) continue;
-    const impressions = send ? await val<number>(env, `SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN ('sent','deferred')`, send.id) : 0;
+    const impressions = send ? await val<number>(env, `SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN ('sent','complained')`, send.id) : 0;
     await run(env, `UPDATE ad_opportunities SET impressions = ?, status = 'completed', settled_at = ? WHERE id = ?`, impressions, now(), o.id);
     if (o.pricing === 'cpm') await creditAd(env, o.id, Math.round((impressions * o.rate_cents) / 1000), `${o.cname}: ${impressions} impressions (CPM)`);
     else if (o.pricing === 'flat') await creditAd(env, o.id, o.rate_cents, `${o.cname}: flat placement`);

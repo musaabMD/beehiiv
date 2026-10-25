@@ -23,33 +23,37 @@ export interface PostStats {
 
 const rate = (a: number, b: number) => (b ? Math.round((a / b) * 10000) / 100 : 0);
 
+/** One definition of a post's numbers, shared by the post page, the API, MCP and post lists:
+ *  delivered = accepted by the mailbox provider (complaints included), unsubscribes = readers of this post who
+ *  left within 7 days of the send, test and sample sends left out. */
+export const UNSUB_WINDOW = 7 * DAY;
 export async function postStats(env: Env, pubId: string, postId: string): Promise<PostStats> {
   const d = await one<any>(
     env,
     `SELECT COUNT(*) AS recipients,
-       SUM(CASE WHEN d.status IN ('sent','deferred') THEN 1 ELSE 0 END) AS delivered,
-       SUM(CASE WHEN d.status IN ('bounced','complained') THEN 1 ELSE 0 END) AS bounced,
+       SUM(CASE WHEN d.status IN ('sent','complained') THEN 1 ELSE 0 END) AS delivered,
+       SUM(CASE WHEN d.status = 'bounced' THEN 1 ELSE 0 END) AS bounced,
        SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opens,
        SUM(CASE WHEN d.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicks,
        SUM(d.click_count) AS total_clicks
-     FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.pub_id = ? AND s.post_id = ?`,
+     FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.pub_id = ? AND s.post_id = ? AND s.kind NOT IN ('test','try')`,
     pubId, postId,
   );
-  const bot = await val<number>(env, `SELECT COUNT(*) FROM clicks c JOIN sends s ON s.id = c.send_id WHERE s.pub_id = ? AND s.post_id = ? AND c.is_bot = 1`, pubId, postId);
+  const bot = await val<number>(env, `SELECT COUNT(*) FROM clicks c JOIN sends s ON s.id = c.send_id WHERE s.pub_id = ? AND s.post_id = ? AND s.kind NOT IN ('test','try') AND c.is_bot = 1`, pubId, postId);
   const unsub = await val<number>(
     env,
     `SELECT COUNT(DISTINCT d.subscriber_id) FROM deliveries d JOIN sends s ON s.id = d.send_id JOIN subscribers sb ON sb.id = d.subscriber_id
-     WHERE s.pub_id = ? AND s.post_id = ? AND sb.status = 'unsubscribed' AND sb.unsubscribed_at >= s.created_at AND sb.unsubscribed_at < s.created_at + ?`,
-    pubId, postId, 7 * DAY,
+     WHERE s.pub_id = ? AND s.post_id = ? AND s.kind NOT IN ('test','try') AND sb.unsubscribed_at >= s.created_at AND sb.unsubscribed_at < s.created_at + ?`,
+    pubId, postId, UNSUB_WINDOW,
   );
   const views = await val<number>(env, `SELECT COUNT(*) FROM page_views WHERE pub_id = ? AND ref_id = ?`, pubId, postId);
   const ab = await all<any>(
     env,
     `SELECT COALESCE(d.variant,'') AS variant, COUNT(*) AS delivered, SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opens, SUM(CASE WHEN d.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicks
-     FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.pub_id = ? AND s.post_id = ? AND d.variant IS NOT NULL GROUP BY d.variant ORDER BY d.variant`,
+     FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.pub_id = ? AND s.post_id = ? AND s.kind NOT IN ('test','try') AND d.variant IS NOT NULL GROUP BY d.variant ORDER BY d.variant`,
     pubId, postId,
   );
-  const links = await all<any>(env, `SELECT c.url, COUNT(*) AS clicks FROM clicks c JOIN sends s ON s.id = c.send_id WHERE s.pub_id = ? AND s.post_id = ? AND c.is_bot = 0 GROUP BY c.url ORDER BY clicks DESC LIMIT 10`, pubId, postId);
+  const links = await all<any>(env, `SELECT c.url, COUNT(*) AS clicks FROM clicks c JOIN sends s ON s.id = c.send_id WHERE s.pub_id = ? AND s.post_id = ? AND s.kind NOT IN ('test','try') AND c.is_bot = 0 GROUP BY c.url ORDER BY clicks DESC LIMIT 10`, pubId, postId);
   const delivered = d?.delivered || 0;
   const opens = d?.opens || 0;
   const clicks = d?.clicks || 0;
@@ -76,7 +80,7 @@ export async function providerStats(env: Env, pubId: string, postId: string) {
   const rows = await all<any>(
     env,
     `SELECT COALESCE(d.provider,'other') AS provider, COUNT(*) AS sent,
-       SUM(CASE WHEN d.status IN ('sent','deferred') THEN 1 ELSE 0 END) AS delivered,
+       SUM(CASE WHEN d.status IN ('sent','complained') THEN 1 ELSE 0 END) AS delivered,
        SUM(CASE WHEN d.status = 'deferred' THEN 1 ELSE 0 END) AS deferred,
        SUM(CASE WHEN d.status = 'bounced' THEN 1 ELSE 0 END) AS bounced,
        SUM(CASE WHEN d.status = 'complained' THEN 1 ELSE 0 END) AS complaints,
@@ -97,7 +101,7 @@ export async function summary(env: Env, pubId: string, days = 30) {
   const unsubs = await q(`SELECT COUNT(*) FROM subscribers WHERE pub_id = ? AND unsubscribed_at >= ?`, pubId, since);
   const e = await one<any>(
     env,
-    `SELECT SUM(CASE WHEN d.status IN ('sent','deferred') THEN 1 ELSE 0 END) AS delivered, SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opens, SUM(CASE WHEN d.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicks
+    `SELECT SUM(CASE WHEN d.status IN ('sent','complained') THEN 1 ELSE 0 END) AS delivered, SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opens, SUM(CASE WHEN d.clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicks
      FROM deliveries d WHERE d.pub_id = ? AND d.created_at >= ?`,
     pubId, since,
   );
