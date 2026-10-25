@@ -625,7 +625,7 @@ export async function renderPage(c: Ctx, page: any, opts: { preview?: boolean } 
   }
   let inner: string;
   if (locked) {
-    inner = `<section class="pb"><div class="pb-in" style="max-width:640px"><div class="oh-paywall s-gate"><h3>${locked === 'premium' ? 'This page is for premium subscribers' : 'This page is for subscribers'}</h3><p>${locked === 'premium' ? 'Upgrade to unlock it.' : 'Subscribe for free to view it.'}</p>${locked === 'premium' ? `<a class="s-btn" href="${esc(b)}/upgrade">Upgrade</a>` : `<button type="button" class="s-btn" data-modal="subscribe">Subscribe</button>`} <button type="button" class="s-btn s-btn-ghost" data-modal="login">Log in</button></div></div></section>`;
+    inner = `<section class="pb" style="padding:64px 0"><div class="pb-in" style="max-width:640px"><div class="oh-paywall s-gate"><h3>${locked === 'premium' ? 'This page is for premium subscribers' : 'This page is for subscribers'}</h3><p>${locked === 'premium' ? 'Upgrade to unlock it.' : 'Subscribe for free to view it.'}</p>${locked === 'premium' ? `<a class="s-btn" href="${esc(b)}/upgrade">Upgrade</a>` : `<button type="button" class="s-btn" data-modal="subscribe">Subscribe</button>`} <button type="button" class="s-btn s-btn-ghost" data-modal="login">Log in</button></div></div></section>`;
   } else if (page.html_override) {
     inner = `<div class="pb-html">${sanitizeHtml(page.html_override, { blocks: true, media: true, styles: true })}</div>`;
   } else {
