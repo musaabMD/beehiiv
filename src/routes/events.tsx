@@ -187,19 +187,16 @@ async function coachingSlots(env: Env, ev: any): Promise<Array<{ day: string; sl
 }
 
 // Paid tickets / bookings / replays
+// Paid tickets, bookings and replay purchases all use order kind 'ticket' (data.replay marks replay purchases).
 onOrderPaid('ticket', async (env, order, pub) => {
   const ev = await one<any>(env, 'SELECT * FROM live_events WHERE id = ?', order.ref_id);
   if (!ev) return;
   const d = parseJSON<any>(order.data, {});
-  const r = await registerAttendee(env, pub, ev, { email: order.email, name: order.name, orderId: order.id, slot: d.slot ? Number(d.slot) : null, reader: true });
+  const r = d.replay
+    ? await registerAttendee(env, pub, ev, { email: order.email, name: order.name, orderId: order.id, kind: 'replay', reader: true })
+    : await registerAttendee(env, pub, ev, { email: order.email, name: order.name, orderId: order.id, slot: d.slot ? Number(d.slot) : null, reader: true });
   if (r.reg?.subscriber_id) await run(env, 'UPDATE orders SET subscriber_id = COALESCE(subscriber_id, ?) WHERE id = ?', r.reg.subscriber_id, order.id);
-});
-onOrderPaid('replay', async (env, order, pub) => {
-  const ev = await one<any>(env, 'SELECT * FROM live_events WHERE id = ?', order.ref_id);
-  if (!ev) return;
-  const r = await registerAttendee(env, pub, ev, { email: order.email, name: order.name, orderId: order.id, kind: 'replay', reader: true });
-  if (r.reg?.subscriber_id) await run(env, 'UPDATE orders SET subscriber_id = COALESCE(subscriber_id, ?) WHERE id = ?', r.reg.subscriber_id, order.id);
-  if (ev.replay_product_id) await run(env, 'UPDATE products SET sales_count = sales_count + 1, revenue_cents = revenue_cents + ? WHERE id = ?', order.amount_cents, ev.replay_product_id);
+  if (d.replay && ev.replay_product_id) await run(env, 'UPDATE products SET sales_count = sales_count + 1, revenue_cents = revenue_cents + ? WHERE id = ?', order.amount_cents, ev.replay_product_id);
 });
 
 // Reminder emails (up to 5 per event)
@@ -645,7 +642,7 @@ dash.get('/:id/orders', async (c) => {
   if (!ev) return c.notFound();
   const orders = await all<any>(c.env, `SELECT o.*, f.code FROM orders o LEFT JOIN offers f ON f.id = o.offer_id WHERE o.pub_id = ? AND ((o.kind IN ('ticket','replay') AND o.ref_id = ?) OR (o.ref_id = ? AND ? IS NOT NULL)) ORDER BY o.created_at DESC LIMIT 1000`, ev.pub_id, ev.id, ev.replay_product_id || '', ev.replay_product_id);
   const rev = await revenueOf(c.env, ev);
-  const byKind = await all<any>(c.env, `SELECT kind, COUNT(*) AS n, SUM(amount_cents) AS total FROM orders WHERE pub_id = ? AND status = 'paid' AND ((kind IN ('ticket','replay') AND ref_id = ?) OR (ref_id = ? AND ? IS NOT NULL)) GROUP BY kind`, ev.pub_id, ev.id, ev.replay_product_id || '', ev.replay_product_id);
+  const byKind = await all<any>(c.env, `SELECT CASE WHEN json_extract(data, '$.replay') THEN 'replay' WHEN kind = 'ticket' THEN 'ticket' ELSE 'replay' END AS kind, COUNT(*) AS n, SUM(amount_cents) AS total FROM orders WHERE pub_id = ? AND status = 'paid' AND ((kind IN ('ticket','replay') AND ref_id = ?) OR (ref_id = ? AND ? IS NOT NULL)) GROUP BY 1`, ev.pub_id, ev.id, ev.replay_product_id || '', ev.replay_product_id);
   return c.html(
     <DashLayout c={c} title={ev.title} section="events" crumbs={[['/app/events', 'Events']]}>
       <EvTabs ev={ev} active={`/app/events/${ev.id}/orders`} />
@@ -658,7 +655,7 @@ dash.get('/:id/orders', async (c) => {
       {byKind.length > 0 && <Card title="Revenue by type"><Bars rows={byKind.map((k) => ({ label: k.kind === 'ticket' ? 'Tickets & bookings' : 'Replay sales', value: k.total, sub: `${k.n} orders` }))} fmt={(n) => fmtPrice(n, ev.currency)} /></Card>}
       <Table rows={orders} empty="No orders yet." cols={[
         { h: 'Buyer', r: (o) => <div>{o.subscriber_id ? <a href={`/app/audience/subscribers/${o.subscriber_id}`}>{o.name || o.email}</a> : o.name || o.email}<div class="muted small">{o.email}</div></div> },
-        { h: 'Type', r: (o) => (o.kind === 'ticket' ? 'Ticket' : 'Replay') },
+        { h: 'Type', r: (o) => (o.kind === 'ticket' && !parseJSON<any>(o.data, {}).replay ? (ev.kind === 'coaching' ? 'Booking' : 'Ticket') : 'Replay') },
         { h: 'Amount', r: (o) => fmtPrice(o.amount_cents, o.currency), class: 'right' },
         { h: 'Code', r: (o) => o.code || '—' },
         { h: 'Status', r: (o) => <Status s={o.status} /> },
@@ -1201,7 +1198,7 @@ site.post('/events/:ev/replay/buy', async (c) => {
   if (!v.ok) return c.redirect(`${url}?error=${encodeURIComponent(v.reason || 'Invalid email')}`, 303);
   const off = await applyOffer(c.env, pub.id, str(f.code) || undefined, 'event', ev.id, product.price_cents);
   if (off.error) return c.redirect(`${url}?error=${encodeURIComponent(off.error)}`, 303);
-  const co = await createCheckout(c.env, { pub, kind: 'replay', refId: ev.id, email: v.email, amountCents: off.amount, currency: product.currency, description: product.name, offerId: off.offerId, successUrl: `${url}/replay/purchased`, cancelUrl: url });
+  const co = await createCheckout(c.env, { pub, kind: 'ticket', refId: ev.id, email: v.email, amountCents: off.amount, currency: product.currency, description: product.name, offerId: off.offerId, data: { replay: true }, successUrl: `${url}/replay/purchased`, cancelUrl: url });
   await run(c.env, `UPDATE orders SET data = json_set(data, '$.success_url', ?) WHERE id = ?`, `${url}/replay/purchased?o=${co.orderId}`, co.orderId);
   return c.redirect(off.amount <= 0 ? `${url}/replay/purchased?o=${co.orderId}` : co.url, 303);
 });

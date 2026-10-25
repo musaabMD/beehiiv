@@ -98,7 +98,7 @@ export function registerSite(site: Hono<AppEnv>) {
                 ) : (
                   <div class="s-price">{disc !== full && <s class="s-muted" style="font-size:20px;margin-right:6px">{money(full, t.currency)}</s>}{money(disc, t.currency)}<small> / {iv}</small></div>
                 )}
-                {!groupMode && t.trial_days > 0 && <div class="s-badge">{t.paid_trial_cents ? `${money(t.paid_trial_cents, t.currency)} for ${t.trial_days} days` : `${t.trial_days}-day free trial`}</div>}
+                {!groupMode && t.trial_days > 0 && <div class="s-badge" style="align-self:flex-start">{t.paid_trial_cents ? `${money(t.paid_trial_cents, t.currency)} for ${t.trial_days} days` : `${t.trial_days}-day free trial`}</div>}
                 {t.description && <p class="s-muted">{t.description}</p>}
                 <ul>{benefits.map((b) => <li>{b}</li>)}</ul>
                 <input type="hidden" name="tier_id" value={t.id} />

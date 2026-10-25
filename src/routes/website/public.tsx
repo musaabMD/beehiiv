@@ -131,9 +131,9 @@ function commentsMode(pub: Publication): 'off' | 'subscribers' | 'premium' {
   return (settings(pub).comments as any) || 'subscribers';
 }
 
-site.get('/p/:slug', async (c) => {
+site.get('/p/:post', async (c) => {
   const pub = c.get('pub');
-  const post = await loadPost(c, c.req.param('slug'));
+  const post = await loadPost(c, c.req.param('post'));
   if (!post) return SiteMessage(c, 'Post not found', <p>This post doesn't exist or isn't published. <a href={base(c) + '/archive'}>Browse the archive</a></p>, 404);
   const b = base(c);
   const reader = c.get('reader');
@@ -316,8 +316,8 @@ function commentHtml(cm: any, url: string, canReply: boolean, myId?: string, dep
 
 const wantsJSON = (c: Ctx) => (c.req.header('accept') || '').includes('application/json');
 
-site.post('/p/:slug/react', async (c) => {
-  const post = await loadPost(c, c.req.param('slug'));
+site.post('/p/:post/react', async (c) => {
+  const post = await loadPost(c, c.req.param('post'));
   if (!post) return c.notFound();
   const sub = c.get('reader')?.subscriber;
   const url = `${base(c)}/p/${post.slug}`;
@@ -335,9 +335,9 @@ site.post('/p/:slug/react', async (c) => {
   return c.redirect(url, 303);
 });
 
-site.post('/p/:slug/comments', async (c) => {
+site.post('/p/:post/comments', async (c) => {
   const pub = c.get('pub');
-  const post = await loadPost(c, c.req.param('slug'));
+  const post = await loadPost(c, c.req.param('post'));
   if (!post) return c.notFound();
   const url = `${base(c)}/p/${post.slug}`;
   const reader = c.get('reader');
@@ -361,16 +361,16 @@ site.post('/p/:slug/comments', async (c) => {
   return c.redirect(`${url}#c-${cid}`, 303);
 });
 
-site.post('/p/:slug/comments/:cid/report', async (c) => {
-  const post = await loadPost(c, c.req.param('slug'));
+site.post('/p/:post/comments/:cid/report', async (c) => {
+  const post = await loadPost(c, c.req.param('post'));
   if (!post) return c.notFound();
   await run(c.env, `UPDATE comments SET status = 'reported' WHERE id = ? AND post_id = ? AND status = 'visible'`, c.req.param('cid'), post.id);
   flash(c, 'Thanks — a moderator will review this comment.');
   return c.redirect(`${base(c)}/p/${post.slug}#comments`, 303);
 });
 
-site.post('/p/:slug/comments/:cid/delete', async (c) => {
-  const post = await loadPost(c, c.req.param('slug'));
+site.post('/p/:post/comments/:cid/delete', async (c) => {
+  const post = await loadPost(c, c.req.param('post'));
   const sub = c.get('reader')?.subscriber;
   if (!post || !sub) return c.notFound();
   await run(c.env, `DELETE FROM comments WHERE id = ? AND post_id = ? AND subscriber_id = ?`, c.req.param('cid'), post.id, sub.id);
@@ -431,8 +431,8 @@ async function listing(c: Ctx, opts: { title: string; heading?: any; where?: str
 
 site.get('/archive', (c) => listing(c, { title: 'Archive', path: '/archive', q: str(c.req.query('q'), 200) || undefined, tag: str(c.req.query('tag'), 100) || undefined, description: `Every post from ${c.get('pub').name}` }));
 site.get('/search', (c) => listing(c, { title: 'Search', path: '/search', q: str(c.req.query('q'), 200) || '' }));
-site.get('/tag/:slug', async (c) => {
-  const t = await one<any>(c.env, 'SELECT * FROM content_tags WHERE pub_id = ? AND slug = ?', c.get('pub').id, c.req.param('slug'));
+site.get('/tag/:tag', async (c) => {
+  const t = await one<any>(c.env, 'SELECT * FROM content_tags WHERE pub_id = ? AND slug = ?', c.get('pub').id, c.req.param('tag'));
   if (!t) return SiteMessage(c, 'Tag not found', <p><a href={base(c) + '/archive'}>Browse the archive</a></p>, 404);
   return listing(c, { title: t.name, path: `/tag/${t.slug}`, tag: t.slug, description: t.description || `Posts tagged ${t.name}`, heading: <header class="s-page-head"><p class="s-muted s-small">Tag</p><h1 class="s-page-title">{t.name}</h1>{t.description && <p class="s-muted">{t.description}</p>}</header> });
 });
