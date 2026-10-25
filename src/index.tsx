@@ -97,10 +97,10 @@ const mods: Array<[string, Module]> = [
 for (const [path, m] of mods) if (m.dash) app.route(path, m.dash);
 
 // Root (public, non-publication) routes
-for (const m of [core, landing, auth, api, audience, posts, podcasts, events, monetize, grow, community, settingsMod, dashboard, website]) if (m.root) app.route('/', m.root);
+for (const m of [core, landing, auth, api, audience, posts, podcasts, events, monetize, grow, community, settingsMod, dashboard, website] as Module[]) if (m.root) app.route('/', m.root);
 
 // Publication site routes — website last (it owns the "/:page" catch-all)
-for (const m of [auth, audience, monetize, grow, podcasts, events, community, posts, settingsMod, dashboard, website]) if (m.site) app.route('/s/:slug', m.site);
+for (const m of [auth, audience, monetize, grow, podcasts, events, community, posts, settingsMod, dashboard, website] as Module[]) if (m.site) app.route('/s/:slug', m.site);
 
 app.notFound((c) => c.html(`<!doctype html><meta charset="utf-8"><title>Not found</title><body style="font-family:system-ui;padding:48px;text-align:center"><h1>404</h1><p>This page doesn't exist.</p><p><a href="/">Home</a></p></body>`, 404));
 
