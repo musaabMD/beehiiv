@@ -90,6 +90,8 @@ Uncomment in `wrangler.jsonc`:
 
 and deploy. This enables the AI writer, AI images, the website builder's AI mode, audio versions of posts and podcast transcripts.
 
+Podcast transcripts are automatic: every uploaded or imported episode is queued for transcription (Whisper `@cf/openai/whisper-large-v3-turbo`) as a background job. Long MP3s are split into ~2 MB frame-aligned byte ranges of the stored file and stitched back together (text + time-shifted WebVTT, published as `podcast:transcript` in the feed). Non-MP3 files over 20 MB are skipped with a note (upload an MP3 or a transcript file). Without the AI binding the job is marked **skipped** with an explanation on the episode page; nothing fails. "Regenerate transcript" on an episode re-runs it.
+
 ## 11. Bot protection (optional)
 
 Forms already use honeypots, timing checks, rate limits and email validation. To add Cloudflare Turnstile, create a widget and set `TURNSTILE_SITE_KEY` (var) and `TURNSTILE_SECRET` (secret).
@@ -102,6 +104,24 @@ Webinars stream peer-to-peer from the host's browser by default, which suits sma
 - instance-wide: `npx wrangler secret put REALTIME_APP_ID` and `npx wrangler secret put REALTIME_APP_TOKEN`.
 
 The host then publishes once to Cloudflare's edge and every attendee pulls from the nearest location. The App Secret never reaches browsers — signaling goes through `/live/:eventId/sfu`.
+
+## 11c. Webinar recordings
+
+Webinars record automatically when the host goes live (event setting **Record automatically**, on by default). The studio's browser uploads a chunk every few seconds to R2 (`<pub>/private/recordings/<id>/NNNNNN.part`); when the host ends the event — or 5 minutes after the browser disappears — a background job stitches the chunks into one WebM with an R2 multipart upload and sets it as the replay. Recording runs in the host's browser: Cloudflare Realtime's SFU API has no server-side recording (that exists only in RealtimeKit, which OpenHive doesn't use), so a host who never opens the studio produces no recording.
+
+## 11d. Discord verified linking (optional)
+
+Members link Discord for tier-based roles. With an OAuth2 app configured they click **Connect with Discord** (scope `identify`) and their account is verified; otherwise they type a user ID, which is shown as *unverified*.
+
+1. In the [Discord developer portal](https://discord.com/developers/applications) → your application → OAuth2, add the redirect URL `https://<APP_URL host>/oauth/discord/callback` (one URL for every publication).
+2. Either per publication — Community → Settings → Discord → *OAuth2 client ID / secret* — or instance-wide:
+
+```sh
+npx wrangler secret put DISCORD_CLIENT_ID
+npx wrangler secret put DISCORD_CLIENT_SECRET
+```
+
+Role sync itself still needs the bot token and server ID in Community → Settings. `DISCORD_API_BASE` exists only to point the token exchange at a mock server in tests.
 
 ## 12. Cron and background work
 

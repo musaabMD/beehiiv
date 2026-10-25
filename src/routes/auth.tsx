@@ -11,9 +11,12 @@ import {
 } from '../lib/auth';
 import { validateEmail, rateLimit, clientIP } from '../lib/guard';
 import { sendTransactional, button } from '../lib/email';
-import { siteUrl, appUrl } from '../lib/pub';
+import { siteUrl, appUrl, getPub } from '../lib/pub';
+import { discordOAuthCfg, discordIdentify, syncDiscordRoles } from '../lib/discord';
 import { id, now, token, sha256, slugify, esc, form, str, MIN, DAY } from '../lib/util';
 import { PlainLayout } from '../ui/layout';
+import { raw } from 'hono/html';
+import { qrSvg } from '../lib/qr';
 import { Field, Input, Btn, Select, Textarea, flash, back } from '../ui/components';
 import { SiteLayout, SiteMessage } from '../ui/site';
 
@@ -322,6 +325,34 @@ root.post('/device/:code', async (c) => {
   );
 });
 
+// ───────────────────────── Discord OAuth callback (community account linking) ─────────────────────────
+// One instance-wide redirect URI for every publication; the single-use `state` token carries the publication and the
+// reader who started the flow (issued only to a logged-in community member, valid 10 minutes).
+root.get('/oauth/discord/callback', async (c) => {
+  const row = await consumeToken(c.env, 'discord_oauth', c.req.query('state') || '');
+  if (!row) return c.html(<PlainLayout title="Link expired"><h1>This Discord link has expired</h1><p>Go back to the community and click “Connect with Discord” again.</p></PlainLayout>, 400);
+  const pub = await getPub(c.env, row.pub_id);
+  if (!pub) return c.text('Not found', 404);
+  const dest = `${siteUrl(c.env, pub)}/community/discord`;
+  const done = (msg: string, ok: boolean) => c.redirect(`${dest}?ok=${ok ? 1 : 0}&r=${encodeURIComponent(msg)}`, 302);
+  if (c.req.query('error')) return done(c.req.query('error') === 'access_denied' ? 'Discord linking was cancelled.' : `Discord returned an error: ${str(c.req.query('error'), 60)}`, false);
+  const cfg = await discordOAuthCfg(c.env, pub);
+  const code = str(c.req.query('code'), 200);
+  if (!cfg || !code) return done('Discord sign-in is not configured.', false);
+  try {
+    const u = await discordIdentify(c.env, cfg, code);
+    const member = await one(c.env, `SELECT 1 FROM community_members WHERE pub_id = ? AND subscriber_id = ? AND status = 'active'`, pub.id, row.subscriber_id);
+    if (!member) return done('Join the community first.', false);
+    // A verified link wins over any earlier (unverified) claim of the same Discord account.
+    await run(c.env, 'UPDATE community_members SET discord_user_id = NULL, discord_username = NULL, discord_verified = 0 WHERE pub_id = ? AND discord_user_id = ? AND subscriber_id != ?', pub.id, u.id, row.subscriber_id);
+    await run(c.env, 'UPDATE community_members SET discord_user_id = ?, discord_username = ?, discord_verified = 1 WHERE pub_id = ? AND subscriber_id = ?', u.id, u.username, pub.id, row.subscriber_id);
+    const r = await syncDiscordRoles(c.env, pub, row.subscriber_id);
+    return done(`Linked Discord account ${u.username}. ${r}`, r.startsWith('Synced'));
+  } catch (e: any) {
+    return done(String(e?.message || e).slice(0, 200), false);
+  }
+});
+
 // ───────────────────────── team invites ─────────────────────────
 async function findInvite(c: Ctx) {
   return one<any>(
@@ -524,6 +555,128 @@ function sitePath(c: Ctx, pub: Publication, path: string): string {
   return siteUrl(c.env, pub) + (rel.startsWith('/') ? rel : '/' + rel);
 }
 
+// ── Reader "log in with your phone": the desktop shows a code + QR; the reader approves it on a phone that is already
+// logged in (or logs in there with a magic link first). Same device_logins table as the dashboard flow, kind = 'reader'.
+const READER_DEVICE_COOKIE = 'oh_rdevice';
+
+site.get('/login/device', async (c) => {
+  const pub = c.get('pub');
+  const base = siteUrl(c.env, pub);
+  if (c.get('reader')) return c.redirect(base + '/account');
+  if (!(await rateLimit(c.env, `rdevice:ip:${clientIP(c.req.raw)}`, 20, 900))) return SiteMessage(c, 'Slow down', <p>Too many login codes. Please wait a few minutes.</p>, 429);
+  const code = deviceCode();
+  const secret = token(24);
+  await insert(c.env, 'device_logins', { code, poll_hash: await sha256(secret), status: 'pending', kind: 'reader', pub_id: pub.id, user_agent: c.req.header('user-agent')?.slice(0, 200) ?? null, expires_at: now() + 10 * MIN, created_at: now() });
+  setCookie(c, READER_DEVICE_COOKIE, `${code}.${secret}`, { httpOnly: true, sameSite: 'Lax', path: '/', maxAge: 600, secure: new URL(c.req.url).protocol === 'https:' });
+  const link = `${base}/login/device/${code}`;
+  const pollUrl = new URL(c.req.url).pathname.replace(/\/login\/device\/?$/, '/login/device/poll');
+  return c.html(await SiteLayout({
+    c, title: 'Log in with your phone', noindex: true,
+    children: (
+      <section class="s-wrap s-narrow s-message" style="text-align:center">
+        <h1>Log in with your phone</h1>
+        <p class="s-muted">Scan this code with your phone's camera (where you're logged in to {pub.name}, or log in there first), then tap <strong>Approve</strong>.</p>
+        <div style="display:flex;justify-content:center;margin:18px 0" data-device-qr>{raw(qrSvg(link, 220))}</div>
+        <p style="font-size:30px;font-weight:800;letter-spacing:4px;font-family:ui-monospace,monospace;margin:6px 0" data-device-code>{code}</p>
+        <p class="s-muted s-small" style="word-break:break-all">Or open <a href={link}>{link}</a> on your phone.</p>
+        <form method="post" action={`${base}/login/device/email`} class="s-form" style="justify-content:center;max-width:460px;margin:16px auto 0">
+          <input type="email" name="email" placeholder="you@example.com" required autocomplete="email" />
+          <button class="s-btn s-btn-ghost">Email the link to my phone</button>
+        </form>
+        <p class="s-muted" id="device-status" style="margin-top:16px">Waiting for approval… (expires in 10 minutes)</p>
+        {raw(`<script>(function(){var t=setInterval(async function(){try{var r=await fetch(${JSON.stringify(pollUrl)},{headers:{accept:'application/json'},credentials:'same-origin'});var j=await r.json();var el=document.getElementById('device-status');if(j.status==='approved'){clearInterval(t);el.textContent='Approved! Logging you in…';location.href=j.redirect;}else if(j.status==='expired'||j.status==='denied'){clearInterval(t);el.innerHTML='This code '+j.status+'. <a href="">Get a new code</a>';}}catch(e){}},2000);})();</script>`)}
+      </section>
+    ),
+  }));
+});
+
+site.get('/login/device/poll', async (c) => {
+  const pub = c.get('pub');
+  const [code, secret] = (getCookie(c, READER_DEVICE_COOKIE) || '').split('.');
+  if (!code || !secret) return c.json({ status: 'expired' });
+  const row = await one<any>(c.env, `SELECT * FROM device_logins WHERE code = ? AND kind = 'reader' AND pub_id = ?`, code, pub.id);
+  if (!row || row.poll_hash !== (await sha256(secret))) return c.json({ status: 'expired' });
+  if (row.status === 'denied') return c.json({ status: 'denied' });
+  if (row.expires_at < now() && row.status === 'pending') return c.json({ status: 'expired' });
+  if (row.status === 'approved' && row.email) {
+    const claim = await run(c.env, `UPDATE device_logins SET status = 'used' WHERE code = ? AND status = 'approved'`, code);
+    if (claim.meta.changes) {
+      await createReaderSession(c, row.email);
+      deleteCookie(c, READER_DEVICE_COOKIE, { path: '/' });
+      return c.json({ status: 'approved', redirect: siteUrl(c.env, pub) + '/' });
+    }
+  }
+  return c.json({ status: row.status === 'used' ? 'expired' : 'pending' });
+});
+
+site.post('/login/device/email', async (c) => {
+  const pub = c.get('pub');
+  const base = siteUrl(c.env, pub);
+  const code = (getCookie(c, READER_DEVICE_COOKIE) || '').split('.')[0];
+  if (!code) return c.redirect(base + '/login/device', 303);
+  const email = str((await form(c.req)).email, 254).toLowerCase();
+  if (!(await rateLimit(c.env, `rdevice:${email}`, 5, 900)) || !(await rateLimit(c.env, `rdevice:ip:${clientIP(c.req.raw)}`, 20, 900)))
+    return SiteMessage(c, 'Slow down', <p>Too many attempts. Please try again in a few minutes.</p>, 429);
+  const sub = await one<{ id: string }>(c.env, `SELECT id FROM subscribers WHERE pub_id = ? AND email = ? AND status IN ('active','pending')`, pub.id, email);
+  if (sub) {
+    const tok = await issueToken(c.env, 'reader_login', 15 * MIN, { pub_id: pub.id, subscriber_id: sub.id, data: { email, next: `${base}/login/device/${code}` } });
+    await sendTransactional(c.env, email, `Approve your login to ${pub.name}`, `<p>Open this on your phone to log in there and approve the login on your computer (code <strong>${esc(code)}</strong>). It works once and expires in 15 minutes.</p>${button('Approve login', `${base}/login/${tok}`)}`, pub);
+  }
+  const pollUrl = new URL(c.req.url).pathname.replace(/\/login\/device\/email\/?$/, '/login/device/poll');
+  return SiteMessage(c, 'Check your phone', <>
+    <p>If <strong>{email}</strong> is subscribed, we emailed a link. Open it on your phone and approve code <strong>{code}</strong>. This page continues automatically.</p>
+    {raw(`<script>setInterval(async function(){try{var j=await (await fetch(${JSON.stringify(pollUrl)},{credentials:'same-origin'})).json();if(j.status==='approved')location.href=j.redirect;}catch(e){}},2000);</script>`)}
+  </>);
+});
+
+async function readerDeviceRow(c: Ctx, code: string) {
+  return one<any>(c.env, `SELECT * FROM device_logins WHERE code = ? AND kind = 'reader' AND pub_id = ?`, code, c.get('pub').id);
+}
+
+site.get('/login/device/:code', async (c) => {
+  const pub = c.get('pub');
+  const base = siteUrl(c.env, pub);
+  const code = c.req.param('code').toUpperCase();
+  const row = await readerDeviceRow(c, code);
+  if (!row || row.status !== 'pending' || row.expires_at < now())
+    return SiteMessage(c, 'Code expired', <p>This login code has expired or was already used. Start again on your computer at <strong>{base}/login/device</strong>.</p>, 400);
+  const reader = c.get('reader');
+  if (!reader?.subscriber) {
+    return SiteMessage(c, 'Log in on this phone first', <>
+      <p>To approve code <strong>{code}</strong>, log in to {pub.name} on this phone. We'll email you a link that brings you right back here.</p>
+      <form method="post" action={`${base}/login`} class="s-form" style="justify-content:center;max-width:460px;margin:0 auto">
+        <input type="email" name="email" placeholder="you@example.com" required autocomplete="email" />
+        <input type="hidden" name="next" value={`/login/device/${code}`} />
+        <button class="s-btn">Email me a login link</button>
+      </form>
+    </>);
+  }
+  return SiteMessage(c, 'Approve login on another device?', <>
+    <p>You're logged in as <strong>{reader.email}</strong>. A computer is asking to log in to {pub.name} with code:</p>
+    <p style="font-size:28px;font-weight:800;letter-spacing:4px;font-family:ui-monospace,monospace" data-approve-code>{code}</p>
+    <p class="s-muted s-small">Only approve if this matches the code on your screen. {row.user_agent}</p>
+    <form method="post" style="display:flex;gap:10px;justify-content:center">
+      <button class="s-btn" name="decision" value="approve" data-approve>Approve</button>
+      <button class="s-btn s-btn-ghost" name="decision" value="deny">Deny</button>
+    </form>
+  </>);
+});
+
+site.post('/login/device/:code', async (c) => {
+  const pub = c.get('pub');
+  const code = c.req.param('code').toUpperCase();
+  const reader = c.get('reader');
+  // CSRF: only same-origin form posts may approve (the reader cookie is SameSite=Lax as well).
+  const origin = c.req.header('origin');
+  if (origin && new URL(origin).host !== new URL(c.req.url).host) return c.text('Cross-site request blocked', 403);
+  if (!reader?.subscriber) return c.redirect(`${siteUrl(c.env, pub)}/login/device/${code}`, 303);
+  if (!(await rateLimit(c.env, `rdevice:approve:${reader.subscriber.id}`, 10, 900))) return SiteMessage(c, 'Slow down', <p>Too many approvals. Try again later.</p>, 429);
+  const approve = (await form(c.req)).decision === 'approve';
+  const r = await run(c.env, `UPDATE device_logins SET status = ?, email = ? WHERE code = ? AND kind = 'reader' AND pub_id = ? AND status = 'pending' AND expires_at > ?`, approve ? 'approved' : 'denied', approve ? reader.email : null, code, pub.id, now());
+  return SiteMessage(c, !r.meta.changes ? 'This code has expired' : approve ? 'Approved ✓' : 'Login denied',
+    <p data-device-result={!r.meta.changes ? 'expired' : approve ? 'approved' : 'denied'}>{approve && r.meta.changes ? 'Your computer will be logged in within a few seconds.' : 'You can close this page.'}</p>);
+});
+
 site.get('/login', async (c) => {
   const pub = c.get('pub');
   const base = siteUrl(c.env, pub);
@@ -545,6 +698,7 @@ site.get('/login', async (c) => {
                 <input type="hidden" name="next" value={next} />
                 <button class="s-btn">Email me a link</button>
               </form>
+              <p class="s-muted s-small" style="margin-top:14px">On a computer? <a href={`${base}/login/device`} data-login-device>Log in with your phone</a> — scan a code, approve, done.</p>
             </>
           )}
         </section>
