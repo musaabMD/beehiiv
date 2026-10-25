@@ -2,14 +2,14 @@
 // Post editor page + JSON endpoints (autosave, preview, send flow, comments, versions, pickers).
 import { Hono } from 'hono';
 import { raw } from 'hono/html';
-import type { AppEnv, Ctx, Post } from '../../types';
+import type { AppEnv, Ctx, Post, Subscriber } from '../../types';
 import { all, one, run, insert, val } from '../../lib/db';
 import { can, audit } from '../../lib/auth';
 import { emit } from '../../lib/events';
 import { kick } from '../../lib/jobs';
 import { ruleCatalog } from '../../lib/catalog';
-import { countRecipients, publishPost, sendTest, type SendOptions } from '../../lib/sender';
-import { parseDoc, renderDoc, GMAIL_CLIP_BYTES, htmlToText } from '../../lib/render';
+import { countRecipients, publishPost, sendTest, buildEmail, postContent, type SendOptions } from '../../lib/sender';
+import { parseDoc, renderDoc, GMAIL_CLIP_BYTES, htmlToText, parseEmbed, resolveBlueskyDid } from '../../lib/render';
 import { siteUrl, senderFor } from '../../lib/pub';
 import { validateEmail } from '../../lib/guard';
 import { aiSpeech, aiEnabled, mediaUrl, AI_DISABLED_MSG } from '../../lib/ai';
@@ -367,6 +367,23 @@ app.get('/:id/edit', async (c) => {
   );
 });
 
+/** Bluesky embeds need the author's DID: resolve the handle once at save time and store it on the block. */
+async function resolveEmbedDids(doc: { blocks: any[] }) {
+  const todo: any[] = [];
+  walkBlocks(doc.blocks, (b) => {
+    if (b.type !== 'embed' || !b.data) return;
+    const e = parseEmbed(String(b.data.url || ''));
+    if (!e || e.provider !== 'bluesky') { delete b.data.did; return; }
+    const handle = e.id.split('/')[0];
+    if (b.data.did && b.data.did_for === handle) return;
+    todo.push({ d: b.data, handle });
+  });
+  await Promise.all(todo.slice(0, 20).map(async (x) => {
+    const did = await resolveBlueskyDid(x.handle);
+    if (did) { x.d.did = did; x.d.did_for = x.handle; } else { delete x.d.did; delete x.d.did_for; }
+  }));
+}
+
 // ───────── Autosave ─────────
 app.put('/:id', async (c) => {
   const pub = c.get('pub');
@@ -378,6 +395,7 @@ app.put('/:id', async (c) => {
   const canPublish = can(c.get('role'), 'publish');
   if (!canPublish && post.status !== 'draft') return c.json({ error: 'Contributors can only edit drafts' }, 403);
   const doc = body.content && Array.isArray(body.content.blocks) ? body.content : parseDoc(post.content);
+  await resolveEmbedDids(doc);
   const content = JSON.stringify(doc);
   if (content.length > 4_000_000) return c.json({ error: 'Post is too large' }, 413);
   const title = body.title !== undefined ? str(body.title, 300) : post.title;
@@ -449,7 +467,33 @@ app.post('/:id/preview', async (c) => {
   return c.json({ ...r, subject, preview_text: post.preview_text, clip: GMAIL_CLIP_BYTES });
 });
 
-/** Render an arbitrary doc. mode: email | web | fragment (web body only, used by editor block previews). */
+/**
+ * Byte size of the email exactly as the sender builds it for one recipient: full layout, click-tracking
+ * redirect URLs on every link, open pixel, signed unsubscribe/preferences footer. Measured for a free and a
+ * premium reader (paywalled content differs) and the larger one is reported — that's what Gmail clips.
+ */
+async function sendSize(c: Ctx, post: Post) {
+  const pub = c.get('pub');
+  const real = await one<Subscriber>(c.env, `SELECT * FROM subscribers WHERE pub_id = ? AND status = 'active' ORDER BY created_at LIMIT 1`, pub.id);
+  const base = real || (await simulatedSubscriber(c.env, pub, { tier: 'free', name: 'Alex Reader', email: 'alex.reader@example.com' }))!;
+  const content = await postContent(c.env, post);
+  const sizes: number[] = [];
+  for (const tier of ['free', 'premium'] as const) {
+    const sub: Subscriber = { ...base, id: real ? base.id : id(), tier };
+    const b = await buildEmail(c.env, pub, content, sub, { deliveryId: id(), post, access: tier === 'premium' });
+    sizes.push(b.bytes);
+  }
+  const bytes = Math.max(...sizes);
+  return { bytes, free_bytes: sizes[0], premium_bytes: sizes[1], clip: GMAIL_CLIP_BYTES, warn_at: 90 * 1024, warn: bytes >= 90 * 1024 && bytes < GMAIL_CLIP_BYTES, over: bytes >= GMAIL_CLIP_BYTES };
+}
+
+app.post('/:id/email-size', async (c) => {
+  const post = await loadPost(c, c.req.param('id'));
+  if (!post) return c.json({ error: 'not_found' }, 404);
+  return c.json(await sendSize(c, post));
+});
+
+/** Render an arbitrary doc. mode: email | web | fragment (web body only, used by editor block previews) | email-size (send-mode byte count). */
 app.post('/render', async (c) => {
   const pub = c.get('pub');
   const b = await c.req.json<any>().catch(() => ({}));
@@ -460,6 +504,7 @@ app.post('/render', async (c) => {
     const r = await renderDoc(doc, { env: c.env, mode: 'web', pub, siteUrl: siteUrl(c.env, pub), subscriber: sub, access: true, preview: true });
     return c.json({ html: r.html, bytes: r.bytes });
   }
+  if (b.mode === 'email-size') return c.json(await sendSize(c, fake));
   const r = await renderPreview(c.env, pub, fake, b.mode === 'web' ? 'web' : 'email', b.simulate);
   return c.json(r);
 });

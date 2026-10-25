@@ -146,6 +146,7 @@
   const P = (html = '') => ({ id: uid(), type: 'paragraph', data: { html } });
   const TYPES = {
     paragraph: { label: 'Text', icon: '¶', group: 'Basic', keys: 'paragraph text plain', data: () => ({ html: '' }), text: true },
+    h1: { label: 'Heading 1', icon: 'H1', hidden: true, as: 'heading', data: () => ({ level: 1, html: '' }) },
     h2: { label: 'Heading 2', icon: 'H2', group: 'Basic', keys: 'heading title h2', as: 'heading', data: () => ({ level: 2, html: '' }) },
     h3: { label: 'Heading 3', icon: 'H3', group: 'Basic', keys: 'heading subtitle h3', as: 'heading', data: () => ({ level: 3, html: '' }) },
     h4: { label: 'Heading 4', icon: 'H4', group: 'Basic', keys: 'heading h4 small', as: 'heading', data: () => ({ level: 4, html: '' }) },
@@ -230,7 +231,7 @@
       this.lastJSON = JSON.stringify(this.getDoc());
       if (!keepHistory) { this.history = [this.lastJSON]; this.future = []; }
       this.syncInput();
-      if (focusId) { const it = this.findItem(focusId); if (it) it.view.focus(true); }
+      if (focusId) { const it = this.findItem(focusId); if (it && it.view.focus) it.view.focus(true); }
       if (!silent) { this.opts.onChange && this.opts.onChange(this.getDoc()); this.emit('change', this.getDoc()); }
       if (this.collab) this.collab.snapshot();
     }
@@ -513,10 +514,11 @@
       if (e.key === ' ' && it.block.type === 'paragraph') {
         const before = rangeText(el, true);
         if (before && atEnd(el)) {
-          const m = { '#': 'h2', '##': 'h3', '###': 'h4', '####': 'h4', '-': 'list', '*': 'list', '1.': 'olist', '>': 'quote', '[]': 'checklist', '[ ]': 'checklist', '```': 'code' }[before.text.trim()];
+          // Markdown levels map to the same heading level. In posts the H1 is the post title, so '#' gives an H2;
+          // compact editors (automation emails, page sections) have no title and get a real H1.
+          const m = { '#': this.opts.compact ? 'h1' : 'h2', '##': 'h2', '###': 'h3', '####': 'h4', '-': 'list', '*': 'list', '1.': 'olist', '>': 'quote', '[]': 'checklist', '[ ]': 'checklist', '```': 'code' }[before.text.trim()];
           if (m && before.text.trim() === el.textContent.trim()) {
             e.preventDefault();
-            if (before.text.trim() === '#' && !this.opts.compact) { /* '#' → H2 (H1 reserved for title) */ }
             el.innerHTML = '';
             view.sync();
             this.convert(it, m, true);
@@ -609,9 +611,34 @@
         if (right) blocks.push(P(right));
       } else if (el && !el.textContent.trim()) { idx--; it.list.remove(it); }
       let last;
-      for (const b of blocks) last = it.list.insert(b, idx++);
+      const added = [];
+      for (const b of blocks) added.push((last = it.list.insert(b, idx++)));
       if (last && last.view.focus) last.view.focus(true);
       this.changed();
+      this.importPastedImages(added);
+    }
+
+    /**
+     * Pasted Google Docs (and Drive/Photos) images point at short-lived googleusercontent.com URLs that stop
+     * working after a while. Copy them into the media library server-side and swap the src.
+     */
+    async importPastedImages(items) {
+      const expiring = (u) => /^https:\/\/[^/]*googleusercontent\.com\//i.test(u || '');
+      const todo = items.filter((x) => x && x.block.type === 'image' && expiring(x.view.d.src));
+      if (!todo.length) return;
+      OHToast(`Copying ${todo.length} pasted image${todo.length > 1 ? 's' : ''} to your media library…`, 3000);
+      let failed = 0;
+      await Promise.all(todo.map(async (x) => {
+        const from = x.view.d.src;
+        try {
+          const r = await postJSON(this.opts.importUrl || '/app/posts/media/import', { url: from });
+          if (!r.url || x.view.d.src !== from || !x.el.isConnected) return;
+          x.view.d.src = r.url;
+          x.view.draw();
+        } catch { failed++; }
+      }));
+      this.changed();
+      if (failed) OHToast(`${failed} pasted image${failed > 1 ? 's' : ''} could not be copied — re-upload ${failed > 1 ? 'them' : 'it'} before sending (Google image links expire)`, 6000);
     }
 
     // ───────── structure ops ─────────
@@ -624,6 +651,7 @@
       if (t === 'list') data.items = text ? text.split(/<br\s*\/?>/i).filter((x) => textOf(x).trim() || true) : [''];
       if (t === 'checklist') data.items = (text ? text.split(/<br\s*\/?>/i) : ['']).map((x) => ({ html: x, checked: false }));
       if (t === 'code') data.code = textOf(text.replace(/<br\s*\/?>/gi, '\n'));
+      if (cur.data.show_in) data.show_in = cur.data.show_in; // keep the email/web channel
       const nb = { id: cur.id, type: t, data };
       const idx = it.list.items.indexOf(it);
       it.list.remove(it, true);
@@ -844,27 +872,70 @@
         document.execCommand('insertText', false, tag);
         return this.afterFormat();
       }
-      if (cmd === 'ai') {
-        const r = caretRange()?.cloneRange();
-        const text = r ? r.toString() : '';
-        const action = await menuBox(btn, [
-          { label: 'Improve writing', value: 'rewrite' }, { label: 'Fix spelling & grammar', value: 'fix' }, { label: 'Make shorter', value: 'shorten' }, { label: 'Make longer', value: 'expand' },
-          { label: 'Change tone: friendly', value: 'tone:friendly' }, { label: 'Change tone: professional', value: 'tone:professional' }, { label: 'Change tone: witty', value: 'tone:witty' },
-          { label: 'Translate…', value: 'translate' },
-        ]);
-        if (!action) return;
-        let lang;
-        if (action === 'translate') { lang = await promptBox('Translate', 'Target language', 'Spanish'); if (!lang) return; }
-        OHToast('Working…', 4000);
-        try {
-          const [act, tone] = action.split(':');
-          const res = await postJSON(this.opts.aiUrl, { action: act, tone, lang, text });
-          restoreRange(r, false);
-          document.execCommand('insertText', false, res.text.trim());
-          this.afterFormat();
-          OHToast('Done');
-        } catch (err) { OHToast(err.message, 5000); }
+      if (cmd === 'ai') return this.aiEdit(btn);
+    }
+    /** The rich-text element the AI should rewrite when nothing is selected: the caret's element (list item, cell…) or the block's main text. */
+    aiTarget(it, r) {
+      let n = r && this.el.contains(r.startContainer) ? r.startContainer : null;
+      if (n && n.nodeType !== 1) n = n.parentElement;
+      let host = n && n.closest('[contenteditable=true]');
+      if (host && it && !it.el.contains(host)) host = null;
+      if (host && /^(UL|OL)$/.test(host.tagName)) host = n.closest('li');
+      if (!host && it && it.view.mergeTarget) host = it.view.mergeTarget();
+      return host && this.el.contains(host) ? host : null;
+    }
+    /**
+     * AI rewrite / fix / translate in place, keeping inline formatting: the selection (or, with nothing selected,
+     * the current block's text) is sent as inline HTML, footnotes travel as ⟦fnN⟧ placeholders, and the
+     * sanitized HTML that comes back replaces the same range.
+     */
+    async aiEdit(anchor, item = null) {
+      const cur = caretRange();
+      let range;
+      if (!item && cur && !cur.collapsed && this.el.contains(cur.commonAncestorContainer)) range = cur.cloneRange();
+      else {
+        const it = item || this.focusedItem() || this.lastFocused;
+        const target = it && this.aiTarget(it, item ? null : cur);
+        if (!target) { OHToast('Select some text, or click into a text block first', 4000); return; }
+        range = document.createRange();
+        range.selectNodeContents(target);
       }
+      const box = document.createElement('div');
+      box.append(range.cloneContents());
+      const notes = [];
+      box.querySelectorAll('span[data-footnote]').forEach((s) => { notes.push(s.getAttribute('data-footnote')); s.replaceWith(`⟦fn${notes.length}⟧`); });
+      const html = cleanInline(box);
+      if (!textOf(html).trim()) { OHToast('Select some text, or click into a text block first', 4000); return; }
+      const action = await menuBox(anchor, [
+        { label: 'Improve writing', value: 'rewrite' }, { label: 'Fix spelling & grammar', value: 'fix' }, { label: 'Make shorter', value: 'shorten' }, { label: 'Make longer', value: 'expand' },
+        { label: 'Change tone: friendly', value: 'tone:friendly' }, { label: 'Change tone: professional', value: 'tone:professional' }, { label: 'Change tone: witty', value: 'tone:witty' },
+        { label: 'Translate…', value: 'translate' },
+      ]);
+      if (!action) return;
+      let lang;
+      if (action === 'translate') { lang = await promptBox('Translate', 'Target language', 'Spanish'); if (!lang) return; }
+      OHToast('Working…', 4000);
+      try {
+        const [act, tone] = action.split(':');
+        const res = await postJSON(this.opts.aiUrl, { action: act, tone, lang, html, text: box.textContent });
+        let out = typeof res.html === 'string' ? res.html : esc(res.text || '').replace(/\n/g, '<br>');
+        const used = new Set();
+        out = out.replace(/⟦fn(\d+)⟧/g, (_, n) => { const note = notes[+n - 1]; if (note == null || used.has(n)) return ''; used.add(n); return `<span data-footnote="${esc(note)}"></span>`; });
+        notes.forEach((note, i) => { if (!used.has(String(i + 1))) out += `<span data-footnote="${esc(note)}"></span>`; }); // never drop a footnote
+        out = cleanHTML(out);
+        if (!textOf(out).trim()) throw new Error('The AI returned an empty result');
+        if (!range.startContainer.isConnected) throw new Error('The text changed while the AI was working — try again');
+        let host = range.commonAncestorContainer;
+        if (host.nodeType !== 1) host = host.parentElement;
+        host = host.closest('[contenteditable=true]');
+        host && host.focus({ preventScroll: true });
+        restoreRange(range, false);
+        document.execCommand('insertHTML', false, out);
+        this.afterFormat();
+        const it = host && this.itemFromNode(host);
+        if (it) { it.view.sync(); this.changed(); }
+        OHToast('Done');
+      } catch (err) { OHToast(err.message, 5000); }
     }
     async linkPrompt() {
       const r = caretRange()?.cloneRange();
@@ -881,51 +952,108 @@
     }
 
     // ───────── find & replace ─────────
-    textNodes() {
+    // Covers every text field of the doc: rich text (paragraphs, headings, lists, quotes + cites, captions,
+    // gallery captions, table cells) — matching across inline formatting — plus plain text fields marked
+    // data-find (button labels, alt/title, ad/referral/embed text, code). Replacements commit as one undo step.
+    findTargets() {
       const out = [];
-      this.el.querySelectorAll('[contenteditable=true]').forEach((host) => {
-        const w = document.createTreeWalker(host, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.parentElement.closest('[contenteditable=false]') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
-        let n; while ((n = w.nextNode())) out.push(n);
+      this.el.querySelectorAll('[contenteditable=true], input[data-find], textarea[data-find]').forEach((el) => {
+        if (el.closest('.ohe-preview')) return;
+        if (el.isContentEditable && el.parentElement?.closest('[contenteditable=true]')) return; // nested host: covered by its parent
+        out.push(el);
       });
       return out;
     }
+    /** Concatenated text of a rich host with a map back to its text nodes (non-editable islands like footnotes skipped). */
+    hostText(host) {
+      const nodes = [];
+      let text = '';
+      const w = document.createTreeWalker(host, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.parentElement.closest('[contenteditable=false]') && host.contains(n.parentElement.closest('[contenteditable=false]')) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
+      let n;
+      while ((n = w.nextNode())) { nodes.push({ n, start: text.length }); text += n.textContent; }
+      return { text, nodes };
+    }
+    pointAt(nodes, off, isEnd) {
+      for (let i = 0; i < nodes.length; i++) {
+        const { n, start } = nodes[i];
+        const len = n.textContent.length;
+        if (off < start + len || (isEnd && off === start + len) || i === nodes.length - 1) return [n, Math.min(len, Math.max(0, off - start))];
+      }
+      return null;
+    }
     find(q, { caseSensitive = false } = {}) {
+      this.findMatches = [];
       this.findRanges = [];
+      this.el.querySelectorAll('.ohe-find-hit').forEach((x) => x.classList.remove('ohe-find-hit'));
       if (window.CSS && CSS.highlights) CSS.highlights.delete('ohe-find');
       if (!q) return 0;
       const needle = caseSensitive ? q : q.toLowerCase();
-      for (const n of this.textNodes()) {
-        const hay = caseSensitive ? n.textContent : n.textContent.toLowerCase();
-        let i = 0;
-        while ((i = hay.indexOf(needle, i)) !== -1) { const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + q.length); this.findRanges.push(r); i += q.length; }
+      const scan = (hay, fn) => { const h2 = caseSensitive ? hay : hay.toLowerCase(); let i = 0; while ((i = h2.indexOf(needle, i)) !== -1) { fn(i); i += needle.length; } };
+      for (const el of this.findTargets()) {
+        if (el.isContentEditable) {
+          const { text, nodes } = this.hostText(el);
+          scan(text, (i) => {
+            const a = this.pointAt(nodes, i, false), b = this.pointAt(nodes, i + q.length, true);
+            if (!a || !b) return;
+            const r = document.createRange(); r.setStart(a[0], a[1]); r.setEnd(b[0], b[1]);
+            this.findMatches.push({ range: r, host: el });
+            this.findRanges.push(r);
+          });
+        } else {
+          scan(el.value, (i) => { this.findMatches.push({ field: el, start: i, end: i + q.length }); el.classList.add('ohe-find-hit'); });
+        }
       }
-      if (window.CSS && CSS.highlights && window.Highlight) CSS.highlights.set('ohe-find', new Highlight(...this.findRanges));
+      if (window.CSS && CSS.highlights && window.Highlight && this.findRanges.length) CSS.highlights.set('ohe-find', new Highlight(...this.findRanges));
       this.findPos = -1;
-      return this.findRanges.length;
+      this.findQ = { q, caseSensitive };
+      return this.findMatches.length;
+    }
+    revealMatch(m) {
+      const node = m.field || m.host;
+      const it = this.itemFromNode(node);
+      if (it) { this.el.querySelectorAll('.ohe-sel').forEach((x) => x.classList.remove('ohe-sel')); for (let p = it; p; p = p.list.parent) p.el.classList.add('ohe-sel'); }
+      if (m.field) { m.field.focus({ preventScroll: true }); m.field.setSelectionRange(m.start, m.end); }
+      else { const s = sel(); s.removeAllRanges(); s.addRange(m.range); }
+      (m.field || m.range.startContainer.parentElement).scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
     findNext() {
-      if (!this.findRanges?.length) return;
-      this.findPos = (this.findPos + 1) % this.findRanges.length;
-      const r = this.findRanges[this.findPos];
-      const s = sel(); s.removeAllRanges(); s.addRange(r);
-      (r.startContainer.parentElement).scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (!this.findMatches?.length) return;
+      this.findPos = (this.findPos + 1) % this.findMatches.length;
+      this.revealMatch(this.findMatches[this.findPos]);
     }
     replace(q, rep, { all = false, caseSensitive = false } = {}) {
       if (!q) return 0;
+      this.emitChange.flush(); // earlier typing becomes its own undo step
+      if (!this.findMatches || !this.findQ || this.findQ.q !== q || this.findQ.caseSensitive !== caseSensitive) this.find(q, { caseSensitive });
+      const matches = all ? [...this.findMatches] : [this.findMatches[Math.max(0, this.findPos)]].filter(Boolean);
       let count = 0;
-      const flags = caseSensitive ? 'g' : 'gi';
-      const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
-      if (all) {
-        for (const n of this.textNodes()) { const before = n.textContent; const after = before.replace(re, () => (count++, rep)); if (after !== before) n.textContent = after; }
-      } else {
-        const r = this.findRanges?.[Math.max(0, this.findPos)];
-        if (r) { r.deleteContents(); r.insertNode(document.createTextNode(rep)); count = 1; }
+      const hosts = new Set(), fields = new Map();
+      // back to front so earlier offsets/ranges stay valid
+      for (const m of matches.reverse()) {
+        if (m.field) {
+          const v = m.field.value;
+          if (v.slice(m.start, m.end).toLowerCase() !== q.toLowerCase()) continue;
+          m.field.value = v.slice(0, m.start) + rep + v.slice(m.end);
+          fields.set(m.field, true);
+          count++;
+        } else if (m.range.startContainer.isConnected) {
+          const r = m.range;
+          r.deleteContents();
+          if (rep) r.insertNode(document.createTextNode(rep));
+          hosts.add(m.host);
+          count++;
+        }
       }
-      // re-sync every view and code blocks (textareas)
-      this.el.querySelectorAll('textarea.ohe-code-ta').forEach((ta) => { if (all) { const v = ta.value.replace(re, rep); if (v !== ta.value) { ta.value = v; count++; } } });
+      // drop formatting wrappers emptied by a cross-format replacement, then merge text nodes
+      for (const host of hosts) {
+        host.querySelectorAll('strong,b,em,i,u,s,code,mark,sub,sup,small,a,span:not([data-footnote])').forEach((x) => { if (!x.textContent && !x.querySelector('br,[data-footnote],img')) x.remove(); });
+        host.normalize();
+      }
+      for (const f of fields.keys()) f.dispatchEvent(new Event('input', { bubbles: true })); // settings bars / code views update their data
       const resync = (list) => list.items.forEach((it) => { it.view.sync(); (it.view.lists || []).forEach(resync); });
       resync(this.root);
-      this.changed();
+      this.commit(); // one history entry for the whole replace → a single undo restores it
+      this.emitChange.cancel();
       this.find(q, { caseSensitive });
       return count;
     }
@@ -961,6 +1089,7 @@
       it.el.append(gutter, it.body);
       it.view = new VIEWS[b.type](this.editor, it);
       it.view.render();
+      paintChannel(it);
       const ref = this.items[index];
       if (ref) this.el.insertBefore(it.el, ref.el); else this.el.append(it.el);
       this.items.splice(index, 0, it);
@@ -1167,7 +1296,7 @@
 
   class CodeView extends View {
     render() {
-      this.ta = h('textarea', { class: 'ohe-code-ta', spellcheck: 'false', placeholder: 'Paste or type code…', 'aria-label': 'Code' });
+      this.ta = h('textarea', { class: 'ohe-code-ta', spellcheck: 'false', placeholder: 'Paste or type code…', 'aria-label': 'Code', 'data-find': 'code' });
       this.ta.value = this.d.code || '';
       this.lang = h('input', { class: 'ohe-mini', placeholder: 'language', value: this.d.lang || '', 'aria-label': 'Language', list: 'ohe-langs' });
       this.ta.addEventListener('input', () => { this.grow(); this.sync(); this.changed(); });
@@ -1188,7 +1317,8 @@
   /** Generic "card" block: live server-rendered preview + a settings bar. */
   class CardView extends View {
     fields() { return []; }
-    previewDoc() { return { blocks: [{ id: this.b.id, type: this.b.type, data: this.d }] }; }
+    // the editor always previews the block itself, whatever channel it is limited to
+    previewDoc() { const { show_in, ...data } = this.d; return { blocks: [{ id: this.b.id, type: this.b.type, data }] }; }
     render() {
       this.preview = h('div', { class: 'ohe-preview', contenteditable: 'false' });
       this.body.append(this.preview);
@@ -1412,16 +1542,27 @@
       const d = this.d;
       this.wrap.innerHTML = '';
       const grid = h('div', { class: 'ohe-gal-grid', style: { gridTemplateColumns: `repeat(${d.columns || 2}, 1fr)` }, contenteditable: 'false' });
+      this.caps = [];
       (d.images || []).forEach((im, i) => {
+        // caption: inline rich text (bold / italic / links via the floating toolbar), like image captions
+        const cap = richEl('div', im.caption || '', 'Caption (optional)', 'ohe-caption ohe-gal-cap');
+        cap.dataset.idx = i;
+        this.caps.push(cap);
         grid.append(h('div', { class: 'ohe-gal-item' }, h('img', { src: im.src, alt: im.alt || '' }),
-          h('input', { class: 'ohe-mini', placeholder: 'Alt text', value: im.alt || '', oninput: (e) => { im.alt = e.target.value; this.changed(); } }),
-          h('input', { class: 'ohe-mini', placeholder: 'Caption', value: im.caption || '', oninput: (e) => { im.caption = e.target.value; this.changed(); } }),
-          h('button', { type: 'button', class: 'ohe-x', 'aria-label': 'Remove image', onclick: () => { d.images.splice(i, 1); this.draw(); this.changed(); } }, '✕')));
+          h('input', { class: 'ohe-mini', placeholder: 'Alt text', value: im.alt || '', 'data-find': 'alt', oninput: (e) => { im.alt = e.target.value; this.changed(); } }),
+          cap,
+          h('button', { type: 'button', class: 'ohe-x', 'aria-label': 'Remove image', onclick: () => { this.sync(); d.images.splice(i, 1); this.draw(); this.changed(); } }, '✕')));
       });
       grid.append(h('div', { class: 'ohe-gal-add' }, h('button', { type: 'button', class: 'ohe-mini-btn', onclick: () => pickFile('image/*', (f) => this.add(f), true) }, '+ Upload'), h('button', { type: 'button', class: 'ohe-mini-btn', onclick: async () => { const m = await mediaPicker(this.ed, 'image'); if (m) { d.images.push({ src: m.url, alt: m.alt || '' }); this.draw(); this.changed(); } } }, 'Library')));
       this.wrap.append(grid, settingsBar([{ k: 'layout', label: 'Layout', type: 'select', options: [['grid', 'Grid'], ['carousel', 'Carousel (web)']] }, { k: 'columns', label: 'Columns', type: 'select', options: [['2', '2'], ['3', '3'], ['4', '4']] }], d, () => { d.columns = +d.columns; this.draw(); this.changed(); }));
     }
-    async add(f) { try { const r = await upload(this.ed, f); this.d.images.push({ src: r.url, alt: '' }); this.draw(); this.changed(); } catch (e) { OHToast(e.message); } }
+    sync() { (this.caps || []).forEach((cap) => { const im = this.d.images?.[+cap.dataset.idx]; if (im && cap.isConnected) { const v = cleanInline(cap); if (v) im.caption = v; else delete im.caption; } }); }
+    onKey(e) {
+      // captions are single-line inline text
+      if (e.target.closest && e.target.closest('.ohe-gal-cap') && e.key === 'Enter') { e.preventDefault(); return true; }
+      return false;
+    }
+    async add(f) { try { const r = await upload(this.ed, f); this.sync(); this.d.images.push({ src: r.url, alt: '' }); this.draw(); this.changed(); } catch (e) { OHToast(e.message); } }
     async uploadFile(f) { return this.add(f); }
   }
 
@@ -1632,13 +1773,26 @@
         const up = h('button', { type: 'button', class: 'ohe-mini-btn', onclick: () => pickFile('image/*', async (file) => { try { const r = await upload(ed, file); txt.value = r.url; data[f.k] = r.url; onChange(); } catch (e) { OHToast(e.message); } }) }, 'Upload');
         input = h('span', { class: 'ohe-color-wrap' }, txt, up);
       } else {
-        input = h('input', { class: 'ohe-mini', type: f.type === 'number' ? 'number' : f.type === 'range' ? 'range' : f.type === 'url' ? 'url' : 'text', value: v ?? '', placeholder: f.ph || '', min: f.min, max: f.max });
+        input = h('input', { class: 'ohe-mini', type: f.type === 'number' ? 'number' : f.type === 'range' ? 'range' : f.type === 'url' ? 'url' : 'text', value: v ?? '', placeholder: f.ph || '', min: f.min, max: f.max, 'data-find': !f.type || f.type === 'text' ? f.k : null });
         input.addEventListener('input', () => { data[f.k] = f.type === 'number' || f.type === 'range' ? (input.value === '' ? '' : +input.value) : input.value; onChange(); });
       }
       bar.append(h('label', { class: f.wide ? 'wide' : '' }, h('span', {}, f.label), input));
     }
     extra.forEach((x) => bar.append(x));
     return bar;
+  }
+
+  // ───────── per-block channel (email / web) ─────────
+  const showIn = (b) => (b && b.data && (b.data.show_in === 'email' || b.data.show_in === 'web') ? b.data.show_in : '');
+  function paintChannel(it) {
+    const ch = showIn(it.block);
+    let badge = it.el.querySelector(':scope > .ohe-chan');
+    it.el.classList.toggle('ohe-only-email', ch === 'email');
+    it.el.classList.toggle('ohe-only-web', ch === 'web');
+    if (!ch) { badge && badge.remove(); return; }
+    if (!badge) { badge = h('span', { class: 'ohe-chan', contenteditable: 'false' }); it.el.insertBefore(badge, it.body); }
+    badge.textContent = ch === 'email' ? '✉ Email only' : '🌐 Web only';
+    badge.title = ch === 'email' ? 'Only in the email — hidden on the website (change in the block menu ⋮⋮)' : 'Only on the website — left out of the email (change in the block menu ⋮⋮)';
   }
 
   // ───────── block menu ─────────
@@ -1648,6 +1802,13 @@
     const items = [
       ...(textish ? [{ label: 'Turn into: Text', value: 'to:paragraph' }, { label: 'Turn into: Heading 2', value: 'to:h2' }, { label: 'Turn into: Heading 3', value: 'to:h3' }, { label: 'Turn into: Bulleted list', value: 'to:list' }, { label: 'Turn into: Numbered list', value: 'to:olist' }, { label: 'Turn into: Quote', value: 'to:quote' }, { label: 'Turn into: Code', value: 'to:code' }, { sep: true }] : []),
       ...(['paragraph', 'heading'].includes(t) ? [{ label: 'Align left', value: 'align:left' }, { label: 'Align center', value: 'align:center' }, { label: 'Align right', value: 'align:right' }, { sep: true }] : []),
+      ...(ed.features.ai && ['paragraph', 'heading', 'quote'].includes(t) ? [{ label: '✨ AI: rewrite / fix / translate…', value: 'ai' }, { sep: true }] : []),
+      ...((ed.opts.channels ?? !ed.opts.compact) ? [
+        { label: `Show in: Email and web${!showIn(it.block) ? '  ✓' : ''}`, value: 'show:' },
+        { label: `Show in: Email only${showIn(it.block) === 'email' ? '  ✓' : ''}`, value: 'show:email' },
+        { label: `Show in: Web only${showIn(it.block) === 'web' ? '  ✓' : ''}`, value: 'show:web' },
+        { sep: true },
+      ] : []),
       { label: 'Duplicate', value: 'dup', sub: isMac ? '⌘D' : 'Ctrl+D' }, { label: 'Move up', value: 'up' }, { label: 'Move down', value: 'down' },
       ...(ed.opts.onComment ? [{ label: 'Comment', value: 'comment' }] : []),
       { label: 'Wrap in section', value: 'wrap' },
@@ -1656,6 +1817,8 @@
     const v = await menuBox(anchor, items);
     if (!v) return;
     if (v.startsWith('to:')) ed.convert(it, v.slice(3));
+    else if (v === 'ai') ed.aiEdit(anchor, it);
+    else if (v.startsWith('show:')) { it.view.sync(); const ch = v.slice(5); if (ch) it.block.data.show_in = ch; else delete it.block.data.show_in; paintChannel(it); ed.changed(); }
     else if (v.startsWith('align:')) { it.view.sync(); it.block.data.align = v.slice(6) === 'left' ? undefined : v.slice(6); it.view.el.style.textAlign = it.block.data.align || ''; ed.changed(); }
     else if (v === 'dup') ed.duplicate(it);
     else if (v === 'up') ed.move(it, -1);
@@ -1667,7 +1830,7 @@
 
   // ───────── small UI primitives (menus, prompts, pickers) ─────────
   let openMenu = null;
-  function closeMenu(val = null) { if (openMenu) { const m = openMenu; openMenu = null; m.el.remove(); m.resolve(val); } }
+  function closeMenu(val = null) { if (openMenu) { const m = openMenu; openMenu = null; if (m.off) document.removeEventListener('mousedown', m.off); m.el.remove(); m.resolve(val); } }
   function menuBox(anchor, items) {
     closeMenu();
     return new Promise((resolve) => {
@@ -1676,8 +1839,9 @@
       document.body.append(el);
       const r = anchor.getBoundingClientRect();
       Object.assign(el.style, { top: Math.min(r.bottom + 4, window.innerHeight - el.offsetHeight - 8) + window.scrollY + 'px', left: Math.max(8, Math.min(r.left, window.innerWidth - el.offsetWidth - 8)) + window.scrollX + 'px' });
-      openMenu = { el, resolve };
-      setTimeout(() => { const off = (e) => { if (!el.contains(e.target)) { document.removeEventListener('mousedown', off); closeMenu(); } }; document.addEventListener('mousedown', off); });
+      const m = (openMenu = { el, resolve });
+      // outside click closes THIS menu only (a stale listener must not close a menu opened after it)
+      setTimeout(() => { if (openMenu !== m) return; m.off = (e) => { if (!el.contains(e.target) && openMenu === m) closeMenu(); }; document.addEventListener('mousedown', m.off); });
       el.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
       el.querySelector('button')?.focus({ preventScroll: true });
     });
@@ -1813,9 +1977,54 @@
     return out;
   }
 
+  // ── font-size heading detection (Google Docs / Word paste) ──
+  /** font-size in pt from an inline style ('20pt', '26.6667px', '1.5em' relative to 11pt), or 0. */
+  function ptOf(style) {
+    const m = /font-size:\s*([\d.]+)\s*(pt|px|em|rem)?/i.exec(style || '');
+    if (!m) return 0;
+    const v = parseFloat(m[1]), u = (m[2] || 'px').toLowerCase();
+    return u === 'pt' ? v : u === 'px' ? v * 0.75 : v * 11;
+  }
+  /** Map each text node's length to the nearest ancestor font-size within `root`. */
+  function textSizes(root) {
+    const out = [];
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let t;
+    while ((t = w.nextNode())) {
+      const len = t.textContent.replace(/\s+/g, '').length;
+      if (!len) continue;
+      let size = 0;
+      for (let el = t.parentElement; el && el !== root.parentElement && !size; el = el.parentElement) size = ptOf(el.getAttribute('style'));
+      out.push([len, size]);
+    }
+    return out;
+  }
+  /** The body text size of the pasted document: the font-size covering the most characters (default 11pt). */
+  function bodyFontSize(root) {
+    const tally = new Map();
+    for (const [len, size] of textSizes(root)) if (size) tally.set(size, (tally.get(size) || 0) + len);
+    let best = 0, bestN = 0;
+    for (const [size, n] of tally) if (n > bestN) { best = size; bestN = n; }
+    return best || 11;
+  }
+  /** Heading level (2-4) for a short paragraph whose text is all clearly larger than the body size, else 0. */
+  function sizeHeading(p, base) {
+    const text = p.textContent.replace(/\s+/g, ' ').trim();
+    if (!text || text.length > 140 || p.querySelector('br') || /[.!?:;,]$/.test(text) && text.length > 60) return 0;
+    const sizes = textSizes(p);
+    if (!sizes.length || sizes.some(([, s]) => !s)) return 0;
+    const min = Math.min(...sizes.map(([, s]) => s));
+    const ratio = min / base;
+    if (ratio >= 1.6) return 2;   // e.g. 20pt+ over 11pt body (Docs "Heading 1" size)
+    if (ratio >= 1.25) return 3;  // e.g. 14-16pt (Docs "Heading 2/3" sizes)
+    if (ratio >= 1.15) return 4;  // e.g. 13pt
+    return 0;
+  }
+
   function htmlToBlocks(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
     doc.querySelectorAll('script,style,meta,link,title,noscript').forEach((x) => x.remove());
+    const baseSize = bodyFontSize(doc.body);
     const out = [];
     let pendingInline = document.createElement('div');
     const flush = () => { const hh = cleanInline(pendingInline); if (hh) out.push(P(hh)); pendingInline = document.createElement('div'); };
@@ -1835,9 +2044,12 @@
         if (/^H[1-6]$/.test(tag)) { flush(); const hh = cleanInline(n); if (hh) out.push({ id: uid(), type: 'heading', data: { level: Math.min(4, Math.max(2, +tag[1])), html: hh } }); continue; }
         if (tag === 'P') {
           flush();
-          // Google Docs marks headings via font-size in spans; detect large bold-only paragraphs
+          // Google Docs / Word mark manually-styled headings only via font-size on spans: a short paragraph whose
+          // text is all noticeably larger than the document's body size becomes a heading.
           const hh = cleanInline(n);
-          if (hh) out.push(P(hh));
+          const lvl = hh ? sizeHeading(n, baseSize) : 0;
+          if (lvl) out.push({ id: uid(), type: 'heading', data: { level: lvl, html: hh.replace(/<\/?(strong|b)>/gi, '') } });
+          else if (hh) out.push(P(hh));
           n.querySelectorAll('img').forEach((img) => img.src && /^https?:/.test(img.src) && out.push({ id: uid(), type: 'image', data: { ...TYPES.image.data(), src: img.src, alt: img.alt || '' } }));
           continue;
         }

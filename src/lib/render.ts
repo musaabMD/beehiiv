@@ -106,7 +106,41 @@ export function parseEmbed(url: string): { provider: string; id: string; url: st
 
 const PROVIDER_LABEL: Record<string, string> = { youtube: 'YouTube', x: 'X', tiktok: 'TikTok', instagram: 'Instagram', bluesky: 'Bluesky', stocktwits: 'Stocktwits', spotify: 'Spotify', vimeo: 'Vimeo', apple_podcasts: 'Apple Podcasts', loom: 'Loom' };
 
-function webEmbed(e: { provider: string; id: string; url: string }, caption: string): string {
+// Bluesky: embed.bsky.app needs the author's DID, not the handle. Resolve once per isolate (cached) and
+// persist it on the block at save time (`data.did`) so renders normally need no network round trip.
+const didCache = new Map<string, { did: string | null; at: number }>();
+export async function resolveBlueskyDid(handle: string): Promise<string | null> {
+  const h = decodeURIComponent(handle).trim().toLowerCase().replace(/^@/, '');
+  if (!h) return null;
+  if (/^did:[a-z]+:[\w.:%-]+$/.test(h)) return h;
+  const hit = didCache.get(h);
+  if (hit && Date.now() - hit.at < (hit.did ? 86_400_000 : 300_000)) return hit.did;
+  let did: string | null = null;
+  try {
+    const r = await fetch(`https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(h)}`, { signal: AbortSignal.timeout(3000) });
+    if (r.ok) { const j: any = await r.json(); if (typeof j.did === 'string' && /^did:[a-z]+:[\w.:%-]+$/i.test(j.did)) did = j.did; }
+  } catch { /* network error / timeout → link card fallback */ }
+  didCache.set(h, { did, at: Date.now() });
+  return did;
+}
+
+/** Bluesky/Stocktwits author handle (from the URL) for link cards. */
+function embedAuthor(e: { provider: string; url: string }): string {
+  const m = e.provider === 'bluesky' ? e.url.match(/bsky\.app\/profile\/([^/?#]+)/) : e.provider === 'stocktwits' ? e.url.match(/stocktwits\.com\/([^/?#]+)\/message/) : null;
+  if (!m) return '';
+  let h = m[1];
+  try { h = decodeURIComponent(h); } catch {}
+  return h.startsWith('did:') ? '' : '@' + h.replace(/^@/, '');
+}
+
+function webLinkCard(e: { provider: string; url: string }, caption: string): string {
+  const label = PROVIDER_LABEL[e.provider] || 'Link';
+  const who = embedAuthor(e);
+  const what = e.provider === 'stocktwits' ? 'message' : 'post';
+  return `<figure class="oh-figure"><a class="oh-linkcard oh-linkcard-${esc(e.provider)}" href="${esc(e.url)}" target="_blank" rel="noopener" style="display:block;max-width:550px;margin:0 auto;padding:14px 16px;border:1px solid var(--border,#e5e7eb);border-radius:12px;text-decoration:none;color:inherit;text-align:left"><strong>${who ? `${esc(who)}’s ${what} on ${label}` : `View on ${label}`} →</strong><br><small style="opacity:.7;word-break:break-all">${esc(e.url)}</small></a>${caption ? `<figcaption>${caption}</figcaption>` : ''}</figure>`;
+}
+
+function webEmbed(e: { provider: string; id: string; url: string; did?: string | null }, caption: string): string {
   const frame = (src: string, ratio = '56.25%', extra = '') =>
     `<div class="oh-embed" style="position:relative;padding-bottom:${ratio};height:0;overflow:hidden;border-radius:8px"><iframe src="${esc(src)}" loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;border:0" allow="autoplay; encrypted-media; picture-in-picture; clipboard-write" allowfullscreen ${extra}></iframe></div>`;
   let inner = '';
@@ -118,9 +152,16 @@ function webEmbed(e: { provider: string; id: string; url: string }, caption: str
     case 'apple_podcasts': inner = `<iframe src="https://embed.podcasts.apple.com/${esc(e.id)}" width="100%" height="175" style="border:0;border-radius:12px" loading="lazy"></iframe>`; break;
     case 'tiktok': inner = `<iframe src="https://www.tiktok.com/embed/v2/${e.id}" width="100%" height="740" style="border:0;max-width:340px" loading="lazy" allowfullscreen></iframe>`; break;
     case 'instagram': inner = `<iframe src="https://www.instagram.com/p/${e.id}/embed" width="100%" height="560" style="border:0;max-width:480px" loading="lazy"></iframe>`; break;
-    case 'bluesky': inner = `<iframe src="https://embed.bsky.app/embed/${esc(e.id.replace('/', '/app.bsky.feed.post/'))}" width="100%" height="380" style="border:0;max-width:520px" loading="lazy"></iframe>`; break;
+    case 'bluesky': {
+      // embed.bsky.app wants did:…/app.bsky.feed.post/<rkey>; without a resolved DID show a link card, not a broken iframe.
+      const rkey = e.id.split('/').pop() || '';
+      if (!e.did || !/^[\w-]+$/.test(rkey)) return webLinkCard(e, caption);
+      inner = `<iframe src="https://embed.bsky.app/embed/${esc(e.did)}/app.bsky.feed.post/${esc(rkey)}" width="100%" height="380" style="border:0;max-width:520px" loading="lazy"></iframe>`;
+      break;
+    }
     case 'x': inner = `<iframe src="https://platform.twitter.com/embed/Tweet.html?id=${e.id}" width="100%" height="420" style="border:0;max-width:550px" loading="lazy"></iframe>`; break;
-    case 'stocktwits': inner = `<iframe src="https://api.stocktwits.com/widgets/message/${e.id}" width="100%" height="300" style="border:0;max-width:550px" loading="lazy"></iframe>`; break;
+    // Stocktwits has no working public embed (the old widgets endpoint answers with a bot challenge): link card.
+    case 'stocktwits': return webLinkCard(e, caption);
   }
   return `<figure class="oh-figure">${inner}${caption ? `<figcaption>${caption}</figcaption>` : ''}</figure>`;
 }
@@ -131,7 +172,9 @@ function emailEmbed(e: { provider: string; id: string; url: string }, caption: s
   if (e.provider === 'youtube') {
     return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 0 ${s.spacing}px 0"><a href="${esc(e.url)}" target="_blank" style="display:block;text-decoration:none"><img src="https://img.youtube.com/vi/${e.id}/hqdefault.jpg" width="${s.width - 48}" alt="Watch on YouTube" style="display:block;width:100%;height:auto;border:0;border-radius:${s.radius}px"></a>${caption ? `<p style="margin:8px 0 0;font-size:14px;color:${s.muted};text-align:center">${caption}</p>` : ''}<p style="margin:6px 0 0;font-size:13px;text-align:center"><a href="${esc(e.url)}" style="color:${s.link}">▶ Watch on YouTube</a></p></td></tr></table>`;
   }
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ${s.border};border-radius:${s.radius}px"><tr><td style="padding:14px 16px;font-family:${s.font};font-size:15px;color:${s.text}"><a href="${esc(e.url)}" target="_blank" style="color:${s.text};text-decoration:none;display:block"><strong>View on ${label} →</strong><br><span style="color:${s.muted};font-size:13px;word-break:break-all">${esc(e.url)}</span></a>${caption ? `<div style="margin-top:6px;font-size:14px;color:${s.muted}">${caption}</div>` : ''}</td></tr></table><div style="height:${s.spacing}px;line-height:${s.spacing}px">&nbsp;</div>`;
+  const who = embedAuthor(e);
+  const head = who ? `${esc(who)}’s ${e.provider === 'stocktwits' ? 'message' : 'post'} on ${label} →` : `View on ${label} →`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ${s.border};border-radius:${s.radius}px"><tr><td style="padding:14px 16px;font-family:${s.font};font-size:15px;color:${s.text}"><a href="${esc(e.url)}" target="_blank" style="color:${s.text};text-decoration:none;display:block"><strong>${head}</strong><br><span style="color:${s.muted};font-size:13px;word-break:break-all">${esc(e.url)}</span></a>${caption ? `<div style="margin-top:6px;font-size:14px;color:${s.muted}">${caption}</div>` : ''}</td></tr></table><div style="height:${s.spacing}px;line-height:${s.spacing}px">&nbsp;</div>`;
 }
 
 // ───────── main renderer ─────────
@@ -174,10 +217,18 @@ function passesDynamic(st: State, d: any): boolean {
   return d.mode === 'hide' ? !match : match;
 }
 
+/** Is this block rendered in the given channel? (`data.show_in`: 'email' | 'web' | absent = both) */
+export function showsIn(b: Block, mode: 'email' | 'web'): boolean {
+  const v = b && b.data && b.data.show_in;
+  return v !== 'email' && v !== 'web' ? true : v === mode;
+}
+
 async function renderBlocks(st: State, blocks: Block[]): Promise<string> {
   const parts: string[] = [];
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i];
+    // Per-block channel: data.show_in = 'email' (email only) | 'web' (web only); absent = both.
+    if (!showsIn(b, st.ctx.mode)) continue;
     if (b.type === 'paywall') {
       if (st.ctx.access) {
         parts.push(st.ctx.preview ? `<div class="oh-paywall-marker">— Paywall break: content below is premium —</div>` : '');
@@ -280,12 +331,13 @@ async function renderBlock(st: State, b: Block): Promise<string> {
         const cols = Math.min(Number(d.columns) || 2, 3);
         const rows: string[] = [];
         for (let i = 0; i < imgs.length; i += cols) {
-          rows.push(`<tr>${imgs.slice(i, i + cols).map((im) => `<td width="${Math.floor(100 / cols)}%" valign="top" style="padding:4px"><img src="${esc(im.src)}" alt="${esc(im.alt || '')}" width="${Math.floor((s.width - 60) / cols)}" style="display:block;width:100%;height:auto;border-radius:${s.radius}px"></td>`).join('')}</tr>`);
+          rows.push(`<tr>${imgs.slice(i, i + cols).map((im) => { const cap = im.caption ? rich(st, im.caption) : ''; return `<td width="${Math.floor(100 / cols)}%" valign="top" style="padding:4px"><img src="${esc(im.src)}" alt="${esc(im.alt || '')}" width="${Math.floor((s.width - 60) / cols)}" style="display:block;width:100%;height:auto;border-radius:${s.radius}px">${cap ? `<p style="margin:6px 0 0;font-family:${s.font};font-size:13px;line-height:1.4;color:${s.muted};text-align:center">${cap}</p>` : ''}</td>`; }).join('')}</tr>`);
         }
         return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${s.spacing}px">${rows.join('')}</table>`;
       }
       const kind = d.layout === 'carousel' ? 'oh-carousel' : 'oh-grid';
-      return `<div class="${kind}" style="--cols:${Number(d.columns) || 2}">${imgs.map((im) => `<figure><img src="${esc(im.src)}" alt="${esc(im.alt || '')}" loading="lazy">${im.caption ? `<figcaption>${esc(im.caption)}</figcaption>` : ''}</figure>`).join('')}</div>`;
+      // captions are inline rich text (bold/italic/links), same as image captions
+      return `<div class="${kind}" style="--cols:${Number(d.columns) || 2}">${imgs.map((im) => { const cap = im.caption ? rich(st, im.caption) : ''; return `<figure><img src="${esc(im.src)}" alt="${esc(im.alt || '')}" loading="lazy">${cap ? `<figcaption>${cap}</figcaption>` : ''}</figure>`; }).join('')}</div>`;
     }
     case 'button': {
       const url = d.url || '#';
@@ -322,7 +374,11 @@ async function renderBlock(st: State, b: Block): Promise<string> {
       const e = parseEmbed(d.url || '');
       const cap = d.caption ? rich(st, d.caption) : '';
       if (!e) return d.url ? (E ? `<p style="${EMAIL_P(s)}"><a href="${esc(d.url)}" style="color:${s.link}">${esc(d.url)}</a></p>` : `<p><a href="${esc(d.url)}">${esc(d.url)}</a></p>`) : '';
-      return E ? emailEmbed(e, cap, s) : webEmbed(e, cap);
+      if (E) return emailEmbed(e, cap, s);
+      // DID stored at save time (data.did for data.did_for = handle), else resolved now (cached per isolate).
+      const handle = e.id.split('/')[0];
+      const did = e.provider === 'bluesky' ? (typeof d.did === 'string' && /^did:[a-z]+:/.test(d.did) && (!d.did_for || d.did_for === handle) ? d.did : await resolveBlueskyDid(handle)) : null;
+      return webEmbed({ ...e, did }, cap);
     }
     case 'video': {
       if (E) {
@@ -370,8 +426,19 @@ async function renderBlock(st: State, b: Block): Promise<string> {
       const inner = await renderBlocks(st, d.blocks || []);
       const pad = ss.padding ?? 20, bg = ss.bg || 'transparent', border = ss.border_width ? `${ss.border_width}px ${ss.border_style || 'solid'} ${ss.border_color || s.border}` : 'none';
       const radius = ss.radius ?? s.radius;
-      if (E)
-        return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${ss.margin ?? s.spacing}px"><tr><td ${bg !== 'transparent' ? `bgcolor="${esc(bg)}"` : ''} style="background:${esc(bg)};${ss.bg_image ? `background-image:url(${esc(ss.bg_image)});background-size:cover;` : ''}border:${border};border-radius:${radius}px;padding:${pad}px;color:${esc(ss.color || s.text)}">${inner}</td></tr></table>`;
+      if (E) {
+        const img = ss.bg_image && /^https?:\/\//i.test(String(ss.bg_image)) ? String(ss.bg_image) : '';
+        if (img) {
+          // Outlook desktop (Word engine) ignores CSS background images: draw a VML rect filled with the image
+          // behind the content inside MSO conditionals. Other clients use the background attribute/CSS.
+          const fillColor = /^#[0-9a-f]{3,8}$/i.test(bg) ? bg : s.content_bg;
+          return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${ss.margin ?? s.spacing}px"><tr><td background="${esc(img)}" bgcolor="${esc(fillColor)}" valign="top" style="background:${esc(bg)};background-image:url('${esc(img)}');background-size:cover;background-position:center;border:${border};border-radius:${radius}px;color:${esc(ss.color || s.text)}">`
+            + `<!--[if gte mso 9]><v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="mso-width-percent:1000;"><v:fill type="frame" src="${esc(img)}" color="${esc(fillColor)}" /><v:textbox style="mso-fit-shape-to-text:true" inset="0,0,0,0"><![endif]-->`
+            + `<div style="padding:${pad}px">${inner}</div>`
+            + `<!--[if gte mso 9]></v:textbox></v:rect><![endif]--></td></tr></table>`;
+        }
+        return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${ss.margin ?? s.spacing}px"><tr><td ${bg !== 'transparent' ? `bgcolor="${esc(bg)}"` : ''} style="background:${esc(bg)};border:${border};border-radius:${radius}px;padding:${pad}px;color:${esc(ss.color || s.text)}">${inner}</td></tr></table>`;
+      }
       return `<section class="oh-section" style="background:${esc(bg)};${ss.bg_image ? `background-image:url(${esc(ss.bg_image)});background-size:cover;` : ''}border:${border};border-radius:${radius}px;padding:${pad}px;margin-bottom:${ss.margin ?? 16}px;${ss.color ? `color:${esc(ss.color)}` : ''}">${inner}</section>`;
     }
     case 'dynamic': {

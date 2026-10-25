@@ -218,3 +218,13 @@ input[type=range].ohe-mini{padding:0;border:0;background:none;width:120px}
 .ohe-gif-url{display:flex;gap:6px;padding:0 16px 10px}.ohe-gif-url .input{flex:1}
 .ohe-gif-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}.ohe-gif-grid img{object-fit:cover}
 .ohe-gif-attr{text-align:right;padding:4px 16px 12px;margin:0}
+/* per-block channel (email only / web only) */
+.ohe-chan{position:absolute;right:0;top:-9px;z-index:2;font:600 10.5px Inter,sans-serif;letter-spacing:.2px;padding:1px 7px;border-radius:999px;pointer-events:none;user-select:none}
+.ohe-only-email>.ohe-chan{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}
+.ohe-only-web>.ohe-chan{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0}
+.ohe-only-email,.ohe-only-web{box-shadow:inset 3px 0 0 var(--chan,#bfdbfe)}.ohe-only-web{--chan:#bbf7d0}
+/* gallery captions are rich text */
+.ohe-gal-cap{font-size:13px;margin:0;padding:3px 6px;border:1px solid #e5e7eb;border-radius:6px;min-height:1.6em;text-align:left;outline:none;background:#fff}
+.ohe-gal-cap:focus{border-color:#f59e0b}
+.ohe-gal-cap:empty::before{content:attr(data-ph);color:#9ca3af}
+.ohe-find-hit{outline:2px solid #fde047!important;background:#fefce8!important}
