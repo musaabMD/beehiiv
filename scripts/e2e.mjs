@@ -98,6 +98,8 @@ ok(outbox && /Hi Reader|Hi there/.test(outbox.html) || (outbox && outbox.html.in
 
 console.log('6. Open + click tracking');
 const del = dels.find((d) => d.email === subEmail) || dels[0];
+// Clicks within 10s of delivery count as link scanners, so pretend this email went out a minute ago.
+sql(`UPDATE deliveries SET sent_at = sent_at - 60000 WHERE id = '${del.id}'`);
 await fetch(`${BASE}/t/o/${del.id}.gif`, { headers: { 'user-agent': UA } });
 await sleep(4000);
 const clickUrl = [...(outbox?.html || "").matchAll(/href="([^"]*\/t\/c\/[^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, "&")).find((u) => decodeURIComponent(u).includes("example.com"));
