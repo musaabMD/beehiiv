@@ -183,7 +183,7 @@ Modules: auth, dashboard, posts, website, podcasts, community, events, audience,
 - [x] (monetize) payouts through Stripe
 
 ## Events / webinars
-- [x] (events) live webinars up to 10,000 attendees — *peer-to-peer streaming built for small/medium rooms; 10k audiences need a Cloudflare Realtime SFU URL in settings (`live_sfu_url`), relay not yet wired*
+- [x] (events) live webinars up to 10,000 attendees — *large-audience mode relays through Cloudflare Realtime SFU (host uploads once, attendees pull from the edge); enable via Settings → Integrations → Cloudflare Realtime or `REALTIME_APP_ID`/`REALTIME_APP_TOKEN` secrets. Verified with a WebRTC mock SFU; peer-to-peer fallback when not configured*
 - [x] (events) ticket sales in 10 currencies
 - [x] (events) native streaming with video, screen share, chat (WebRTC + Durable Object chat)
 - [x] (events) no Zoom required

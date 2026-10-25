@@ -40,6 +40,21 @@ export class LiveRoom implements DurableObject {
     if (url.pathname.endsWith('/info')) {
       return Response.json({ count: this.count(), status: (await this.state.storage.get<string>('status')) || 'scheduled' });
     }
+    // Internal (called only by the authenticated /live/:id/sfu route): host's SFU publication.
+    if (url.pathname.endsWith('/sfu-state')) {
+      if (req.method === 'PUT') {
+        const pub = await req.json<{ sessionId: string; tracks: string[] }>();
+        await this.state.storage.put('sfu', pub);
+        this.broadcast({ type: 'sfu', publication: pub }, (x) => x.role === 'attendee');
+        return Response.json({ ok: true });
+      }
+      if (req.method === 'DELETE') {
+        await this.state.storage.delete('sfu');
+        this.broadcast({ type: 'sfu', publication: null }, (x) => x.role === 'attendee');
+        return Response.json({ ok: true });
+      }
+      return Response.json({ publication: (await this.state.storage.get('sfu')) || null });
+    }
     if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected WebSocket', { status: 426 });
     const role = req.headers.get('x-role') === 'host' ? 'host' : 'attendee';
     const uid = req.headers.get('x-uid') || crypto.randomUUID();
@@ -53,12 +68,12 @@ export class LiveRoom implements DurableObject {
     const a: Att = { peer: crypto.randomUUID().slice(0, 12), uid, name, role, eventId, joinedAt: Date.now() };
     this.state.acceptWebSocket(server, [role]);
     server.serializeAttachment(a);
-    const [chat, pin, status, muted] = await Promise.all([
-      this.state.storage.get<ChatMsg[]>('chat'), this.state.storage.get<string>('pin'), this.state.storage.get<string>('status'), this.state.storage.get<string[]>('muted'),
+    const [chat, pin, status, muted, sfu] = await Promise.all([
+      this.state.storage.get<ChatMsg[]>('chat'), this.state.storage.get<string>('pin'), this.state.storage.get<string>('status'), this.state.storage.get<string[]>('muted'), this.state.storage.get('sfu'),
     ]);
     this.send(server, {
       type: 'welcome', you: { peer: a.peer, role, name, uid }, chat: chat || [], pin: pin ? (chat || []).find((m) => m.id === pin) || null : null,
-      status: status || 'scheduled', count: this.count(), muted: (muted || []).includes(uid),
+      status: status || 'scheduled', count: this.count(), muted: (muted || []).includes(uid), sfu: sfu || null,
       peers: role === 'host' ? this.attendees().map((x) => ({ peer: x.peer, name: x.name, uid: x.uid, muted: (muted || []).includes(x.uid) })) : undefined,
       hosts: this.sockets().map((w) => this.att(w)).filter((x) => x?.role === 'host').map((x) => x!.peer),
     });
@@ -148,6 +163,7 @@ export class LiveRoom implements DurableObject {
       case 'stream': {
         const status = ['live', 'ended', 'scheduled'].includes(msg.status) ? msg.status : 'scheduled';
         await this.state.storage.put('status', status);
+        if (status !== 'live') await this.state.storage.delete('sfu');
         try {
           await this.env.DB.prepare(`UPDATE live_events SET stream_status = ?, stream_started_at = CASE WHEN ? = 'live' THEN COALESCE(stream_started_at, ?) ELSE stream_started_at END WHERE id = ?`)
             .bind(status, status, Date.now(), me.eventId).run();

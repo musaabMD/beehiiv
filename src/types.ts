@@ -21,6 +21,9 @@ export interface Env {
   TURNSTILE_SECRET?: string;
   EMAIL_MODE?: string; // 'simulate' forces outbox-only; default sends via binding when present
   SUPERADMIN_EMAILS?: string; // comma separated
+  REALTIME_APP_ID?: string;   // Cloudflare Realtime SFU app (large live events)
+  REALTIME_APP_TOKEN?: string;
+  REALTIME_API_BASE?: string; // override for testing / self-hosted SFU
 }
 
 export type Role = 'owner' | 'admin' | 'member' | 'contributor';

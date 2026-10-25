@@ -17,7 +17,7 @@
 
   const S = (window.OHLive = {
     ws: null, me: null, status: cfg.status || 'scheduled', peers: new Map(), people: new Map(), hostPc: null,
-    localStream: null, camTrack: null, micTrack: null, screenTrack: null, recorder: null, chunks: [], removed: false, signals: 0, chat: [],
+    localStream: null, camTrack: null, micTrack: null, screenTrack: null, recorder: null, chunks: [], removed: false, signals: 0, chat: [], sfuPc: null, sfuBusy: false,
   });
   const rtcConfig = { iceServers: cfg.iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }] };
 
@@ -129,6 +129,11 @@
   }
 
   function replaceVideoTrack(track) {
+    if (S.sfuPc) {
+      const sender = S.sfuPc.getSenders().find((x) => x.track && x.track.kind === 'video');
+      if (sender && track) sender.replaceTrack(track).catch(() => {});
+      else if (track && S.status === 'live') setTimeout(publishSFU, 0);
+    }
     for (const pc of S.peers.values()) {
       const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video') || pc.getSenders().find((s) => !s.track);
       if (sender) sender.replaceTrack(track).catch(() => {});
@@ -138,6 +143,66 @@
     S.localStream.getVideoTracks().forEach((t) => S.localStream.removeTrack(t));
     if (track) S.localStream.addTrack(track);
     video.srcObject = S.localStream;
+  }
+
+  // ───────── Cloudflare Realtime SFU (large audiences): host publishes once, attendees pull from the edge
+  const SFU = !!cfg.sfu;
+  const sfuQuery = (cfg.ws.split('?')[1] || '');
+  async function sfuPost(body) {
+    const r = await fetch(cfg.sfuEndpoint + (sfuQuery ? '?' + sfuQuery : ''), { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw Object.assign(new Error(j.message || j.error || r.status), { status: r.status, code: j.error });
+    return j;
+  }
+  function waitIce(pc, ms = 2500) {
+    if (pc.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((res) => {
+      const t = setTimeout(res, ms);
+      pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
+    });
+  }
+  function closeSfu() { if (S.sfuPc) { try { S.sfuPc.close(); } catch {} S.sfuPc = null; } }
+
+  async function publishSFU() {
+    if (!S.localStream || S.sfuBusy) return;
+    S.sfuBusy = true;
+    try {
+      closeSfu();
+      const pc = new RTCPeerConnection(rtcConfig);
+      S.sfuPc = pc;
+      const trs = S.localStream.getTracks().map((t) => pc.addTransceiver(t, { direction: 'sendonly', streams: [S.localStream] }));
+      await pc.setLocalDescription(await pc.createOffer());
+      await waitIce(pc);
+      const r = await sfuPost({ action: 'publish', sdp: pc.localDescription.sdp, tracks: trs.map((tr) => ({ mid: tr.mid, trackName: tr.sender.track.kind })) });
+      await pc.setRemoteDescription(r.answer);
+      pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed' && S.status === 'live') { toast('Relay connection lost — reconnecting…'); setTimeout(publishSFU, 1500); } };
+    } catch (err) { toast('Could not start the relay: ' + err.message); }
+    finally { S.sfuBusy = false; }
+  }
+
+  async function pullSFU() {
+    if (S.sfuBusy) return;
+    S.sfuBusy = true;
+    try {
+      closeSfu();
+      const pc = new RTCPeerConnection(rtcConfig);
+      S.sfuPc = pc;
+      const stream = new MediaStream();
+      pc.ontrack = (e) => {
+        stream.addTrack(e.track);
+        if (video.srcObject !== stream) { video.srcObject = stream; video.muted = true; video.play().catch(() => {}); $('#live-unmute')?.classList.remove('hide'); }
+        hideOverlay();
+      };
+      pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed' && S.status === 'live') setTimeout(pullSFU, 2000); };
+      const r = await sfuPost({ action: 'pull' });
+      await pc.setRemoteDescription(r.offer);
+      await pc.setLocalDescription(await pc.createAnswer());
+      await waitIce(pc);
+      await sfuPost({ action: 'answer', sessionId: r.sessionId, sdp: pc.localDescription.sdp });
+    } catch (err) {
+      if (err.code === 'not_live') showOverlay('The host is live — waiting for video…');
+      else { console.warn('sfu pull failed', err); setTimeout(() => { if (S.status === 'live') pullSFU(); }, 4000); }
+    } finally { S.sfuBusy = false; }
   }
 
   // ───────── socket
@@ -160,20 +225,23 @@
           if (host) {
             S.people = new Map((m.peers || []).map((p) => [p.peer, p]));
             renderPeople();
-            if (m.status === 'live' && S.localStream) for (const p of S.people.keys()) offerTo(p);
-          }
+            if (m.status === 'live' && S.localStream) { if (SFU) publishSFU(); else for (const p of S.people.keys()) offerTo(p); }
+          } else if (SFU && m.status === 'live' && m.sfu) pullSFU();
+          break;
+        case 'sfu':
+          if (!host && SFU) { if (m.publication && S.status === 'live') pullSFU(); else if (!m.publication) { closeSfu(); } }
           break;
         case 'chat': S.chat.push(m.message); renderMsg(m.message); break;
         case 'deleted': chatEl.querySelector(`[data-id="${CSS.escape(m.id)}"]`)?.remove(); break;
         case 'cleared': chatEl.innerHTML = ''; renderPin(null); break;
         case 'pin': renderPin(m.message); break;
         case 'count': $('#live-count').textContent = m.count; break;
-        case 'stream': setStatus(m.status); break;
+        case 'stream': setStatus(m.status); if (m.status !== 'live') closeSfu(); break;
         case 'signal': onSignal(m.from, m.data).catch((e) => console.warn('signal error', e)); break;
         case 'peer-joined':
           S.people.set(m.peer, { peer: m.peer, name: m.name, uid: m.uid });
           renderPeople();
-          if (S.status === 'live' && S.localStream) offerTo(m.peer);
+          if (!SFU && S.status === 'live' && S.localStream) offerTo(m.peer);
           break;
         case 'peer-left': {
           S.people.delete(m.peer);
@@ -241,7 +309,7 @@
         btn('camera').textContent = '🎥 Camera on';
         btn('camera').disabled = true;
         enable();
-        if (S.status === 'live') for (const p of S.people.keys()) offerTo(p);
+        if (S.status === 'live') { if (SFU) publishSFU(); else for (const p of S.people.keys()) offerTo(p); }
       } catch (err) { toast('Camera/mic unavailable: ' + err.message); }
     };
     btn('mic').onclick = () => {
@@ -269,18 +337,19 @@
           replaceVideoTrack(S.camTrack || null);
           if (!S.camTrack) showOverlay('Start your camera or share your screen');
         };
-        if (S.status === 'live') for (const p of S.people.keys()) if (!S.peers.has(p)) offerTo(p);
+        if (S.status === 'live' && !SFU) for (const p of S.people.keys()) if (!S.peers.has(p)) offerTo(p);
       } catch (err) { if (err.name !== 'NotAllowedError') toast('Screen share failed: ' + err.message); }
     };
     btn('golive').onclick = () => {
       if (!S.localStream) return toast('Start your camera or share your screen first');
       send({ type: 'stream', status: 'live' });
-      for (const p of S.people.keys()) offerTo(p);
-      toast('You are live!');
+      if (SFU) publishSFU(); else for (const p of S.people.keys()) offerTo(p);
+      toast(SFU ? 'You are live — relayed through Cloudflare' : 'You are live!');
     };
     btn('end').onclick = () => {
       if (!confirm('End the event for everyone?')) return;
       send({ type: 'stream', status: 'ended' });
+      if (SFU) { sfuPost({ action: 'unpublish' }).catch(() => {}); closeSfu(); }
       for (const pc of S.peers.values()) try { pc.close(); } catch {}
       S.peers.clear();
       if (S.recorder && S.recorder.state !== 'inactive') S.recorder.stop();

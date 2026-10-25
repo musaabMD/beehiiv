@@ -94,6 +94,15 @@ and deploy. This enables the AI writer, AI images, the website builder's AI mode
 
 Forms already use honeypots, timing checks, rate limits and email validation. To add Cloudflare Turnstile, create a widget and set `TURNSTILE_SITE_KEY` (var) and `TURNSTILE_SECRET` (secret).
 
+## 11b. Large live events (optional)
+
+Webinars stream peer-to-peer from the host's browser by default, which suits small and medium rooms. For audiences in the thousands, create a Cloudflare Realtime **SFU app** (Cloudflare dashboard → Realtime → SFU) and either:
+
+- per publication: Settings → Integrations → **Cloudflare Realtime**, paste the App ID and App Secret, or
+- instance-wide: `npx wrangler secret put REALTIME_APP_ID` and `npx wrangler secret put REALTIME_APP_TOKEN`.
+
+The host then publishes once to Cloudflare's edge and every attendee pulls from the nearest location. The App Secret never reaches browsers — signaling goes through `/live/:eventId/sfu`.
+
 ## 12. Cron and background work
 
 `triggers.crons` runs every minute: scheduled posts, send batches, automation steps, deferred-mail retries, webhook retries, segment refreshes, warmup and blocklist checks. Nothing else to set up.

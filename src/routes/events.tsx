@@ -2,6 +2,7 @@
 // Module: events — webinars with native streaming (LiveRoom DO), tickets in 10 currencies, reminders, calendar invites,
 // recordings + replay products, 1:1 coaching bookings, Luma integration.
 import { Hono } from 'hono';
+import { realtimeCreds, newSession, publishTracks, pullTracks, renegotiate } from '../lib/realtime';
 import { raw } from 'hono/html';
 import type { AppEnv, Ctx, Env, Module, Publication, Subscriber } from '../types';
 import { one, all, run, insert, val } from '../lib/db';
@@ -12,7 +13,7 @@ import { SiteLayout, SiteMessage } from '../ui/site';
 import { siteUrl, senderFor } from '../lib/pub';
 import { storeFile, serveObject } from '../lib/media';
 import { emit } from '../lib/events';
-import { registerPeriodic } from '../lib/jobs';
+import { registerPeriodic, logError } from '../lib/jobs';
 import { createCheckout, onOrderPaid, applyOffer, stripeEnabled } from '../lib/payments';
 import { subscribe } from '../lib/subscribers';
 import { sendMail, sendTransactional, button } from '../lib/email';
@@ -850,7 +851,9 @@ const LiveRoomUI = (p: { cfg: Record<string, unknown>; host: boolean; title: str
       ) : (
         <div class="live-reactions">{['👏', '❤️', '🔥', '😂', '🎉', '🙌'].map((e) => <button type="button" data-react={e}>{e}</button>)}</div>
       )}
-      {p.host && <p class="live-note">Video streams peer-to-peer from your browser (great for small and medium rooms). For very large audiences, set a Cloudflare Realtime SFU URL in Settings → Integrations and the room will relay through it.</p>}
+      {p.host && (p.cfg.sfu
+        ? <p class="live-note">Large-audience mode: your stream is relayed through Cloudflare Realtime, so thousands of attendees can watch from the nearest edge.</p>
+        : <p class="live-note">Video streams peer-to-peer from your browser (great for small and medium rooms). For audiences in the thousands, connect Cloudflare Realtime in Settings → Integrations.</p>)}
     </div>
     <aside class="live-side">
       <div class="live-pin hide" id="live-pin" />
@@ -862,9 +865,9 @@ const LiveRoomUI = (p: { cfg: Record<string, unknown>; host: boolean; title: str
   </div>
 );
 
-function liveCfg(env: Env, pub: Publication, ev: any, extra: Record<string, unknown>) {
-  const cfg = parseJSON<any>(pub.settings, {});
-  return { eventId: ev.id, title: ev.title, iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }], sfuUrl: cfg.live_sfu_url || null, ...extra };
+async function liveCfg(env: Env, pub: Publication, ev: any, extra: Record<string, unknown>) {
+  const sfu = !!(await realtimeCreds(env, pub.id));
+  return { eventId: ev.id, title: ev.title, iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }], sfu, sfuEndpoint: `/live/${ev.id}/sfu`, ...extra };
 }
 
 dash.get('/:id/studio', async (c) => {
@@ -874,7 +877,7 @@ dash.get('/:id/studio', async (c) => {
   return c.html(
     <DashLayout c={c} title={`Studio · ${ev.title}`} section="events" crumbs={[['/app/events', 'Events'], [`/app/events/${ev.id}`, ev.title]]} styles={['/static/live.css']} scripts={['/static/live.js']} wide
       actions={<LinkBtn href={`${evUrl(c.env, pub, ev)}`} target="_blank">Attendee page</LinkBtn>}>
-      <LiveRoomUI host title={ev.title} cfg={liveCfg(c.env, pub, ev, { ws: `/live/${ev.id}`, role: 'host', recordUrl: `/app/events/${ev.id}/recording`, status: ev.stream_status })} />
+      <LiveRoomUI host title={ev.title} cfg={await liveCfg(c.env, pub, ev, { ws: `/live/${ev.id}`, role: 'host', recordUrl: `/app/events/${ev.id}/recording`, status: ev.stream_status })} />
     </DashLayout>,
   );
 });
@@ -1140,7 +1143,7 @@ site.get('/events/:ev/live', async (c) => {
     children: (
       <section class="s-wrap s-section">
         <div class="ev-live-head"><div><div class="s-meta">{pub.name}</div><h1>{ev.title}</h1></div>{ev.starts_at > now() && <div class="ev-countdown ev-countdown-sm" data-countdown={new Date(ev.starts_at).toISOString()} />}</div>
-        <LiveRoomUI host={false} title={ev.title} cfg={liveCfg(c.env, pub, ev, { ws: `/live/${ev.id}?t=${encodeURIComponent(t)}`, role: 'attendee', name: reg.name || reg.email.split('@')[0], status: ev.stream_status, replayUrl: `${url}/replay?t=${t}` })} />
+        <LiveRoomUI host={false} title={ev.title} cfg={await liveCfg(c.env, pub, ev, { ws: `/live/${ev.id}?t=${encodeURIComponent(t)}`, role: 'attendee', name: reg.name || reg.email.split('@')[0], status: ev.stream_status, replayUrl: `${url}/replay?t=${t}` })} />
       </section>
     ),
   }));
@@ -1213,30 +1216,79 @@ site.get('/events/:ev/replay/purchased', async (c) => {
 });
 
 // ───────────────── live room WebSocket ─────────────────
+/** Resolve who is connecting to a live room: attendee by ticket token (?t=) or host by dashboard session. */
+async function liveIdentity(c: any, ev: any): Promise<{ role: 'host' | 'attendee'; uid: string; name: string } | null> {
+  const t = c.req.query('t');
+  if (t) {
+    const reg = await one<any>(c.env, `SELECT * FROM event_registrations WHERE event_id = ? AND token = ? AND kind = 'attendee'`, ev.id, t);
+    return reg ? { role: 'attendee', uid: reg.id, name: reg.name || reg.email.split('@')[0] } : null;
+  }
+  const u = await currentUser(c);
+  const pubs = u ? await userPubs(c.env, u.id) : [];
+  const p = pubs.find((x) => x.id === ev.pub_id);
+  if (!u || !p || !can(p.role, 'manage')) return null;
+  return { role: 'host', uid: 'host:' + u.id, name: u.name || 'Host' };
+}
+
 root.get('/live/:eventId', async (c) => {
   if (c.req.header('upgrade')?.toLowerCase() !== 'websocket') return c.text('Expected WebSocket', 426);
   const ev = await one<any>(c.env, 'SELECT * FROM live_events WHERE id = ?', c.req.param('eventId'));
   if (!ev) return c.text('Not found', 404);
+  const who = await liveIdentity(c, ev);
+  if (!who) return c.text(c.req.query('t') ? 'Invalid ticket' : 'Forbidden', 403);
   const headers = new Headers(c.req.raw.headers);
   headers.set('x-event', ev.id);
-  const t = c.req.query('t');
-  if (t) {
-    const reg = await one<any>(c.env, `SELECT * FROM event_registrations WHERE event_id = ? AND token = ? AND kind = 'attendee'`, ev.id, t);
-    if (!reg) return c.text('Invalid ticket', 403);
-    headers.set('x-role', 'attendee');
-    headers.set('x-uid', reg.id);
-    headers.set('x-name', reg.name || reg.email.split('@')[0]);
-  } else {
-    const u = await currentUser(c);
-    const pubs = u ? await userPubs(c.env, u.id) : [];
-    const p = pubs.find((x) => x.id === ev.pub_id);
-    if (!u || !p || !can(p.role, 'manage')) return c.text('Forbidden', 403);
-    headers.set('x-role', 'host');
-    headers.set('x-uid', 'host:' + u.id);
-    headers.set('x-name', u.name || 'Host');
-  }
+  headers.set('x-role', who.role);
+  headers.set('x-uid', who.uid);
+  headers.set('x-name', who.name);
   const stub = c.env.LIVE.get(c.env.LIVE.idFromName(ev.id));
   return stub.fetch(new Request(c.req.url, { headers }));
+});
+
+/**
+ * Cloudflare Realtime SFU signaling proxy (large audiences). Credentials stay server-side.
+ * host:     {action:'publish', sdp, tracks:[{mid, trackName}]} → {answer}   ·  {action:'unpublish'}
+ * attendee: {action:'pull'} → {sessionId, offer, tracks}  ·  {action:'answer', sessionId, sdp}
+ */
+root.post('/live/:eventId/sfu', async (c) => {
+  const ev = await one<any>(c.env, 'SELECT * FROM live_events WHERE id = ?', c.req.param('eventId'));
+  if (!ev) return c.json({ error: 'not_found' }, 404);
+  const who = await liveIdentity(c, ev);
+  if (!who) return c.json({ error: 'forbidden' }, 403);
+  const creds = await realtimeCreds(c.env, ev.pub_id);
+  if (!creds) return c.json({ error: 'sfu_not_configured' }, 400);
+  const b = await c.req.json<any>().catch(() => ({}));
+  const stub = c.env.LIVE.get(c.env.LIVE.idFromName(ev.id));
+  const state = (method: string, body?: unknown) => stub.fetch('https://live/sfu-state', { method, body: body ? JSON.stringify(body) : undefined, headers: { 'content-type': 'application/json' } });
+  try {
+    if (b.action === 'publish' && who.role === 'host') {
+      const tracks = (Array.isArray(b.tracks) ? b.tracks : []).filter((t: any) => t && t.mid != null && /^[a-z0-9_-]{1,32}$/i.test(String(t.trackName))).slice(0, 4);
+      if (!b.sdp || !tracks.length) return c.json({ error: 'bad_request' }, 400);
+      const sessionId = await newSession(creds);
+      const r = await publishTracks(creds, sessionId, String(b.sdp), tracks.map((t: any) => ({ mid: String(t.mid), trackName: String(t.trackName) })));
+      await state('PUT', { sessionId, tracks: tracks.map((t: any) => String(t.trackName)) });
+      return c.json({ sessionId, answer: r.answer });
+    }
+    if (b.action === 'unpublish' && who.role === 'host') {
+      await state('DELETE');
+      return c.json({ ok: true });
+    }
+    if (b.action === 'pull') {
+      const cur = await (await state('GET')).json<{ publication: { sessionId: string; tracks: string[] } | null }>();
+      if (!cur.publication) return c.json({ error: 'not_live' }, 409);
+      const sessionId = await newSession(creds);
+      const r = await pullTracks(creds, sessionId, cur.publication.sessionId, cur.publication.tracks);
+      return c.json({ sessionId, offer: r.offer, renegotiate: r.requiresImmediateRenegotiation, tracks: r.tracks });
+    }
+    if (b.action === 'answer' && b.sessionId && b.sdp) {
+      await renegotiate(creds, String(b.sessionId), String(b.sdp));
+      return c.json({ ok: true });
+    }
+    return c.json({ error: 'bad_request' }, 400);
+  } catch (e: any) {
+    await logError(c.env, 'live.sfu', e, ev.pub_id);
+    return c.json({ error: 'sfu_error', message: String(e?.message || e) }, 502);
+  }
 });
 
 export default { dash, site, root } satisfies Module;
