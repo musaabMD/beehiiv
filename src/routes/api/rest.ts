@@ -394,8 +394,14 @@ route('POST', '/automations/:id/journeys', 'Automations', 'Enroll a subscriber (
   }
   if (!s) throw new NotFound('Subscriber not found.');
   const r = await enroll(c.env, a.id, s.id, { via: 'api', ...(b.data && typeof b.data === 'object' ? b.data : {}) });
-  if (!r.ok) return apiError(c, 409, 'not_enrolled', r.reason || 'Could not enroll');
-  return c.json({ data: { journey_id: r.runId, automation_id: a.id, subscriber_id: s.id } }, 201);
+  if (!r.ok) {
+    if (r.reason === 'already enrolled') {
+      const existing = await one<any>(c.env, 'SELECT id, status FROM automation_runs WHERE automation_id = ? AND subscriber_id = ? ORDER BY created_at DESC LIMIT 1', a.id, s.id);
+      return c.json({ data: { journey_id: existing?.id ?? null, automation_id: a.id, subscriber_id: s.id, status: existing?.status ?? null, already_enrolled: true } });
+    }
+    return apiError(c, 409, 'not_enrolled', r.reason || 'Could not enroll');
+  }
+  return c.json({ data: { journey_id: r.runId, automation_id: a.id, subscriber_id: s.id, already_enrolled: false } }, 201);
 }, { body: { subscriber_id: 'string', email: 'string (created if new)', data: 'object passed to the journey' } });
 route('GET', '/automations/:id/journeys', 'Automations', 'List journeys (per-subscriber progress)', async (c, pub) => {
   const a: any = await needRow(c, 'automations', pub, 'Automation');

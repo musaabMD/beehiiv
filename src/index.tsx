@@ -73,7 +73,7 @@ app.use('/s/:slug/*', async (c, next) => {
   } else c.set('reader', null);
   await next();
 });
-app.get('/s/:slug', (c) => c.redirect(`/s/${c.req.param('slug')}/`, 301));
+// A site's home is the sub-app '/' route (merged as '/s/:slug'); '/s/:slug/' is normalized in fetch() below.
 
 // ───── Dashboard: /app/* ─────
 app.use('/app', requireUser);
@@ -115,9 +115,14 @@ export default {
       const pub = await pubByDomain(env, url.host).catch(() => null);
       if (pub && !PLATFORM_PREFIX.test(url.pathname)) {
         url.pathname = `/s/${pub.slug}${url.pathname}`;
+        if (/^\/s\/[^/]+\/$/.test(url.pathname)) url.pathname = url.pathname.slice(0, -1);
         const r = new Request(url.toString(), req);
         return app.fetch(r, env, ctx);
       }
+    }
+    if (/^\/s\/[^/]+\/$/.test(url.pathname)) {
+      url.pathname = url.pathname.slice(0, -1); // site home: '/s/slug/' → '/s/slug'
+      return app.fetch(new Request(url.toString(), req), env, ctx);
     }
     return app.fetch(req, env, ctx);
   },

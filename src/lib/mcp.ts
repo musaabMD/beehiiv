@@ -157,7 +157,7 @@ export const TOOLS: Tool[] = [
       const key = a.sort_by || 'open_rate';
       rows.sort((x: any, y: any) => (key === 'published_at' ? String(y[key]).localeCompare(String(x[key])) : (y[key] || 0) - (x[key] || 0)));
       const avg = (k: string) => (rows.length ? Math.round((rows.reduce((n, r: any) => n + (r[k] || 0), 0) / rows.length) * 100) / 100 : 0);
-      return { posts: rows, averages: { open_rate: avg('open_rate'), click_rate: avg('click_rate') }, best: rows[0]?.title ?? null, summary: rows.length ? `Across ${rows.length} posts the average open rate is ${avg('open_rate')}% and CTR ${avg('click_rate')}%. Best by ${key}: "${rows[0].title}".` : 'No posts to compare.' };
+      return { posts: rows, averages: { open_rate: avg('open_rate'), click_rate: avg('click_rate') }, best: rows[0]?.title ?? null, summary: rows.length ? `Across ${rows.length} ${rows.length === 1 ? "post" : "posts"} the average open rate is ${avg('open_rate')}% and CTR ${avg('click_rate')}%. Best by ${key}: "${rows[0].title}".` : 'No posts to compare.' };
     },
   },
   {

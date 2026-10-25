@@ -884,7 +884,7 @@ dash.get('/:id/studio', async (c) => {
 
 // ───────────────── public site ─────────────────
 async function eventBySlug(c: Ctx) {
-  return one<any>(c.env, `SELECT * FROM live_events WHERE pub_id = ? AND slug = ? AND status != 'draft'`, c.get('pub').id, c.req.param('slug'));
+  return one<any>(c.env, `SELECT * FROM live_events WHERE pub_id = ? AND slug = ? AND status != 'draft'`, c.get('pub').id, c.req.param('ev'));
 }
 
 const SITE_HEAD = <><link rel="stylesheet" href="/static/events-site.css" /></>;
@@ -917,7 +917,7 @@ site.get('/events', async (c) => {
   }));
 });
 
-site.get('/events/:slug/calendar.ics', async (c) => {
+site.get('/events/:ev/calendar.ics', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev) return c.text('Not found', 404);
   const pub = c.get('pub');
@@ -925,7 +925,7 @@ site.get('/events/:slug/calendar.ics', async (c) => {
   return c.body(ics, 200, { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': `attachment; filename="${ev.slug}.ics"` });
 });
 
-site.get('/events/:slug', async (c) => {
+site.get('/events/:ev', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev) return SiteMessage(c, 'Event not found', <p>This event doesn't exist.</p>, 404);
   const pub = c.get('pub');
@@ -1035,7 +1035,7 @@ site.get('/events/:slug', async (c) => {
   }));
 });
 
-site.post('/events/:slug/register', async (c) => {
+site.post('/events/:ev/register', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev) return c.text('Not found', 404);
   const pub = c.get('pub');
@@ -1081,7 +1081,7 @@ site.post('/events/:slug/register', async (c) => {
   return c.redirect(`${url}/registered?t=${r.reg.token}`, 303);
 });
 
-site.get('/events/:slug/registered', async (c) => {
+site.get('/events/:ev/registered', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev) return c.text('Not found', 404);
   const pub = c.get('pub');
@@ -1118,13 +1118,13 @@ site.get('/events/:slug/registered', async (c) => {
   }));
 });
 
-site.get('/events/:slug/join/:token', async (c) => {
+site.get('/events/:ev/join/:token', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev) return c.text('Not found', 404);
   return c.redirect(`${evUrl(c.env, c.get('pub'), ev)}/live?t=${encodeURIComponent(c.req.param('token'))}`, 302);
 });
 
-site.get('/events/:slug/live', async (c) => {
+site.get('/events/:ev/live', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev) return c.text('Not found', 404);
   const pub = c.get('pub');
@@ -1149,7 +1149,7 @@ site.get('/events/:slug/live', async (c) => {
   }));
 });
 
-site.get('/events/:slug/replay', async (c) => {
+site.get('/events/:ev/replay', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev) return c.text('Not found', 404);
   const pub = c.get('pub');
@@ -1181,14 +1181,14 @@ site.get('/events/:slug/replay', async (c) => {
   }));
 });
 
-site.get('/events/:slug/replay/video', async (c) => {
+site.get('/events/:ev/replay/video', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev || !ev.recording_key) return c.text('Not found', 404);
   if (!(await canAccessReplay(c, ev))) return c.text('Forbidden', 403);
   return serveObject(c.env, ev.recording_key, c.req.raw, { 'cache-control': 'private, max-age=600' });
 });
 
-site.post('/events/:slug/replay/buy', async (c) => {
+site.post('/events/:ev/replay/buy', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev) return c.text('Not found', 404);
   const pub = c.get('pub');
@@ -1206,7 +1206,7 @@ site.post('/events/:slug/replay/buy', async (c) => {
   return c.redirect(off.amount <= 0 ? `${url}/replay/purchased?o=${co.orderId}` : co.url, 303);
 });
 
-site.get('/events/:slug/replay/purchased', async (c) => {
+site.get('/events/:ev/replay/purchased', async (c) => {
   const ev = await eventBySlug(c);
   if (!ev) return c.text('Not found', 404);
   const order = await one<any>(c.env, `SELECT * FROM orders WHERE pub_id = ? AND (id = ? OR stripe_session_id = ?) AND status = 'paid'`, c.get('pub').id, c.req.query('o') || '', c.req.query('session_id') || '');
