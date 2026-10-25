@@ -628,7 +628,7 @@ export interface EmailShell {
 /** Wrap rendered body in a full table-based email document (Outlook-safe). */
 export function emailLayout(body: string, o: EmailShell): string {
   const s = o.style || styleFor(o.pub);
-  const pre = o.preheader ? `<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:${s.bg};opacity:0">${esc(o.preheader)}${'&#847;&zwnj;&nbsp;'.repeat(60)}</div>` : '';
+  const pre = o.preheader ? `<div style="display:none;max-height:0;max-width:0;overflow:hidden;mso-hide:all">${esc(o.preheader)}${'&#847;&zwnj;&nbsp;'.repeat(60)}</div>` : '';
   const header = o.hideHeader
     ? ''
     : `<tr><td style="padding:24px 24px 8px;font-family:${s.font}">
