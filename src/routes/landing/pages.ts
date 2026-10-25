@@ -124,7 +124,7 @@ export function openPage(c: PageCtx, s: OpenStats) {
   const rejTotal = Object.values(rej).reduce((a, b) => a + b, 0);
 
   const banner = s.simulated
-    ? `<div class="note" style="margin-bottom:24px"><b>This install simulates sending.</b> It's a demo: emails are written to an outbox instead of going to real inboxes, so the numbers below come from sample data, not mailbox providers.</div>` : '';
+    ? `<div class="note" style="margin-bottom:24px"><b>This is the demo.</b> Its newsletter sends are simulated, so they're left out. The numbers below count only real emails${s.tryIt ? `, like the samples visitors ask for. <a href="/try" style="text-decoration:underline">Get one in your inbox</a> and it's counted here.` : '.'}</div>` : '';
   const notEnough = !s.enough
     ? `<div class="note" style="margin-bottom:24px"><b>Not enough email yet.</b> Numbers show once ${n(MIN_EMAILS)} emails have gone out in the last 30 days (${n(s.sent)} so far).</div>` : '';
   const show = s.enough;

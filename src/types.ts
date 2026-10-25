@@ -15,7 +15,11 @@ export interface Env {
   PURCHASE_URL: string;
   PRICE_LABEL: string;
   PLATFORM_FEE_PERCENT: string;
-  CONTACT_EMAIL?: string;     // shown in the marketing site footer
+  CONTACT_EMAIL?: string;
+  TRY_IT?: string;            // '1' turns on /try ("send me a sample issue", real email even in simulate mode) — demo only
+  TRY_PUB_SLUG?: string;      // publication whose latest post is sent (default 'demo')
+  TRY_POST_ID?: string;       // optional: send this post instead of the latest published one
+  TRY_DAILY_CAP?: string;     // max sample emails per day (default 100)     // shown in the marketing site footer
   // optional secrets
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;

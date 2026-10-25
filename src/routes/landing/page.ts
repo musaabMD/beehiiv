@@ -190,6 +190,8 @@ footer nav{display:flex;gap:18px;flex-wrap:wrap}
     <a class="btn btn-primary btn-lg" href="${buy}">Get the full source — ${price}</a>
     ${o.loggedIn ? '<a class="btn btn-ghost btn-lg" href="/app">Go to dashboard →</a>' : demo ? '<a class="btn btn-ghost btn-lg" href="/signup">Try the live demo →</a>' : '<a class="btn btn-ghost btn-lg" href="#features">See every feature →</a>'}
   </div>
+  <div class="fine" style="margin-top:14px"><a href="${B}/try" style="text-decoration:underline">Or get a real sample issue in your inbox →</a>
+  </div>
   <div class="fine"><span>${ic('check', 16)} One-time payment</span><span>${ic('check', 16)} Unlimited newsletters &amp; subscribers</span><span>${ic('check', 16)} 0% platform fees</span><span>${ic('check', 16)} Deploy in ~15 minutes</span></div>
 
   <figure class="shot"><img src="${B}/static/shots/home.jpg" alt="The OpenHive dashboard" width="1360" height="850" style="display:block;width:100%;height:auto"><figcaption style="padding:10px 14px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);text-align:left">The real dashboard, from the live demo with sample data.</figcaption></figure>

@@ -258,12 +258,12 @@ async function finishSend(env: Env, pub: Publication, post: Post, sendId: string
 }
 
 /** Create a delivery and send it. Used by newsletters, automations and test sends. */
-export async function deliver(env: Env, pub: Publication, sendId: string, sub: Subscriber, subject: string, content: Content, from: { email: string; name: string }, o: { variant?: string | null; cohort?: string | null; post?: Post | null; kind?: 'marketing' | 'transactional' } = {}) {
+export async function deliver(env: Env, pub: Publication, sendId: string, sub: Subscriber, subject: string, content: Content, from: { email: string; name: string }, o: { variant?: string | null; cohort?: string | null; post?: Post | null; kind?: 'marketing' | 'transactional'; forceReal?: boolean } = {}) {
   const did = id(20);
   await insert(env, 'deliveries', { id: did, send_id: sendId, pub_id: pub.id, subscriber_id: sub.id, email: sub.email, variant: o.variant ?? null, status: 'queued', attempts: 0, provider: mailboxProvider(sub.email), created_at: now() });
   const built = await buildEmail(env, pub, content, sub, { deliveryId: did, post: o.post, cohort: o.cohort });
   const subj = applyMerge(subject, mergeVars(pub, sub, siteUrl(env, pub)), false);
-  const res = await sendMail(env, { to: sub.email, subject: subj, html: built.html, text: built.text, from, replyTo: pub.reply_to, pub, kind: o.kind || 'marketing', unsubscribeUrl: built.unsubscribeUrl, campaignId: sendId });
+  const res = await sendMail(env, { to: sub.email, subject: subj, html: built.html, text: built.text, from, replyTo: pub.reply_to, pub, kind: o.kind || 'marketing', unsubscribeUrl: built.unsubscribeUrl, campaignId: sendId, forceReal: o.forceReal });
   await applyResult(env, pub, did, sub, res);
   return { deliveryId: did, result: res };
 }

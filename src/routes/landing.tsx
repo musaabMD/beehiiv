@@ -13,6 +13,7 @@ import { shell } from './landing/marketing';
 import { featuresIndex, featurePage, openPage, changelogPage, type PageCtx } from './landing/pages';
 import { featureBySlug } from './landing/features-data';
 import { openStats } from '../lib/openstats';
+import { mountTryIt } from './landing/tryit';
 import { compareIndex, comparePlatform, migratePage } from './landing/compare';
 import { platformBySlug } from './landing/compare-data';
 
@@ -74,6 +75,8 @@ root.get('/migrate/:slug', async (c) => {
   const p = await ctxFor(c);
   return c.html(page(p, 'compare', `Migrate from ${pl.name} to OpenHive`, `Export your list from ${pl.name} and import it into OpenHive, with unsubscribed and bounced readers kept out.`, migratePage(p, pl)));
 });
+mountTryIt(root, ctxFor);
+
 root.get('/changelog', async (c) => {
   const p = await ctxFor(c);
   return c.html(page(p, 'changelog', 'Changelog · OpenHive', 'What\'s new in OpenHive, newest first.', changelogPage(p)));

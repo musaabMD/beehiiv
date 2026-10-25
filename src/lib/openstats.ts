@@ -19,6 +19,7 @@ export interface OpenStats {
   rejections: Record<string, number>;
   suppressed: number;
   simulated: boolean;
+  tryIt?: boolean;
   enough: boolean;
 }
 
@@ -34,7 +35,8 @@ const weekStart = (t: number) => { const d = new Date(t); const day = (d.getUTCD
 
 export async function openStats(env: Env, now = Date.now()): Promise<OpenStats> {
   const from = now - 30 * DAY;
-  const real = `d.send_id NOT IN (SELECT id FROM sends WHERE kind = 'test')`;
+  // Real mail only: leave out test sends and anything an install simulated (message ids starting with 'sim-').
+  const real = `d.send_id NOT IN (SELECT id FROM sends WHERE kind = 'test') AND (d.message_id IS NULL OR substr(d.message_id, 1, 4) <> 'sim-')`;
   const tot = await one<any>(env, `
     SELECT COUNT(*) AS sent,
       SUM(CASE WHEN d.status IN ('sent','complained') THEN 1 ELSE 0 END) AS delivered,
@@ -84,6 +86,7 @@ export async function openStats(env: Env, now = Date.now()): Promise<OpenStats> 
     rejections: Object.fromEntries(rej.map((r) => [r.reason, Number(r.n)])),
     suppressed,
     simulated: env.EMAIL_MODE === 'simulate' || !env.EMAIL,
+    tryIt: env.TRY_IT === '1' && !!env.EMAIL,
     enough: sent >= MIN_EMAILS,
   };
 }

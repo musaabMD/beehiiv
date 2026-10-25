@@ -21,6 +21,8 @@ export interface MailInput {
   campaignId?: string;          // send id → Feedback-ID
   headers?: Record<string, string>;
   attachments?: Array<{ content: string; filename: string; type: string; disposition: 'attachment' | 'inline' }>;
+  /** Send for real even when EMAIL_MODE=simulate (used only by the demo's "send me a sample" page). */
+  forceReal?: boolean;
 }
 
 export interface MailResult { ok: boolean; status: 'sent' | 'simulated' | 'failed' | 'suppressed'; messageId?: string; error?: string; code?: string; bounce?: BounceType | null; retry?: boolean }
@@ -150,7 +152,7 @@ export async function sendMail(env: Env, m: MailInput): Promise<MailResult> {
   }
   if (m.campaignId) headers['X-OpenHive-Campaign'] = m.campaignId;
   const text = m.text || htmlToText(m.html);
-  const simulate = !env.EMAIL || env.EMAIL_MODE === 'simulate';
+  const simulate = !env.EMAIL || (env.EMAIL_MODE === 'simulate' && !m.forceReal);
   let res: MailResult;
   if (simulate) {
     res = { ok: true, status: 'simulated', messageId: 'sim-' + id() };
