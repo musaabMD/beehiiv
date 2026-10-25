@@ -363,7 +363,7 @@ function eventFields(f: Record<string, any>) {
   if (!starts) return { error: 'Please choose a start date and time.' };
   if (!ends || ends <= starts) ends = starts + HOUR;
   const kind = ['webinar', 'in_person', 'coaching'].includes(f.kind) ? f.kind : 'webinar';
-  const reminders = [...new Set(((f.reminders as string[]) || []).map(Number).filter((n) => n > 0))].slice(0, 5).sort((a, b) => b - a);
+  const reminders = [...new Set(([] as string[]).concat(f.reminders || []).map(Number).filter((n) => n > 0))].slice(0, 5).sort((a, b) => b - a);
   const availability = DOW.map((_, i) => (bool(f[`dow_${i}`]) ? { dow: i, start: str(f[`start_${i}`]) || '09:00', end: str(f[`end_${i}`]) || '17:00' } : null)).filter(Boolean);
   return {
     fields: {
