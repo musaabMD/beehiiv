@@ -32,9 +32,9 @@ app.get('/', async (c) => {
   const rows = await all<Post & { recipients: number; opens: number; clicks: number; authors: string }>(
     c.env,
     `SELECT p.*,
-       (SELECT COUNT(*) FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = p.id AND d.status IN ('sent','deferred')) AS recipients,
-       (SELECT COUNT(*) FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = p.id AND d.opened_at IS NOT NULL) AS opens,
-       (SELECT COUNT(*) FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = p.id AND d.clicked_at IS NOT NULL) AS clicks,
+       (SELECT COUNT(DISTINCT d.subscriber_id) FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = p.id AND d.status IN ('sent','deferred')) AS recipients,
+       (SELECT COUNT(DISTINCT d.subscriber_id) FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = p.id AND d.opened_at IS NOT NULL) AS opens,
+       (SELECT COUNT(DISTINCT d.subscriber_id) FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = p.id AND d.clicked_at IS NOT NULL) AS clicks,
        (SELECT group_concat(u.name, ', ') FROM post_authors pa JOIN users u ON u.id = pa.user_id WHERE pa.post_id = p.id) AS authors
      FROM posts p WHERE ${where.join(' AND ')}
      ORDER BY COALESCE(p.published_at, p.scheduled_at, p.updated_at) DESC LIMIT ? OFFSET ?`,

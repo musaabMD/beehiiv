@@ -239,7 +239,7 @@
 
   // ───────── send / publish flow ─────────
   const sendDlg = $('#pe-send');
-  function walk(blocks, fn) { (blocks || []).forEach((b) => { fn(b); walk(b.data?.blocks, fn); (b.data?.columns || []).forEach((c) => walk(c.blocks, fn)); }); }
+  function walk(blocks, fn) { (blocks || []).forEach((b) => { fn(b); walk(b.data?.blocks, fn); (Array.isArray(b.data?.columns) ? b.data.columns : []).forEach((c) => walk(c.blocks, fn)); }); }
   async function openSend() {
     await save({ force: true });
     const m = serializeMeta();

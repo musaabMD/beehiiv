@@ -632,7 +632,7 @@
     }
     duplicate(it) {
       const b = clone(it.view.toJSON());
-      const reid = (x) => { x.id = uid(); const d = x.data || {}; (d.blocks || []).forEach(reid); (d.columns || []).forEach((c) => (c.blocks || []).forEach(reid)); };
+      const reid = (x) => { x.id = uid(); const d = x.data || {}; (d.blocks || []).forEach(reid); (Array.isArray(d.columns) ? d.columns : []).forEach((c) => (c.blocks || []).forEach(reid)); };
       reid(b);
       it.list.insert(b, it.list.items.indexOf(it) + 1);
       this.changed();
@@ -1211,7 +1211,7 @@
   class TocView extends CardView {
     emptyState() {
       const hs = [];
-      const walk = (bs) => bs.forEach((b) => { if (b.type === 'heading' && b.data.level <= 3) hs.push(b); (b.data.blocks || []).forEach((x) => walk([x])); (b.data.columns || []).forEach((c) => walk(c.blocks || [])); });
+      const walk = (bs) => bs.forEach((b) => { if (b.type === 'heading' && b.data.level <= 3) hs.push(b); (b.data.blocks || []).forEach((x) => walk([x])); (Array.isArray(b.data.columns) ? b.data.columns : []).forEach((c) => walk(c.blocks || [])); });
       walk(this.ed.root ? this.ed.root.items.map((i) => i.block) : []);
       return `<nav class="oh-toc"><strong>Contents</strong>${hs.length ? `<ol>${hs.map((x) => `<li class="l${x.data.level}">${esc(textOf(x.data.html))}</li>`).join('')}</ol>` : '<p class="ohe-hint">Headings you add will be listed here with anchor links.</p>'}</nav>`;
     }

@@ -291,7 +291,7 @@ async function renderBlock(st: State, b: Block): Promise<string> {
       const bg = d.bg || s.button_bg, color = d.color || s.button_text;
       return E
         ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${s.spacing}px"><tr><td align="${d.align || 'center'}">${emailButton(s, d.label || 'Click here', url, d.align || 'center', bg, color)}</td></tr></table>`
-        : `<p style="text-align:${esc(d.align || 'center')}"><a class="oh-btn" href="${esc(url)}" style="background:${esc(bg)};color:${esc(color)}">${esc(d.label || 'Click here')}</a></p>`;
+        : `<p style="text-align:${esc(d.align || 'center')}"><a class="oh-btn" href="${esc(url)}" style="background:${esc(bg)};color:${esc(color)}"><span style="color:${esc(color)}">${esc(d.label || 'Click here')}</span></a></p>`;
     }
     case 'divider': {
       const style = d.style || 'line'; // line | dots | space | stars
