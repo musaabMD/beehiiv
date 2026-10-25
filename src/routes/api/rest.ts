@@ -451,7 +451,7 @@ route('POST', '/posts', 'Posts', 'Create a draft post (blocks, HTML, or Markdown
   const b = await body(c);
   const post = await createPost(c.env, pub, b);
   return c.json({ data: serializePost(c.env, pub, post, { content: parseDoc(post.content) }) }, 201);
-}, { body: { title: 'string', subtitle: 'string', blocks: 'Block[] (see Editor document)', html: 'string (wrapped in an HTML block)', markdown: 'string', template_id: 'Start from this template (current version is copied)', email_subject: 'string', preview_text: 'string', platform: 'email|web|both', audience: 'all|free|premium', thumbnail_url: 'string', seo: 'object', segment_ids: 'string[]', author_ids: 'string[]' } });
+}, { body: { title: 'string', subtitle: 'string', blocks: 'Block[] (see Editor document)', html: 'string (wrapped in an HTML block)', markdown: 'string', template_id: 'Start from this template (content is copied; its style stays linked)', email_subject: 'string', preview_text: 'string', platform: 'email|web|both', audience: 'all|free|premium', thumbnail_url: 'string', seo: 'object', segment_ids: 'string[]', author_ids: 'string[]' } });
 route('PATCH', '/posts/:id', 'Posts', 'Update a post (replacing content creates a version)', async (c, pub) => {
   const post = await needPost(c, pub);
   const updated = await updatePost(c.env, pub, post, await body(c));

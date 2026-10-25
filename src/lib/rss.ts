@@ -132,7 +132,7 @@ async function makePost(env: Env, pub: Publication, feed: any, items: FeedItem[]
   } else blocks.push(...itemBlocks(first, false));
   const title = digest ? subject : first.title;
   const user = feed.created_by || (await ownerId(env, pub));
-  const pid = await newPost(env, pub, user, { title, content: JSON.stringify({ blocks }), style: tpl?.style || '{}', template_id: feed.template_id || null });
+  const pid = await newPost(env, pub, user, { title, content: JSON.stringify({ blocks }), style: '{}', template_id: feed.template_id || null });
   const preview = digest ? items.map((i) => i.title).join(' · ') : summaryText(first.summary, 150);
   await run(env, `UPDATE posts SET email_subject = ?, preview_text = ?, audience = ?, segment_ids = ?, exclude_segment_ids = ?, thumbnail_url = ?, updated_at = ? WHERE id = ?`,
     subject, truncate(preview, 150), feed.audience || 'all', feed.segment_ids || '[]', feed.exclude_segment_ids || '[]', first.image, now(), pid);
