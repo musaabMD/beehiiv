@@ -22,7 +22,8 @@
     "MAIL_FROM": "newsletter@trstbase.com",
     "PURCHASE_URL": "https://lnkbase.com/beehiiv",
     "PRICE_LABEL": "$30 one-time",
-    "PLATFORM_FEE_PERCENT": "0"
+    "PLATFORM_FEE_PERCENT": "0",
+    "CONTACT_EMAIL": "hello@trstbase.com"
   },
   "observability": { "enabled": true }
 }

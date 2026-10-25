@@ -1,7 +1,7 @@
 // Sales landing page markup (self-contained: inline CSS + tiny inline JS). Used by `/` and to generate landing/index.html.
 import { esc } from '../../lib/util';
 
-export interface LandingOpts { purchaseUrl: string; priceLabel: string; loggedIn?: boolean; demo?: boolean; appName?: string }
+export interface LandingOpts { purchaseUrl: string; priceLabel: string; loggedIn?: boolean; demo?: boolean; appName?: string; contact?: string; appUrl?: string }
 
 const ICONS: Record<string, string> = {
   pen: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m14 6 4 4"/>',
@@ -21,7 +21,7 @@ const ICONS: Record<string, string> = {
   check: '<path d="m5 12 5 5 9-10"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
 };
-const ic = (n: string, s = 22) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ICONS.check}</svg>`;
+export const ic = (n: string, s = 22) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ICONS.check}</svg>`;
 
 const FEATURES: Array<[string, string, string]> = [
   ['pen', 'A real WYSIWYG editor', 'Blocks, slash commands, Markdown shortcuts, live collaboration, comments, templates, AI writer. One draft → web page + Outlook-proof email.'],
@@ -70,6 +70,8 @@ export function landingHtml(o: LandingOpts): string {
   const price = esc(o.priceLabel);
   const amount = esc((o.priceLabel.match(/\$\s?\d+/) || ['$30'])[0]);
   const demo = o.demo !== false;
+  // The static copy (landing/index.html) is hosted elsewhere, so its links point back at the app.
+  const B = demo ? '' : esc((o.appUrl || '').replace(/\/$/, ''));
   const nav = o.loggedIn
     ? `<a class="btn btn-ghost" href="/app">Go to dashboard</a>`
     : demo ? `<a class="btn btn-ghost hide-sm" href="/login">Log in</a>` : '';
@@ -161,7 +163,7 @@ details p{color:var(--muted);margin:10px 0 0}
 .final{text-align:center;padding:100px 0;background:radial-gradient(700px 300px at 50% 100%,rgba(245,158,11,.18),transparent 70%)}
 footer{border-top:1px solid var(--line);padding:30px 0;color:var(--muted);font-size:14px}
 footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
-footer nav{display:flex;gap:18px}
+footer nav{display:flex;gap:18px;flex-wrap:wrap}
 .sticky-buy{display:none}
 @media(max-width:960px){.grid{grid-template-columns:repeat(2,1fr)}.shot-body{grid-template-columns:1fr}.shot-side,.shot-stats{display:none}.split{grid-template-columns:1fr;gap:28px}.top nav{display:none}}
 @media(max-width:620px){.grid,.cost{grid-template-columns:1fr}section{padding:64px 0}.hero{padding-top:56px}.hide-sm{display:none}.btn-lg{width:100%}.sticky-buy{display:flex;position:fixed;left:12px;right:12px;bottom:12px;width:auto!important;z-index:20;box-shadow:0 10px 30px rgba(0,0,0,.5)}footer{padding-bottom:90px}th,td{padding:12px}}
@@ -170,7 +172,7 @@ footer nav{display:flex;gap:18px}
 <body>
 <header class="top"><div class="wrap">
   <a class="brand" href="#"><svg width="28" height="28" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#1b2130"/><path d="M32 12l17 10v20L32 52 15 42V22z" fill="#f59e0b"/><path d="M32 22l8.5 5v10L32 42l-8.5-5V27z" fill="#1b2130"/></svg>OpenHive</a>
-  <nav><a href="#features">Features</a><a href="#stack">Stack</a><a href="#pricing">Pricing</a><a href="#faq">FAQ</a>${demo ? '<a href="/docs">Docs</a>' : ''}</nav>
+  <nav><a href="${B}/features">Features</a><a href="${B}/compare">Compare</a><a href="${B}/open">Deliverability</a><a href="#pricing">Pricing</a><a href="${B}/changelog">Changelog</a>${demo ? '<a href="/docs">Docs</a>' : ''}</nav>
   ${nav}
   <a class="btn btn-primary" href="${buy}">Buy — ${amount}</a>
 </div></header>
@@ -307,7 +309,7 @@ footer nav{display:flex;gap:18px}
 <a class="btn btn-primary btn-lg sticky-buy" href="${buy}">Get OpenHive — ${amount} one-time</a>
 <footer><div class="wrap">
   <span>© ${new Date().getFullYear()} OpenHive · The open-source newsletter platform</span>
-  <nav><a href="#features">Features</a><a href="#pricing">Pricing</a>${demo ? '<a href="/docs">Docs</a><a href="/login">Log in</a>' : ''}<a href="${buy}">Buy</a></nav>
+  <nav><a href="${B}/features">Features</a><a href="${B}/compare">Compare</a><a href="${B}/open">Deliverability</a><a href="${B}/changelog">Changelog</a>${demo ? '<a href="/docs">Docs</a><a href="/login">Log in</a>' : ''}${o.contact ? `<a href="mailto:${esc(o.contact)}">${esc(o.contact)}</a>` : ''}<a href="${buy}">Buy</a></nav>
 </div></footer>
 </body>
 </html>`;

@@ -5,6 +5,8 @@ import type { AppEnv, Env, Publication } from '../../types';
 import { one, all, run, val, insert, update, batch, stmt, insertStmt } from '../../lib/db';
 import { compile } from '../../lib/segments';
 import { validateEmail } from '../../lib/guard';
+import { countRejection } from '../../lib/rejections';
+import { suppress } from '../../lib/email';
 import { emit } from '../../lib/events';
 import { registerJob, enqueue, kick } from '../../lib/jobs';
 import { settings } from '../../lib/pub';
@@ -206,6 +208,7 @@ function guess(h: string): string {
   if (/^(tags?|labels?|groups?)$/.test(k)) return 'tags';
   if (/^(created|createdat|subscribedat|optintime|signupdate|subscribed|date)$/.test(k)) return 'created_at';
   if (/^(utmsource|source)$/.test(k)) return 'utm_source';
+  if (/^(status|subscriptionstatus|subscriberstatus|memberstatus|emailstatus|state|subscribedtoemails)$/.test(k)) return 'status';
   return '';
 }
 
@@ -220,7 +223,7 @@ app.get('/imports/:id/map', async (c) => {
   const sample = rows.slice(1, 6);
   const fields = await all<any>(c.env, 'SELECT key, label FROM custom_fields WHERE pub_id = ? ORDER BY label', pub.id);
   const lists = await all<any>(c.env, 'SELECT id, name, is_default FROM lists WHERE pub_id = ? ORDER BY name', pub.id);
-  const opts: Array<[string, string]> = [['', 'Ignore'], ['email', 'Email'], ['name', 'Full name'], ['first_name', 'First name'], ['last_name', 'Last name'], ['tags', 'Tags (comma separated)'], ['created_at', 'Subscribed date'], ['utm_source', 'Source / UTM source'], ...fields.map((f) => [`custom:${f.key}`, `Custom: ${f.label}`] as [string, string]), ['new_field', 'Create new custom field from column']];
+  const opts: Array<[string, string]> = [['', 'Ignore'], ['email', 'Email'], ['name', 'Full name'], ['first_name', 'First name'], ['last_name', 'Last name'], ['tags', 'Tags (comma separated)'], ['created_at', 'Subscribed date'], ['utm_source', 'Source / UTM source'], ['status', 'Status (unsubscribed and bounced rows stay out)'], ...fields.map((f) => [`custom:${f.key}`, `Custom: ${f.label}`] as [string, string]), ['new_field', 'Create new custom field from column']];
   const dbl = settings(pub).double_opt_in;
   return page(c, { title: `Import ${imp.filename}`, sub: 'imports', crumbs: [['/app/audience/imports', 'Import & export']] }, (
     <form method="post" action={`/app/audience/imports/${imp.id}/run`}>
@@ -288,6 +291,17 @@ app.get('/imports/:id', async (c) => {
 const CHUNK = 250;
 
 /** Process an import chunk with batched writes. Re-enqueues itself until done. */
+/** Status values other platforms export for readers who must not be emailed (beehiiv, Mailchimp, Kit, Ghost, MailerLite…). */
+function importStatusOut(status: string): { reason: string; label: string } | null {
+  const v = status.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!v) return null;
+  if (/^(unsubscribed|unsubscribe|inactive|cancelled|canceled|opted_out|optout|false|no|0|deleted|removed)$/.test(v)) return { reason: 'unsubscribe', label: 'Unsubscribed on the old platform — kept out' };
+  if (/^(bounced|hard_bounced|hardbounce|bounce|cleaned|invalid|undeliverable|blocked)$/.test(v)) return { reason: 'hard_bounce', label: 'Bounced on the old platform — kept out' };
+  if (/^(complained|complaint|spam|spam_complaint|junk|abuse)$/.test(v)) return { reason: 'complaint', label: 'Marked as spam on the old platform — kept out' };
+  if (/^(pending|unconfirmed|not_confirmed|awaiting_confirmation)$/.test(v)) return { reason: 'manual', label: 'Never confirmed on the old platform — kept out' };
+  return null;
+}
+
 registerJob('audience.import', async (env: Env, p: any) => {
   const imp = await one<any>(env, 'SELECT * FROM imports WHERE id = ?', p.import_id);
   if (!imp) return;
@@ -301,11 +315,11 @@ registerJob('audience.import', async (env: Env, p: any) => {
   const errors = parseJSON<any[]>(imp.errors, []);
   const blocked = settings(pub).blocked_domains;
   const t = now();
-  const parsed: Array<{ row: number; email: string; name: string; tags: string[]; custom: Record<string, string>; created: number | null; utm: string | null }> = [];
+  const parsed: Array<{ row: number; email: string; name: string; tags: string[]; custom: Record<string, string>; created: number | null; utm: string | null; status: string }> = [];
   const seen = new Set<string>();
   let skipped = 0;
   slice.forEach((r, i) => {
-    const rec = { row: p.offset + i + 1, email: '', name: '', first: '', last: '', tags: [] as string[], custom: {} as Record<string, string>, created: null as number | null, utm: null as string | null };
+    const rec = { row: p.offset + i + 1, email: '', name: '', first: '', last: '', tags: [] as string[], custom: {} as Record<string, string>, created: null as number | null, utm: null as string | null, status: '' };
     for (const [idx, target] of Object.entries(map)) {
       const v = (r[Number(idx)] || '').trim();
       if (!v) continue;
@@ -316,16 +330,25 @@ registerJob('audience.import', async (env: Env, p: any) => {
       else if (target === 'tags') rec.tags.push(...v.split(/[,;|]/).map((x) => x.trim().toLowerCase()).filter(Boolean));
       else if (target === 'created_at') { const d = Date.parse(v); if (!isNaN(d)) rec.created = d; }
       else if (target === 'utm_source') rec.utm = v.slice(0, 120);
+      else if (target === 'status') rec.status = v.toLowerCase();
       else if (target.startsWith('custom:')) rec.custom[target.slice(7)] = v.slice(0, 500);
     }
     if (!rec.name && (rec.first || rec.last)) rec.name = `${rec.first} ${rec.last}`.trim();
-    parsed.push({ row: rec.row, email: rec.email, name: rec.name.slice(0, 120), tags: rec.tags, custom: rec.custom, created: rec.created, utm: rec.utm });
+    parsed.push({ row: rec.row, email: rec.email, name: rec.name.slice(0, 120), tags: rec.tags, custom: rec.custom, created: rec.created, utm: rec.utm, status: rec.status });
   });
   const valid: typeof parsed = [];
   for (const r of parsed) {
     const v = await validateEmail(r.email, { extraBlocked: blocked });
-    if (!v.ok) { skipped++; if (errors.length < 500) errors.push({ row: r.row, email: r.email, reason: v.reason || 'invalid' }); continue; }
+    if (!v.ok) { skipped++; await countRejection(env, v); if (errors.length < 500) errors.push({ row: r.row, email: r.email, reason: v.reason || 'invalid' }); continue; }
     if (seen.has(v.email)) { skipped++; if (errors.length < 500) errors.push({ row: r.row, email: r.email, reason: 'Duplicate row in file' }); continue; }
+    // Readers who left, bounced or complained on the old platform stay out, and are suppressed here too.
+    const out = importStatusOut(r.status);
+    if (out) {
+      skipped++;
+      await suppress(env, v.email, 'pub', out.reason, pub.id);
+      if (errors.length < 500) errors.push({ row: r.row, email: r.email, reason: out.label });
+      continue;
+    }
     seen.add(v.email);
     valid.push({ ...r, email: v.email });
   }

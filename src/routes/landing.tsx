@@ -9,13 +9,53 @@ import { searchDocs, TOOLS } from '../lib/mcp';
 import { esc } from '../lib/util';
 import { landingHtml } from './landing/page';
 import { groupedRoutes, API_BASE } from './api/openapi';
+import { shell } from './landing/marketing';
+import { featuresIndex, featurePage, openPage, changelogPage, type PageCtx } from './landing/pages';
+import { featureBySlug } from './landing/features-data';
+import { openStats } from '../lib/openstats';
 
 const root = new Hono<AppEnv>();
 
 root.get('/', async (c) => {
   const user = await currentUser(c).catch(() => null);
   c.header('cache-control', user ? 'private, no-store' : 'public, max-age=300');
-  return c.html(landingHtml({ purchaseUrl: c.env.PURCHASE_URL, priceLabel: c.env.PRICE_LABEL, loggedIn: !!user, demo: c.req.query('static') !== '1' }));
+  return c.html(landingHtml({ purchaseUrl: c.env.PURCHASE_URL, priceLabel: c.env.PRICE_LABEL, loggedIn: !!user, demo: c.req.query('static') !== '1', contact: c.env.CONTACT_EMAIL, appUrl: c.env.APP_URL }));
+});
+
+// ── Marketing pages ──
+async function ctxFor(c: any): Promise<PageCtx> {
+  const user = await currentUser(c).catch(() => null);
+  c.header('cache-control', user ? 'private, no-store' : 'public, max-age=300');
+  return { purchaseUrl: c.env.PURCHASE_URL, priceLabel: c.env.PRICE_LABEL, contact: c.env.CONTACT_EMAIL, loggedIn: !!user };
+}
+const page = (p: PageCtx, active: any, title: string, description: string, body: string) => shell({ ...p, active, title, description, body });
+
+root.get('/features', async (c) => {
+  const p = await ctxFor(c);
+  return c.html(page(p, 'features', 'Features · OpenHive', 'Every OpenHive feature: editor, sending and deliverability, automations, audience, website, paid subscriptions, products, webinars, podcasts, community, growth, ads, analytics, API and MCP.', featuresIndex(p)));
+});
+root.get('/features/:slug', async (c) => {
+  const f = featureBySlug(c.req.param('slug'));
+  if (!f) return c.redirect('/features', 302);
+  const p = await ctxFor(c);
+  return c.html(page(p, 'features', `${f.title} · OpenHive`, `${f.tagline} ${f.intro}`, featurePage(p, f)));
+});
+root.get('/open', async (c) => {
+  const p = await ctxFor(c);
+  // Stats are cached for 10 minutes so the page stays cheap however busy it gets.
+  const cache = (globalThis as any).caches?.default as Cache | undefined;
+  const key = new Request(new URL('/__openstats', c.req.url).toString());
+  let stats: any = null;
+  try { const hit = await cache?.match(key); if (hit) stats = await hit.json(); } catch {}
+  if (!stats) {
+    stats = await openStats(c.env);
+    try { c.executionCtx.waitUntil(cache?.put(key, new Response(JSON.stringify(stats), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=600' } })) || Promise.resolve()); } catch {}
+  }
+  return c.html(page(p, 'open', 'Deliverability: live delivery, bounce and spam rates · OpenHive', 'Live delivery, bounce, spam complaint and open rates for the email this OpenHive install sends, and how each number is counted.', openPage(p, stats)));
+});
+root.get('/changelog', async (c) => {
+  const p = await ctxFor(c);
+  return c.html(page(p, 'changelog', 'Changelog · OpenHive', 'What\'s new in OpenHive, newest first.', changelogPage(p)));
 });
 
 const NAV_ORDER = ['readme', 'deploy', 'deliverability', 'api', 'mcp', 'support', 'architecture'];

@@ -15,6 +15,7 @@ export interface Env {
   PURCHASE_URL: string;
   PRICE_LABEL: string;
   PLATFORM_FEE_PERCENT: string;
+  CONTACT_EMAIL?: string;     // shown in the marketing site footer
   // optional secrets
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;

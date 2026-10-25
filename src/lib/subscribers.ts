@@ -1,4 +1,5 @@
 // Subscriber lifecycle: create (validated), confirm, unsubscribe, tags, custom fields, lists, referrals, engagement.
+import { countRejection } from './rejections';
 import type { Env, Publication, Subscriber } from '../types';
 import { one, all, run, insert, stmt, batch } from './db';
 import { emit } from './events';
@@ -40,7 +41,7 @@ export async function getSubscriber(env: Env, pubId: string, idOrEmail: string):
 export async function subscribe(env: Env, pub: Publication, input: SubscribeInput): Promise<SubscribeResult> {
   const cfg = settings(pub);
   const v = await validateEmail(input.email, { strict: input.strict, extraBlocked: cfg.blocked_domains });
-  if (!v.ok) return { ok: false, error: v.reason, suggestion: v.suggestion };
+  if (!v.ok) { await countRejection(env, v); return { ok: false, error: v.reason, suggestion: v.suggestion }; }
   const email = v.email;
   const t = now();
   const existing = await one<Subscriber>(env, 'SELECT * FROM subscribers WHERE pub_id = ? AND email = ?', pub.id, email);
