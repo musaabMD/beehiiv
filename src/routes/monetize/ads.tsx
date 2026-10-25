@@ -200,7 +200,7 @@ export function registerAds(dash: Hono<AppEnv>, root: Hono<AppEnv>) {
             { h: 'Campaigns', r: (r: any) => num(r.campaigns) },
             { h: 'Impressions', r: (r: any) => num(r.imps) },
             { h: 'Verified clicks', r: (r: any) => <>{num(r.clicks)}{r.bots ? <small class="muted"> (+{r.bots} bots)</small> : null}</> },
-            { h: 'eCPM', r: (r: any) => money(r.imps ? Math.round((r.earned / r.imps) * 1000) : 0) },
+            { h: 'eCPM', r: (r: any) => money(r.email_imps ? Math.round((r.earned / r.email_imps) * 1000) : 0) },
             { h: 'Earned', class: 'right', r: (r: any) => <strong>{money(r.earned)}</strong> },
           ]} />
         </Card>
