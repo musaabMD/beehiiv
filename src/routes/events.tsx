@@ -232,7 +232,7 @@ async function sendReminder(env: Env, pub: Publication, ev: any, reg: any, m: nu
   const human = left >= 1440 ? `${Math.round(left / 1440)} day${Math.round(left / 1440) > 1 ? 's' : ''}` : left >= 60 ? `${Math.round(left / 60)} hour${Math.round(left / 60) > 1 ? 's' : ''}` : `${left} minutes`;
   const url = joinUrl(env, pub, ev, reg.token);
   await sendTransactional(env, reg.email, `Starting in ${human}: ${ev.title}`, `<p>Hi${reg.name ? ' ' + esc(reg.name.split(' ')[0]) : ''}, a quick reminder that <strong>${esc(ev.title)}</strong> starts in ${human}.</p><p>📅 ${esc(whenText(ev, start, end))}</p>${ev.kind === 'in_person' ? `<p>📍 ${esc(ev.location || '')}</p>${button('View your ticket', url)}` : button('Join the event', url)}<p style="color:#6b7280;font-size:13px">Join from any browser — no downloads required.</p>`, pub, await senderFor(env, pub, 'transactional'));
-  await run(env, `UPDATE event_registrations SET reminders_sent = json_insert(COALESCE(reminders_sent, '[]'), '$[#]', ?) WHERE id = ?`, m, reg.id);
+  await run(env, `UPDATE event_registrations SET reminders_sent = json_insert(COALESCE(reminders_sent, '[]'), '$[#]', CAST(? AS INTEGER)) WHERE id = ?`, m, reg.id);
 }
 
 // ───────────────── dashboard ─────────────────
