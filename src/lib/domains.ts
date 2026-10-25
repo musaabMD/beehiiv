@@ -82,6 +82,34 @@ export async function checkDomain(env: Env, d: { id: string; hostname: string; k
   return { verified, checks };
 }
 
+// ───────── Platform (default MAIL_FROM) sending domain ─────────
+// The default sender domain isn't a publication's custom domain, so it lives in platform_domains. It gets the same
+// warm-up schedule and blocklist checks. Its warm-up clock starts at the first message ever sent from it (inferred from
+// the outbox), so an instance that has been sending for weeks isn't suddenly capped after an upgrade.
+
+export function platformHost(env: Env): string {
+  return (env.MAIL_FROM.split('@')[1] || '').toLowerCase();
+}
+
+/** Warm-up row for `host` when it's the default MAIL_FROM domain (created on first use); null otherwise or when disabled. */
+export async function platformWarmupDomain(env: Env, host: string): Promise<{ hostname: string; warmup_started_at: number | null; blocklisted: number } | null> {
+  if (!host || host !== platformHost(env) || (env.MAIL_FROM_WARMUP || '').toLowerCase() === 'off') return null;
+  let row = await one<any>(env, 'SELECT * FROM platform_domains WHERE hostname = ?', host);
+  if (!row) {
+    const first = await one<{ t: number | null }>(env, `SELECT MIN(created_at) AS t FROM outbox WHERE from_email LIKE ? AND status IN ('sent','simulated')`, `%@${host}>`);
+    await run(env, 'INSERT OR IGNORE INTO platform_domains (hostname, warmup_started_at, blocklisted, dns_report, created_at) VALUES (?, ?, 0, ?, ?)', host, first?.t || now(), '{}', now());
+    row = await one<any>(env, 'SELECT * FROM platform_domains WHERE hostname = ?', host);
+  }
+  return row;
+}
+
+/** Restart (or start) warm-up for the platform domain — e.g. after moving MAIL_FROM to a brand-new domain. */
+export async function restartPlatformWarmup(env: Env) {
+  const host = platformHost(env);
+  await run(env, `INSERT INTO platform_domains (hostname, warmup_started_at, blocklisted, dns_report, created_at) VALUES (?, ?, 0, '{}', ?)
+    ON CONFLICT(hostname) DO UPDATE SET warmup_started_at = excluded.warmup_started_at`, host, now(), now());
+}
+
 /** Warmup schedule: day n → cap (mirrors sender.warmupAllowance). */
 export function warmupSchedule(): Array<{ day: number; cap: number | null }> {
   return Array.from({ length: 13 }, (_, i) => ({ day: i + 1, cap: i >= 12 ? null : 200 * 2 ** i }));
@@ -125,6 +153,23 @@ export async function checkBlocklists(env: Env) {
       }
     } catch (e) {
       await logError(env, 'domains.blocklist', e, d.pub_id);
+    }
+  }
+  // the default MAIL_FROM domain (tracked in platform_domains) — alert the instance operators
+  const p = await platformWarmupDomain(env, platformHost(env)).catch(() => null);
+  if (p) {
+    try {
+      const res = await blocklistStatus(p.hostname);
+      const listed = res.filter((r) => r.listed);
+      await run(env, 'UPDATE platform_domains SET blocklisted = ?, dns_report = ? WHERE hostname = ?', listed.length ? 1 : 0, JSON.stringify({ blocklists: { checked_at: now(), results: res } }), p.hostname);
+      if (!!listed.length !== !!p.blocklisted) {
+        for (const a of (env.SUPERADMIN_EMAILS || '').split(',').map((x) => x.trim()).filter(Boolean)) {
+          await sendTransactional(env, a, listed.length ? `⚠️ ${p.hostname} (default sender) is on a blocklist — sending paused` : `✅ ${p.hostname} is off the blocklist — sending resumed`,
+            listed.length ? `<p>The platform sending domain <strong>${esc(p.hostname)}</strong> was found on: ${listed.map((l) => esc(l.name)).join(', ')}. Newsletters from it are paused until it's delisted.</p>` : `<p><strong>${esc(p.hostname)}</strong> is no longer listed. Sending has resumed.</p>`);
+        }
+      }
+    } catch (e) {
+      await logError(env, 'domains.blocklist', e);
     }
   }
 }

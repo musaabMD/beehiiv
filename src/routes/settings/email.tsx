@@ -7,6 +7,8 @@ import { settings, senderFor } from '../../lib/pub';
 import { validateEmail } from '../../lib/guard';
 import { suppress, unsuppress, sendTransactional } from '../../lib/email';
 import { hookKey } from '../core';
+import { platformHost, platformWarmupDomain, restartPlatformWarmup } from '../../lib/domains';
+import { warmupAllowance } from '../../lib/sender';
 import { id, now, form, str, ago, fmtDateTime, domainOf, pct, num, DAY } from '../../lib/util';
 import { Card, Field, Input, Select, Btn, ActionForm, Table, Badge, Status, Modal, OpenBtn, Grid, Help, Copy, Stats, Stat, back } from '../../ui/components';
 import { page } from './ui';
@@ -45,6 +47,14 @@ export function registerEmail(dash: Hono<AppEnv>) {
     const key = await hookKey(c.env);
     const base = c.env.APP_URL.replace(/\/$/, '');
     const { d, supp, doms } = await deliverabilityStats(c);
+    const host = platformHost(c.env);
+    const bounceAddr = c.env.BOUNCE_ADDRESS || `bounces@${host}`;
+    const fblAddr = c.env.FBL_ADDRESS || `fbl@${host}`;
+    const inbound = await all<any>(c.env, `SELECT * FROM inbound_reports WHERE pub_id = ? OR (pub_id IS NULL AND email IN (SELECT email FROM subscribers WHERE pub_id = ?)) ORDER BY created_at DESC LIMIT 50`, pub.id, pub.id);
+    // default sender domain warm-up (only relevant when this publication sends from the platform domain)
+    const platformWarm = await platformWarmupDomain(c.env, host).catch(() => null);
+    const warm = platformWarm ? await warmupAllowance(c.env, `x@${host}`) : null;
+    const warmDay = platformWarm?.warmup_started_at ? Math.floor((now() - platformWarm.warmup_started_at) / DAY) + 1 : 0;
     const total = Number(d.total || 0);
     const dkimOk = doms.some((x: any) => JSON.parse(x.dns_report || '{}').checks?.find((k: any) => k.key === 'dkim')?.ok);
     const spfOk = doms.some((x: any) => JSON.parse(x.dns_report || '{}').checks?.find((k: any) => k.key === 'spf')?.ok);
@@ -75,11 +85,23 @@ export function registerEmail(dash: Hono<AppEnv>) {
             </ul>
           </Card>
           <Card title="Bounce & feedback-loop processing">
-            <Help>Bounces are classified (hard, soft, mailbox full, DNS) — hard bounces and complaints are suppressed permanently; soft bounces and full mailboxes get temporary suppressions that expire on their own. Deferred mail is retried for 26 hours before it counts as a bounce.</Help>
-            <Field label="Bounce webhook (JSON or DSN)"><Copy value={`${base}/hooks/bounce?key=${key}`} /></Field>
-            <Field label="Feedback-loop (ARF) endpoint" hint="Register this address/endpoint with mailbox-provider FBL programs (Yahoo CFL, Microsoft JMRP, etc.). Complaints are added to this publication's suppression list."><Copy value={`${base}/hooks/fbl?key=${key}`} /></Field>
-            <Help>Example: <code>curl -X POST -H 'content-type: application/json' -d '{"{"}"email":"x@y.com","type":"complaint"{"}"}' '{base}/hooks/bounce?key=…'</code></Help>
+            <Help>Bounces are classified (hard, soft, mailbox full, DNS, policy) — hard bounces and complaints are suppressed permanently; soft bounces and full mailboxes get temporary suppressions that expire on their own. Deferred mail is retried for 26 hours before it counts as a bounce. Bounces of transactional mail (login links, receipts) go to the transactional layer; newsletter complaints never block a reader's login link.</Help>
+            <Field label="Feedback-loop report address" hint="Register this address with mailbox-provider FBL programs (Yahoo CFL, Microsoft JMRP, Validity UFBL). Route it to the OpenHive Worker in Cloudflare Email Routing; ARF reports become complaint suppressions automatically."><Copy value={fblAddr} /></Field>
+            <Field label="Bounce mailbox" hint="Route it (and optionally your sender address) to the Worker in Email Routing so bounce messages (DSNs) and mailto: unsubscribes are processed. Cloudflare Email Sending's own bounce/complaint events can also be delivered through a Queue — see the Deliverability docs."><Copy value={bounceAddr} /></Field>
+            <details><summary class="muted small">HTTP endpoints for other bounce sources</summary>
+              <Field label="Bounce webhook (JSON or DSN)"><Copy value={`${base}/hooks/bounce?key=${key}`} /></Field>
+              <Field label="Feedback-loop (ARF) endpoint"><Copy value={`${base}/hooks/fbl?key=${key}`} /></Field>
+              <Help>Example: <code>curl -X POST -H 'content-type: application/json' -d '{"{"}"email":"x@y.com","type":"complaint"{"}"}' '{base}/hooks/bounce?key=…'</code></Help>
+            </details>
           </Card>
+          {platformWarm && warm && (
+            <Card title={`Default sender warm-up · ${host}`}>
+              {platformWarm.blocklisted ? <div class="callout warn">{host} is on a blocklist — newsletters from it are paused until it's delisted.</div> : null}
+              <p>{warmDay > 12 ? <>Warm-up complete — no daily cap.</> : <>Day <strong>{warmDay}</strong> of 12 · today's cap <strong>{num(200 * 2 ** (warmDay - 1))}</strong> · <strong>{warm.remaining === Infinity ? '∞' : num(warm.remaining)}</strong> left in the last 24 h.</>}</p>
+              <Help>The platform domain (<code>{c.env.MAIL_FROM}</code>) warms up like a custom domain: 200 emails on day 1, doubling daily, uncapped after day 12. Its clock started with the first email this instance sent from it. Sends that hit the cap pause and resume the next hour.{c.get('user').is_superadmin ? ' Moved MAIL_FROM to a brand-new domain? Restart the schedule.' : ''}</Help>
+              {c.get('user').is_superadmin ? <ActionForm action="/app/settings/email/platform-warmup/restart" label="Restart warm-up" confirm="Restart the warm-up schedule for the default sending domain? Newsletters from it will be capped at 200/day again." /> : null}
+            </Card>
+          )}
         </Grid>
 
         <Card title="Sender addresses" actions={<OpenBtn target="#sender" small>Add sender</OpenBtn>} pad={false}>
@@ -115,6 +137,21 @@ export function registerEmail(dash: Hono<AppEnv>) {
               { h: 'Type', r: (x: any) => (x.expires_at ? <span>Temporary · {x.expires_at > now() ? `expires ${fmtDateTime(x.expires_at)}` : 'expired'}</span> : <span>Permanent</span>) },
               { h: 'Added', r: (x: any) => <span class="muted">{ago(x.created_at)}</span> },
               { h: '', class: 'right', r: (x: any) => <ActionForm action="/app/settings/email/suppressions/remove" fields={{ email: x.email, scope: x.scope }} label="Remove" confirm={x.scope === 'global' ? 'Remove a global suppression? Only do this if you are sure the address is valid.' : undefined} /> },
+            ]}
+          />
+        </Card>
+
+        <Card title="Inbound reports" actions={<span class="muted small">Bounces, complaints and unsubscribes received from Email Routing, Email Sending events and the hooks (last 50).</span>} pad={false}>
+          <Table
+            rows={inbound}
+            empty="No bounce or complaint reports yet."
+            cols={[
+              { h: 'When', r: (x: any) => <span class="nowrap">{ago(x.created_at)}</span> },
+              { h: 'Report', r: (x: any) => <Badge tone={x.kind === 'complaint' ? 'red' : x.kind === 'bounce' ? 'amber' : x.kind === 'unsubscribe' ? 'purple' : 'gray'}>{x.kind}{x.bounce_type && x.kind === 'bounce' ? ` · ${x.bounce_type}` : ''}</Badge> },
+              { h: 'Address', r: (x: any) => x.email || '—' },
+              { h: 'Mail', r: (x: any) => <span class="muted small">{x.mail_kind || '—'}</span> },
+              { h: 'Via', r: (x: any) => <span class="muted small">{x.source === 'email' ? 'Email Routing' : x.source === 'queue' ? 'Email Sending events' : 'hook'}</span> },
+              { h: 'Detail', r: (x: any) => <code class="small truncate">{x.detail}</code> },
             ]}
           />
         </Card>
@@ -215,6 +252,13 @@ export function registerEmail(dash: Hono<AppEnv>) {
     for (const e of emails) await suppress(c.env, e, scope, 'manual', pub.id, days ? days * DAY : undefined);
     await audit(c, 'email.suppressed', `${emails.length} addresses`, { scope, days });
     return back(c, '/app/settings/email', `${emails.length} address(es) suppressed`);
+  });
+
+  dash.post('/email/platform-warmup/restart', requirePerm('admin'), async (c) => {
+    if (!c.get('user').is_superadmin) return back(c, '/app/settings/email', 'Only instance operators can restart the platform warm-up.', 'err');
+    await restartPlatformWarmup(c.env);
+    await audit(c, 'email.platform_warmup_restarted', platformHost(c.env));
+    return back(c, '/app/settings/email', 'Warm-up restarted for the default sending domain');
   });
 
   dash.post('/email/suppressions/remove', requirePerm('admin'), async (c) => {

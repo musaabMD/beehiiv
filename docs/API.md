@@ -96,15 +96,46 @@ When a post is created from a template, the template's current content is copied
 |---|---|
 | Segments | list, create (rules JSON), get, `GET /segments/{id}/subscribers`, recalculate, delete |
 | Lists | list, add/remove subscriber |
-| Automations | list, get (with per-email stats), `POST /automations/{id}/journeys` (enroll by id or email), list journeys |
+| Automations | list, get (with per-email stats), create, edit (draft), publish, pause/resume — see below; `POST /automations/{id}/journeys` (enroll by id or email), list journeys |
 | Tiers | list, create, update (pause/resume), archive; `GET /premium_subscriptions`; grant/cancel premium on a subscriber |
 | Referral program | milestones and totals, leaderboard, per-subscriber referrals |
-| Polls & surveys | list, live results/aggregates, individual responses |
-| Webhooks | list, create (returns signing secret), delete, delivery log |
+| Polls & surveys | list, live results/aggregates, individual responses; `POST /polls` (incl. trivia), `PATCH /polls/{id}` (close/reopen), `POST /surveys`, `PATCH /surveys/{id}` |
+| Webhooks | list, create (returns signing secret), update/upgrade version (`PATCH`), delete, `GET /webhooks/versions`, delivery log with every attempt (`?expand=attempts`, `GET /webhooks/{id}/deliveries/{did}`) |
 | Commerce | orders, products |
 | Podcasts | shows, episodes with downloads |
 | Stats | summary (with plain-English sentence), growth series, earnings |
 | Templates | list, get |
+
+## Automations
+
+Automations have a live version (what runs) and a draft version (what you edit), exactly like the visual builder. Creating or editing never touches running journeys until you publish.
+
+```bash
+API=https://YOUR_APP/api/v2/publication; AUTH="Authorization: Bearer $KEY"
+
+# create (saved as a draft); "activate": true publishes it and turns it on
+curl -X POST $API/automations -H "$AUTH" -H 'content-type: application/json' -d '{
+  "name": "VIP welcome",
+  "trigger": {"type": "tag_added", "config": {"tag": "vip"}},
+  "steps": [
+    {"type": "send_email", "config": {"subject": "Welcome, VIP", "markdown": "Thanks for **everything**."}},
+    {"type": "delay", "config": {"amount": 2, "unit": "days"}},
+    {"type": "add_tag", "config": {"tags": ["welcomed"]}}
+  ]
+}'
+
+# edit — name/description/allow_reentry apply now; trigger/steps go to the draft
+curl -X PATCH $API/automations/AUTOMATION_ID -H "$AUTH" -H 'content-type: application/json' -d '{"steps": [...]}'
+
+# publish the draft (journeys in progress continue on the new version, matched by step id);
+# {"activate": true} also turns a draft/paused automation on
+curl -X POST $API/automations/AUTOMATION_ID/publish -H "$AUTH" -H 'content-type: application/json' -d '{"activate": true}'
+
+curl -X POST $API/automations/AUTOMATION_ID/pause  -H "$AUTH"   # subscribers wait where they are
+curl -X POST $API/automations/AUTOMATION_ID/resume -H "$AUTH"
+```
+
+`GET /automations/{id}` returns the live `trigger`/`steps`, `has_draft`, and the `draft` version when one exists. Trigger types and step types are listed in the OpenAPI document; unknown types return `400 bad_request`.
 
 ## Segment rules
 
@@ -112,12 +143,29 @@ When a post is created from a template, the template's current content is copied
 
 ## Webhooks
 
-Configure endpoints in Settings → Webhooks or via the API. Each delivery is a POST with JSON:
+Configure endpoints in Settings → Webhooks or via the API. Each delivery is a POST with JSON in the endpoint's **payload version**:
 
 ```json
-{"id":"…","type":"subscription.created","version":"2026-10-01","created":1761300000,"publication_id":"…","data":{…}}
+// 2026-11-01 (latest — new endpoints get this)
+{"id":"…","object":"event","type":"subscription.created","version":"2026-11-01","created_at":"2026-11-01T12:00:00.000Z","publication_id":"…",
+ "data":{"subscriber":{"id":"…","email":"…","custom_fields":{"role":"founder"},"utm":{"source":"x","medium":"social","campaign":null},"created_at":"2026-11-01T12:00:00.000Z"}}}
+
+// 2026-10-01 (original)
+{"id":"…","type":"subscription.created","version":"2026-10-01","created":1793534400,"publication_id":"…",
+ "data":{"subscriber":{"id":"…","email":"…","custom":{"role":"founder"},"utm_source":"x","utm_medium":"social","utm_campaign":null,"created_at":1793534400000}}}
 ```
 
-Verify the `OpenHive-Signature: t=<unix>,v1=<hex>` header: compute `HMAC_SHA256(secret, "<t>.<raw body>")` and compare to `v1`. Failed deliveries retry with backoff for up to ~2 days; every attempt is logged and can be retried manually.
+### Payload versions
+
+Every endpoint is pinned to a version, so a receiver built against one shape keeps getting that shape. Events are rendered from the oldest shape through each version's upgrade step up to the endpoint's version. The changelog and a sample payload per version are in Settings → Webhooks and at `GET /webhooks/versions`.
+
+| Version | Changes |
+|---|---|
+| `2026-11-01` | `created` (Unix seconds) → `created_at` (ISO 8601) plus `object: "event"`; every `*_at` inside `data` is ISO 8601; `data.subscriber` matches the REST subscriber (`custom_fields`, `utm: {source, medium, campaign}`); `order.paid` nests `data.order` with `amount: {value_cents, currency}`; `podcast.episode.*` renames `episode.duration` → `duration_seconds`; `post.sent` renames `recipients` → `recipient_count` |
+| `2026-10-01` | Original format |
+
+Upgrade an endpoint from its page in Settings → Webhooks (or `PATCH /webhooks/{id}` with `{"version":"2026-11-01"}`); you can switch back at any time. Each request also carries an `OpenHive-Version` header.
+
+Verify the `OpenHive-Signature: t=<unix>,v1=<hex>` header: compute `HMAC_SHA256(secret, "<t>.<raw body>")` and compare to `v1`. Failed deliveries retry with backoff for up to ~2 days. Every attempt (status code, response body or network error, latency, manual or automatic) is stored and shown in the delivery log; failed deliveries can be retried manually.
 
 Events: `subscription.created|confirmed|deleted|upgraded|downgraded|paused|resumed`, `tier.created|deleted|paused|resumed`, `list.subscribed|unsubscribed`, `post.sent|scheduled|updated`, `survey.response_submitted`, `poll.vote`, `podcast.episode.published|updated|archived|deleted`, `podcast.private_feed.accessed`, `order.paid`, `event.registered`, `referral.milestone`, `community.post.created`.

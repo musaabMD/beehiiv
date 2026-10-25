@@ -6,10 +6,11 @@ import { apiError } from '../../lib/apiauth';
 import { validateEmail } from '../../lib/guard';
 import { subscribe, getSubscriber, unsubscribe, deleteSubscriber, addTags, removeTags, getTags, setFields, joinLists, leaveLists } from '../../lib/subscribers';
 import { recalcSegment, listMatching, countMatching, EMPTY_GROUP, type RuleGroup } from '../../lib/segments';
-import { enroll } from '../../lib/automations';
+import { enroll, publishDraft, TRIGGERS, STEP_TYPES } from '../../lib/automations';
 import { publishPost, sendTest, buildEmail, postContent } from '../../lib/sender';
 import { renderDoc, parseDoc, styleFor, GMAIL_CLIP_BYTES, type Block } from '../../lib/render';
 import { emit } from '../../lib/events';
+import { WEBHOOK_VERSIONS, LATEST_WEBHOOK_VERSION, isWebhookVersion, deliveryAttempts } from '../../lib/webhooks';
 import { siteUrl } from '../../lib/pub';
 import { markdownToBlocks } from '../../lib/markdown';
 import { postStats, providerStats, summary, growthSeries, earnings } from '../../lib/stats';
@@ -374,7 +375,115 @@ route('DELETE', '/lists/:id/subscribers/:sid', 'Lists', 'Remove a subscriber fro
 });
 
 // ───────── automations ─────────
-const serAuto = (a: any) => ({ id: a.id, name: a.name, description: a.description, status: a.status, trigger: parseJSON(a.trigger, {}), steps: parseJSON(a.steps, []), has_draft: !!a.draft_steps, published_at: iso(a.published_at), created_at: iso(a.created_at), updated_at: iso(a.updated_at) });
+// Shared by REST and MCP. Edits always go to the draft version (draft_trigger / draft_steps) so a live automation keeps
+// running unchanged until the draft is published — the same model as the visual builder.
+const serAuto = (a: any) => ({
+  id: a.id, name: a.name, description: a.description, status: a.status, allow_reentry: !!a.allow_reentry,
+  trigger: parseJSON(a.trigger, {}), steps: parseJSON(a.steps, []),
+  has_draft: a.draft_steps != null || a.draft_trigger != null,
+  draft: a.draft_steps != null || a.draft_trigger != null ? { trigger: parseJSON(a.draft_trigger ?? a.trigger, {}), steps: parseJSON(a.draft_steps ?? a.steps, []) } : null,
+  published_at: iso(a.published_at), created_at: iso(a.created_at), updated_at: iso(a.updated_at),
+});
+
+/** Validate + normalize a step tree (ids, markdown → editor doc for send_email, yes/no branches). */
+export function normalizeSteps(steps: any[], depth = 0): any[] {
+  if (!Array.isArray(steps)) throw new BadRequest('steps must be an array.');
+  if (depth > 20) throw new BadRequest('steps are nested too deeply.');
+  return steps.map((s) => {
+    if (!s || typeof s !== 'object') throw new BadRequest('Each step must be an object {type, config}.');
+    if (!STEP_TYPES[s.type]) throw new BadRequest(`Unknown step type "${s.type}". Valid: ${Object.keys(STEP_TYPES).join(', ')}.`);
+    const config = { ...(s.config || {}) };
+    if (s.type === 'send_email' && config.markdown && !config.doc) { config.doc = { blocks: markdownToBlocks(String(config.markdown)) }; delete config.markdown; }
+    return { id: String(s.id || id(8)).slice(0, 40), type: String(s.type), config, ...(s.yes ? { yes: normalizeSteps(s.yes, depth + 1) } : {}), ...(s.no ? { no: normalizeSteps(s.no, depth + 1) } : {}) };
+  });
+}
+
+function normalizeTrigger(t: any): { type: string; config: Record<string, unknown> } {
+  if (!t || typeof t !== 'object' || !TRIGGERS[t.type]) throw new BadRequest(`Unknown trigger type "${t?.type}". Valid: ${Object.keys(TRIGGERS).join(', ')}.`);
+  return { type: String(t.type), config: t.config && typeof t.config === 'object' ? t.config : {} };
+}
+
+/** Make the draft version live and set status active (requires at least one step). */
+export async function activateAutomation(env: any, pub: Publication, a: any): Promise<any> {
+  if (a.status === 'archived') throw new BadRequest('Archived automations cannot be activated.');
+  if (a.draft_steps != null || a.draft_trigger != null) await publishDraft(env, a.id, pub.id);
+  const fresh = await one<any>(env, 'SELECT * FROM automations WHERE id = ?', a.id);
+  if (!parseJSON<any[]>(fresh.steps, []).length) throw new BadRequest('Add at least one step before activating.');
+  if (!TRIGGERS[parseJSON<any>(fresh.trigger, {}).type]) throw new BadRequest('Set a trigger before activating.');
+  await run(env, `UPDATE automations SET status = 'active', updated_at = ? WHERE id = ?`, now(), a.id);
+  return one<any>(env, 'SELECT * FROM automations WHERE id = ?', a.id);
+}
+
+/** Create an automation (as a draft version; `activate: true` publishes it and turns it on). */
+export async function createAutomation(env: any, pub: Publication, b: Record<string, any>): Promise<any> {
+  const name = String(b.name || '').trim().slice(0, 120);
+  if (!name) throw new BadRequest('name is required.');
+  const trigger = normalizeTrigger(b.trigger);
+  const steps = normalizeSteps(b.steps || []);
+  const aid = id();
+  await insert(env, 'automations', {
+    id: aid, pub_id: pub.id, name, description: String(b.description || '').slice(0, 500), status: 'draft', trigger: '{}', steps: '[]',
+    draft_trigger: JSON.stringify(trigger), draft_steps: JSON.stringify(steps), allow_reentry: b.allow_reentry ? 1 : 0, created_at: now(), updated_at: now(),
+  });
+  const row = await one<any>(env, 'SELECT * FROM automations WHERE id = ?', aid);
+  return b.activate ? activateAutomation(env, pub, row) : row;
+}
+
+/** Edit an automation. name/description/allow_reentry apply immediately; trigger/steps go to the draft version. */
+export async function updateAutomation(env: any, pub: Publication, a: any, b: Record<string, any>): Promise<any> {
+  if (a.status === 'archived') throw new BadRequest('Archived automations cannot be edited.');
+  const patch: Record<string, unknown> = { updated_at: now() };
+  if (b.name !== undefined) { const n = String(b.name).trim().slice(0, 120); if (!n) throw new BadRequest('name cannot be empty.'); patch.name = n; }
+  if (b.description !== undefined) patch.description = String(b.description || '').slice(0, 500);
+  if (b.allow_reentry !== undefined) patch.allow_reentry = b.allow_reentry ? 1 : 0;
+  if (b.trigger !== undefined) patch.draft_trigger = JSON.stringify(normalizeTrigger(b.trigger));
+  if (b.steps !== undefined) patch.draft_steps = JSON.stringify(normalizeSteps(b.steps));
+  await update(env, 'automations', a.id, patch, pub.id);
+  return one<any>(env, 'SELECT * FROM automations WHERE id = ?', a.id);
+}
+
+/** Publish the draft version. Running journeys are re-anchored by step id. `activate` also turns a draft/paused automation on. */
+export async function publishAutomation(env: any, pub: Publication, a: any, activate = false): Promise<any> {
+  if (activate) return activateAutomation(env, pub, a);
+  if (a.draft_steps == null && a.draft_trigger == null) throw new BadRequest('There are no draft changes to publish.');
+  await publishDraft(env, a.id, pub.id);
+  return one<any>(env, 'SELECT * FROM automations WHERE id = ?', a.id);
+}
+
+export async function setAutomationPaused(env: any, pub: Publication, a: any, paused: boolean): Promise<any> {
+  if (paused && a.status !== 'active') throw new BadRequest(`Only active automations can be paused (status is ${a.status}).`);
+  if (!paused && a.status !== 'paused') throw new BadRequest(`Only paused automations can be resumed (status is ${a.status}). Use publish with activate=true to turn on a draft.`);
+  await run(env, 'UPDATE automations SET status = ?, updated_at = ? WHERE id = ? AND pub_id = ?', paused ? 'paused' : 'active', now(), a.id, pub.id);
+  return one<any>(env, 'SELECT * FROM automations WHERE id = ?', a.id);
+}
+
+const AUTO_BODY = {
+  name: 'string', description: 'string', allow_reentry: 'boolean',
+  trigger: `{type, config} — types: ${Object.keys(TRIGGERS).join(', ')}`,
+  steps: `[{id?, type, config, yes?, no?}] — types: ${Object.keys(STEP_TYPES).join(', ')}; send_email config accepts markdown`,
+};
+route('POST', '/automations', 'Automations', 'Create an automation (saved as a draft; activate=true publishes it and turns it on)', async (c, pub) => {
+  const b = await body(c);
+  const a = await createAutomation(c.env, pub, b);
+  return c.json({ data: serAuto(a) }, 201);
+}, { body: { ...AUTO_BODY, activate: 'boolean' } });
+route('PATCH', '/automations/:id', 'Automations', 'Edit an automation — trigger/steps go to the draft version; the live version keeps running until published', async (c, pub) => {
+  const a: any = await needRow(c, 'automations', pub, 'Automation');
+  return c.json({ data: serAuto(await updateAutomation(c.env, pub, a, await body(c))) });
+}, { body: AUTO_BODY });
+route('POST', '/automations/:id/publish', 'Automations', 'Publish the draft version (running journeys continue on the new version); activate=true also turns it on', async (c, pub) => {
+  const a: any = await needRow(c, 'automations', pub, 'Automation');
+  const b = await body(c);
+  return c.json({ data: serAuto(await publishAutomation(c.env, pub, a, b.activate === true || b.activate === 'true')) });
+}, { body: { activate: 'boolean (default false)' } });
+route('POST', '/automations/:id/pause', 'Automations', 'Pause an active automation (subscribers wait where they are)', async (c, pub) => {
+  const a: any = await needRow(c, 'automations', pub, 'Automation');
+  return c.json({ data: serAuto(await setAutomationPaused(c.env, pub, a, true)) });
+});
+route('POST', '/automations/:id/resume', 'Automations', 'Resume a paused automation', async (c, pub) => {
+  const a: any = await needRow(c, 'automations', pub, 'Automation');
+  return c.json({ data: serAuto(await setAutomationPaused(c.env, pub, a, false)) });
+});
 route('GET', '/automations', 'Automations', 'List automations with journey counts', async (c, pub) => {
   const rows = await all<any>(c.env, `SELECT a.*, (SELECT COUNT(*) FROM automation_runs r WHERE r.automation_id = a.id) AS enrolled, (SELECT COUNT(*) FROM automation_runs r WHERE r.automation_id = a.id AND r.status IN ('active','waiting')) AS in_progress FROM automations a WHERE a.pub_id = ? ORDER BY a.created_at DESC`, pub.id);
   return c.json({ data: rows.map((a) => ({ ...serAuto(a), stats: { enrolled: a.enrolled, in_progress: a.in_progress } })) });
@@ -612,6 +721,26 @@ route('GET', '/polls/:id', 'Polls & surveys', 'Poll results (live aggregate)', a
   });
   return c.json({ data: { id: p.id, question: p.question, total_votes: total, options: opts, closed: !!p.closed } });
 });
+route('POST', '/polls', 'Polls & surveys', 'Create a poll (or a trivia question) to embed in posts', async (c, pub) => {
+  const b = await body(c);
+  const question = String(b.question || '').trim().slice(0, 300);
+  if (!question) throw new BadRequest('question is required.');
+  const labels: string[] = (Array.isArray(b.options) ? b.options : []).map((o: any) => String(typeof o === 'object' && o ? o.label : o).trim()).filter(Boolean).slice(0, 10);
+  if (labels.length < 2) throw new BadRequest('options needs at least two labels.');
+  const options = labels.map((label) => ({ id: id(6), label: label.slice(0, 200) }));
+  const trivia = b.kind === 'trivia';
+  const ci = int(b.correct_option, 0) - 1;
+  if (trivia && (ci < 0 || ci >= options.length)) throw new BadRequest('correct_option (1-based index into options) is required for trivia.');
+  const pid = id(12);
+  await insert(c.env, 'polls', { id: pid, pub_id: pub.id, question, options: JSON.stringify(options), purpose: ['general', 'topic', 'product', 'pricing'].includes(b.purpose) ? b.purpose : 'general', kind: trivia ? 'trivia' : 'standard', correct_option_id: trivia ? options[ci].id : null, explanation: trivia ? String(b.explanation || '').slice(0, 1000) : '', closed: 0, created_at: now() });
+  return c.json({ data: { id: pid, question, options, kind: trivia ? 'trivia' : 'standard', closed: false, url: `${siteUrl(c.env, pub)}/poll/${pid}` } }, 201);
+}, { body: { question: 'string', options: 'string[] (2-10)', purpose: 'general|topic|product|pricing', kind: 'standard|trivia', correct_option: 'trivia: 1-based option index', explanation: 'trivia: shown after voting' } });
+route('PATCH', '/polls/:id', 'Polls & surveys', 'Close or reopen a poll', async (c, pub) => {
+  const p: any = await needRow(c, 'polls', pub, 'Poll');
+  const b = await body(c);
+  if (b.closed !== undefined) await run(c.env, 'UPDATE polls SET closed = ? WHERE id = ?', b.closed ? 1 : 0, p.id);
+  return c.json({ data: { id: p.id, closed: b.closed !== undefined ? !!b.closed : !!p.closed } });
+}, { body: { closed: 'boolean' } });
 route('GET', '/polls/:id/responses', 'Polls & surveys', 'Individual poll votes tied to subscribers', async (c, pub) => {
   const p: any = await needRow(c, 'polls', pub, 'Poll');
   return paginate(c, 'poll_votes', 'poll_id = ?', [p.id], async (v) => ({ id: v.id, option_id: v.option_id, channel: v.channel, post_id: v.post_id, subscriber: v.subscriber_id ? await one(c.env, 'SELECT id, email, name FROM subscribers WHERE id = ?', v.subscriber_id) : null, created_at: iso(v.created_at) }));
@@ -634,6 +763,40 @@ route('GET', '/surveys/:id', 'Polls & surveys', 'Survey with per-question aggreg
   });
   return c.json({ data: { id: s.id, title: s.title, total_responses: resp.length, questions: results } });
 });
+const SURVEY_KINDS = ['short', 'long', 'single', 'multi', 'dropdown', 'rating', 'nps', 'date'];
+function surveyQuestions(qs: any): any[] {
+  if (!Array.isArray(qs) || !qs.length) throw new BadRequest('questions must be a non-empty array of {label, kind, options?, required?}.');
+  return qs.slice(0, 50).map((q: any) => {
+    if (!q || !String(q.label || '').trim()) throw new BadRequest('Every question needs a label.');
+    const kind = q.kind || 'short';
+    if (!SURVEY_KINDS.includes(kind)) throw new BadRequest(`Unknown question kind "${kind}". Valid: ${SURVEY_KINDS.join(', ')}.`);
+    const options = Array.isArray(q.options) ? q.options.map((o: any) => String(o).slice(0, 200)).filter(Boolean).slice(0, 30) : undefined;
+    if (['single', 'multi', 'dropdown'].includes(kind) && (!options || options.length < 2)) throw new BadRequest(`"${q.label}" needs at least two options.`);
+    return { id: String(q.id || id(6)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20) || id(6), kind, label: String(q.label).slice(0, 300), options, required: !!q.required };
+  });
+}
+route('POST', '/surveys', 'Polls & surveys', 'Create a survey', async (c, pub) => {
+  const b = await body(c);
+  const title = String(b.title || '').trim().slice(0, 200);
+  if (!title) throw new BadRequest('title is required.');
+  const questions = surveyQuestions(b.questions);
+  const sid = id(12);
+  await insert(c.env, 'surveys', { id: sid, pub_id: pub.id, title, description: String(b.description || '').slice(0, 1000), questions: JSON.stringify(questions), status: b.status === 'closed' ? 'closed' : 'active', thank_you: String(b.thank_you || 'Thanks for your response!').slice(0, 300), created_at: now() });
+  return c.json({ data: { id: sid, title, status: b.status === 'closed' ? 'closed' : 'active', questions, url: `${siteUrl(c.env, pub)}/survey/${sid}` } }, 201);
+}, { body: { title: 'string', description: 'string', questions: `[{label, kind: ${SURVEY_KINDS.join('|')}, options?, required?}]`, thank_you: 'string', status: 'active|closed' } });
+route('PATCH', '/surveys/:id', 'Polls & surveys', 'Update a survey (title, description, thank-you message, status, questions)', async (c, pub) => {
+  const s: any = await needRow(c, 'surveys', pub, 'Survey');
+  const b = await body(c);
+  const patch: Record<string, unknown> = {};
+  if (b.title !== undefined) { const t = String(b.title).trim().slice(0, 200); if (!t) throw new BadRequest('title cannot be empty.'); patch.title = t; }
+  if (b.description !== undefined) patch.description = String(b.description || '').slice(0, 1000);
+  if (b.thank_you !== undefined) patch.thank_you = String(b.thank_you || 'Thanks for your response!').slice(0, 300);
+  if (b.status !== undefined) patch.status = b.status === 'closed' ? 'closed' : 'active';
+  if (b.questions !== undefined) patch.questions = JSON.stringify(surveyQuestions(b.questions));
+  await update(c.env, 'surveys', s.id, patch, pub.id);
+  const f: any = await one(c.env, 'SELECT * FROM surveys WHERE id = ?', s.id);
+  return c.json({ data: { id: f.id, title: f.title, status: f.status, questions: parseJSON(f.questions, []) } });
+}, { body: { title: 'string', description: 'string', questions: 'array (replaces all)', thank_you: 'string', status: 'active|closed' } });
 route('GET', '/surveys/:id/responses', 'Polls & surveys', 'Individual survey responses', async (c, pub) => {
   const s: any = await needRow(c, 'surveys', pub, 'Survey');
   return paginate(c, 'survey_responses', 'survey_id = ?', [s.id], async (r) => ({ id: r.id, answers: parseJSON(r.answers, {}), subscriber: r.subscriber_id ? await one(c.env, 'SELECT id, email, name FROM subscribers WHERE id = ?', r.subscriber_id) : null, created_at: iso(r.created_at) }));
@@ -650,20 +813,60 @@ route('POST', '/webhooks', 'Webhooks', 'Create a webhook endpoint (returns the s
   const events: string[] = Array.isArray(b.events) && b.events.length ? b.events : ['*'];
   const bad = events.filter((e) => e !== '*' && !(WEBHOOK_EVENTS as readonly string[]).includes(e));
   if (bad.length) throw new BadRequest(`Unknown events: ${bad.join(', ')}`);
+  if (b.version !== undefined && !isWebhookVersion(b.version)) throw new BadRequest(`Unknown version. Available: ${WEBHOOK_VERSIONS.map((v) => v.version).join(', ')}`);
+  const version = b.version || LATEST_WEBHOOK_VERSION;
   const wid = id();
   const secret = 'whsec_' + token(24);
-  await insert(c.env, 'webhooks', { id: wid, pub_id: pub.id, url: u.toString(), description: String(b.description || ''), events: JSON.stringify(events), secret, active: 1, created_at: now() });
-  return c.json({ data: { id: wid, url: u.toString(), events, secret, active: true } }, 201);
-}, { body: { url: 'string', events: 'string[] (default ["*"])', description: 'string' } });
+  await insert(c.env, 'webhooks', { id: wid, pub_id: pub.id, url: u.toString(), description: String(b.description || ''), events: JSON.stringify(events), secret, version, active: 1, created_at: now() });
+  return c.json({ data: { id: wid, url: u.toString(), events, version, secret, active: true } }, 201);
+}, { body: { url: 'string', events: 'string[] (default ["*"])', description: 'string', version: 'payload version (default: latest — see GET /webhooks/versions)' } });
+route('GET', '/webhooks/versions', 'Webhooks', 'Available payload versions with changelog', async (c) => c.json({ data: WEBHOOK_VERSIONS.map((v) => ({ version: v.version, released: v.released, latest: v.version === LATEST_WEBHOOK_VERSION, summary: v.summary, changes: v.changes })) }));
+route('PATCH', '/webhooks/:id', 'Webhooks', 'Update an endpoint (url, events, description, active, or upgrade/downgrade its payload version)', async (c, pub) => {
+  const w: any = await needRow(c, 'webhooks', pub, 'Webhook');
+  const b = await body(c);
+  const patch: Record<string, unknown> = {};
+  if (b.url !== undefined) {
+    let u: URL;
+    try { u = new URL(String(b.url)); } catch { throw new BadRequest('url must be a valid https URL.'); }
+    if (!/^https?:$/.test(u.protocol)) throw new BadRequest('url must be http(s).');
+    patch.url = u.toString();
+  }
+  if (b.events !== undefined) {
+    const { WEBHOOK_EVENTS } = await import('../../lib/events');
+    const events: string[] = Array.isArray(b.events) && b.events.length ? b.events : ['*'];
+    const bad = events.filter((e) => e !== '*' && !(WEBHOOK_EVENTS as readonly string[]).includes(e));
+    if (bad.length) throw new BadRequest(`Unknown events: ${bad.join(', ')}`);
+    patch.events = JSON.stringify(events);
+  }
+  if (b.description !== undefined) patch.description = String(b.description || '').slice(0, 200);
+  if (b.active !== undefined) patch.active = b.active ? 1 : 0;
+  if (b.version !== undefined) {
+    if (!isWebhookVersion(b.version)) throw new BadRequest(`Unknown version. Available: ${WEBHOOK_VERSIONS.map((v) => v.version).join(', ')}`);
+    patch.version = b.version;
+  }
+  if (Object.keys(patch).length) await update(c.env, 'webhooks', w.id, patch, pub.id);
+  const f: any = await one(c.env, 'SELECT id, url, description, events, version, active, created_at FROM webhooks WHERE id = ?', w.id);
+  return c.json({ data: { ...f, events: parseJSON(f.events, []), active: !!f.active, created_at: iso(f.created_at) } });
+}, { body: { url: 'string', events: 'string[]', description: 'string', active: 'boolean', version: 'payload version' } });
 route('DELETE', '/webhooks/:id', 'Webhooks', 'Delete a webhook endpoint', async (c, pub) => {
   const w: any = await needRow(c, 'webhooks', pub, 'Webhook');
   await run(c.env, 'DELETE FROM webhooks WHERE id = ?', w.id);
   return c.json({ data: { id: w.id, deleted: true } });
 });
-route('GET', '/webhooks/:id/deliveries', 'Webhooks', 'Delivery attempts log for an endpoint', async (c, pub) => {
+route('GET', '/webhooks/:id/deliveries', 'Webhooks', 'Delivery log for an endpoint (expand=attempts includes every attempt)', async (c, pub) => {
   const w: any = await needRow(c, 'webhooks', pub, 'Webhook');
-  return paginate(c, 'webhook_deliveries', 'webhook_id = ?', [w.id], (d) => ({ id: d.id, event: d.event, status: d.status, attempts: d.attempts, response_code: d.response_code, created_at: iso(d.created_at), updated_at: iso(d.updated_at) }));
-}, { query: PAGE_Q });
+  const withAttempts = (c.req.query('expand') || '').split(',').includes('attempts');
+  return paginate(c, 'webhook_deliveries', 'webhook_id = ?', [w.id], async (d) => ({
+    id: d.id, event: d.event, version: parseJSON<any>(d.payload, {}).version ?? null, status: d.status, attempts: d.attempts, response_code: d.response_code, created_at: iso(d.created_at), updated_at: iso(d.updated_at),
+    ...(withAttempts ? { attempt_log: (await deliveryAttempts(c.env, d.id)).map((a) => ({ ...a, manual: !!a.manual, created_at: iso(a.created_at) })) } : {}),
+  }));
+}, { query: { ...PAGE_Q, expand: 'attempts' } });
+route('GET', '/webhooks/:id/deliveries/:did', 'Webhooks', 'One delivery: payload and every attempt (status code, response, latency)', async (c, pub) => {
+  const w: any = await needRow(c, 'webhooks', pub, 'Webhook');
+  const d = await one<any>(c.env, 'SELECT * FROM webhook_deliveries WHERE id = ? AND webhook_id = ?', c.req.param('did'), w.id);
+  if (!d) throw new NotFound('Delivery not found.');
+  return c.json({ data: { id: d.id, event: d.event, status: d.status, attempts: d.attempts, payload: parseJSON(d.payload, {}), attempt_log: (await deliveryAttempts(c.env, d.id)).map((a) => ({ ...a, manual: !!a.manual, created_at: iso(a.created_at) })), created_at: iso(d.created_at), updated_at: iso(d.updated_at) } });
+});
 
 // ───────── commerce, podcasts ─────────
 route('GET', '/orders', 'Commerce', 'List orders (subscriptions, products, tickets…)', async (c, pub) => {

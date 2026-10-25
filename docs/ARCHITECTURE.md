@@ -7,7 +7,7 @@ Email Sending (the `send_email` binding), Cron Triggers (jobs), and optional Wor
 ## Layout
 
 ```
-src/index.tsx          entry: mounts modules, resolves publication sites, cron
+src/index.tsx          entry: mounts modules, resolves publication sites, cron, email() (Email Routing) and queue() (Email Sending events)
 src/types.ts           Env, Vars, Module contract
 src/lib/*              shared core (see below). Do not change signatures; add new files instead.
 src/ui/components.tsx  dashboard UI kit (Card, Table, Field, Btn, Modal, charts, flash/back helpers)
@@ -77,7 +77,8 @@ Dashboard shared endpoints:
 | util.ts | ids, hashing, `esc`, formatting, CSV, `form(c.req)` body parser |
 | auth.ts | passwords, sessions, `requireUser`, `requirePerm`, `can`, reader sessions, single-use tokens (`issueToken/consumeToken`), `audit` |
 | guard.ts | email validation (syntax, disposable, typo, MX), `botScore`, `rateLimit`, Turnstile, crawler classification, bot-click filter |
-| email.ts | `sendMail` (binding or simulated outbox), suppression (global/pub/transactional, temporary/permanent), bounce classification, Feedback-ID, one-click unsubscribe headers, `sendTransactional` |
+| email.ts | `sendMail` (binding or simulated outbox), suppression (global/pub/transactional, temporary/permanent), bounce classification, X-OpenHive-Feedback-ID, one-click unsubscribe headers, `sendTransactional` |
+| inbound.ts | DSN / ARF / mailto-unsubscribe parsing and the shared bounce + complaint application used by the Worker `email()` handler (Email Routing), `queue()` handler (Email Sending events) and `/hooks/bounce`, `/hooks/fbl` |
 | render.ts | editor doc → web HTML / table-based email HTML; merge tags; dynamic content; paywall; TOC; footnotes; `emailLayout` |
 | sanitize.ts | allowlist sanitizer that balances tags |
 | sender.ts | `startSend`, batches, A/B subject tests, cohort tests, warmup caps, deferred retries (26h), `publishPost`, `sendTest`, `buildEmail` |
@@ -86,7 +87,7 @@ Dashboard shared endpoints:
 | catalog.ts | `ruleCatalog(env, pubId)` for the rule builder |
 | automations.ts | engine: triggers, `enroll`, `processRun`, steps, polling triggers, `publishDraft` |
 | events.ts | `emit()` bus (activity log + listeners), `WEBHOOK_EVENTS` |
-| webhooks.ts | signed, versioned webhook delivery with retries + log, `attemptDelivery` for manual retry |
+| webhooks.ts | signed webhook delivery with retries; payload versions (`WEBHOOK_VERSIONS`, per-version upgrade transforms, `buildPayload`); every attempt stored in `webhook_delivery_attempts`; `attemptDelivery` for manual retry |
 | jobs.ts | `enqueue`, `registerJob`, `registerPeriodic`, `runJobs`, `kick`, `logError` |
 | payments.ts | `createCheckout`, `markPaid`, `onOrderPaid(kind, fn)`, `applyOffer`, Stripe helpers |
 | media.ts | `storeFile`, `importFromUrl`, `serveObject` (range requests) |

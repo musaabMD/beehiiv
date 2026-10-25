@@ -11,7 +11,9 @@ import { siteUrl, settings } from './pub';
 import { emit } from './events';
 import { markdownToBlocks } from './markdown';
 import { postStats, providerStats, summary, growthSeries, earnings, statsSentence } from './stats';
-import { createPost, updatePost, serializePost, serializeSub, iso } from '../routes/api/rest';
+import { createPost, updatePost, serializePost, serializeSub, iso, createAutomation, updateAutomation, activateAutomation, publishAutomation, setAutomationPaused, BadRequest, NotFound } from '../routes/api/rest';
+import { sanitizeHtml } from './sanitize';
+import { APPLE_CATEGORIES } from './podcast';
 import { DOCS } from './docs-content';
 import { id, now, slugify, parseJSON, stripTags, money, clamp, int, DAY } from './util';
 
@@ -63,6 +65,250 @@ async function findPost(env: Env, pub: Publication, ref: string): Promise<Post> 
 
 async function ownerId(env: Env, pub: Publication): Promise<string | null> {
   return (await one<any>(env, 'SELECT owner_id FROM workspaces WHERE id = ?', pub.workspace_id))?.owner_id ?? null;
+}
+
+// ───────── podcasts (shows + episodes) ─────────
+const epPayload = (ep: any, show: any) => ({ episode: { id: ep.id, guid: ep.guid, title: ep.title, slug: ep.slug, status: ep.status, premium: !!ep.premium, season: ep.season, number: ep.number, duration: ep.duration, published_at: ep.published_at }, podcast: { id: show.id, title: show.title, slug: show.slug } });
+const emitEp = (env: Env, type: string, ep: any, show: any) => emit(env, { pubId: show.pub_id, type, refId: ep.id, data: epPayload(ep, show), activity: false });
+
+async function uniqueSlugIn(env: Env, table: 'podcasts' | 'episodes' | 'products', scopeCol: string, scopeVal: string, base: string, exceptId = ''): Promise<string> {
+  const b = slugify(base || 'untitled');
+  let s = b, i = 2;
+  while (await one(env, `SELECT 1 FROM ${table} WHERE ${scopeCol} = ? AND slug = ? AND id != ?`, scopeVal, s, exceptId)) s = `${b}-${i++}`;
+  return s;
+}
+
+function showFields(a: any, existing?: any): Record<string, unknown> {
+  const f: Record<string, unknown> = {};
+  const set = (k: string, v: unknown) => { if (v !== undefined) f[k] = v; };
+  if (!existing || a.title !== undefined) { const t = String(a.title ?? '').trim().slice(0, 200); if (!t) throw new ToolError('title is required.'); f.title = t; }
+  set('description', a.description === undefined ? undefined : String(a.description).slice(0, 4000));
+  set('author', a.author === undefined ? undefined : String(a.author).slice(0, 200));
+  set('owner_email', a.owner_email === undefined ? undefined : String(a.owner_email).slice(0, 200) || null);
+  set('cover_url', a.cover_url === undefined ? undefined : String(a.cover_url).slice(0, 1000) || null);
+  set('language', a.language === undefined ? undefined : String(a.language).slice(0, 8) || 'en');
+  if (a.category !== undefined) {
+    const [cat, sub] = String(a.category).split('|');
+    if (!APPLE_CATEGORIES[cat]) throw new ToolError(`Unknown category "${cat}". Valid: ${Object.keys(APPLE_CATEGORIES).join(', ')}.`);
+    f.category = cat;
+    f.subcategory = sub && APPLE_CATEGORIES[cat].includes(sub) ? sub : null;
+  }
+  set('explicit', a.explicit === undefined ? undefined : a.explicit ? 1 : 0);
+  set('kind', a.kind === undefined ? undefined : a.kind === 'serial' ? 'serial' : 'episodic');
+  set('access', a.access === undefined ? undefined : ['public', 'premium', 'both'].includes(a.access) ? a.access : 'public');
+  set('copyright', a.copyright === undefined ? undefined : String(a.copyright).slice(0, 200) || null);
+  return f;
+}
+
+async function podcastsTool(env: Env, pub: Publication, a: any): Promise<unknown> {
+  const base = siteUrl(env, pub);
+  const serShow = (p: any) => ({ id: p.id, title: p.title, slug: p.slug, access: p.access, category: p.category, subcategory: p.subcategory, feed_url: `${base}/podcasts/${p.slug}/feed.xml`, page_url: `${base}/podcasts/${p.slug}` });
+  const serEp = (e: any, show: any) => ({ id: e.id, title: e.title, slug: e.slug, status: e.status, premium: !!e.premium, season: e.season, number: e.number, episode_type: e.episode_type, has_audio: !!(e.audio_key || e.audio_url), published_at: iso(e.published_at), page_url: `${base}/podcasts/${show.slug}/${e.slug}` });
+  switch (a.action) {
+    case 'list_shows':
+      return (await all<any>(env, `SELECT p.*, (SELECT COUNT(*) FROM episodes e WHERE e.podcast_id = p.id) AS episodes FROM podcasts p WHERE p.pub_id = ? ORDER BY p.created_at`, pub.id)).map((p) => ({ ...serShow(p), episodes: p.episodes }));
+    case 'create_show': {
+      const f = showFields(a);
+      const sid = id();
+      await insert(env, 'podcasts', { id: sid, pub_id: pub.id, slug: await uniqueSlugIn(env, 'podcasts', 'pub_id', pub.id, String(f.title)), description: '', author: pub.name, language: pub.language || 'en', category: 'Technology', ...f, created_at: now() });
+      return serShow(await one<any>(env, 'SELECT * FROM podcasts WHERE id = ?', sid));
+    }
+  }
+  // everything below needs a show (episode actions find it through the episode)
+  let ep: any = null;
+  if (a.episode_id) {
+    ep = await one<any>(env, 'SELECT * FROM episodes WHERE id = ? AND pub_id = ?', a.episode_id, pub.id);
+    if (!ep) throw new ToolError('Episode not found. Use list_episodes to find ids.');
+  }
+  const show = await one<any>(env, 'SELECT * FROM podcasts WHERE id = ? AND pub_id = ?', ep?.podcast_id || a.podcast_id, pub.id);
+  if (!show) throw new ToolError('Podcast not found. Use list_shows to find ids.');
+  switch (a.action) {
+    case 'update_show': {
+      const f = showFields(a, show);
+      if (!Object.keys(f).length) throw new ToolError('Nothing to update.');
+      // the slug is part of the RSS feed URL listeners subscribed to — renaming never changes it
+      await update(env, 'podcasts', show.id, f, pub.id);
+      return serShow(await one<any>(env, 'SELECT * FROM podcasts WHERE id = ?', show.id));
+    }
+    case 'list_episodes':
+      return (await all<any>(env, `SELECT e.*, (SELECT COUNT(*) FROM episode_downloads d WHERE d.episode_id = e.id AND d.is_bot = 0) AS downloads FROM episodes e WHERE e.podcast_id = ? ${a.status ? 'AND e.status = ?' : ''} ORDER BY e.created_at DESC LIMIT 100`, show.id, ...(a.status ? [a.status] : []))).map((e) => ({ ...serEp(e, show), downloads: e.downloads }));
+    case 'create_episode':
+    case 'update_episode': {
+      const existing = a.action === 'update_episode' ? ep : null;
+      if (a.action === 'update_episode' && !existing) throw new ToolError('episode_id is required.');
+      if (existing?.status === 'archived' && a.status === undefined) throw new ToolError('This episode is archived — unarchive_episode first, or pass a status.');
+      const f: Record<string, unknown> = {};
+      if (!existing || a.title !== undefined) { const t = String(a.title ?? '').trim().slice(0, 300); if (!t) throw new ToolError('title is required.'); f.title = t; }
+      if (a.description !== undefined) f.description = sanitizeHtml(String(a.description).slice(0, 50000), { blocks: true });
+      if (a.audio_url !== undefined) { if (a.audio_url && !/^https?:\/\//.test(a.audio_url)) throw new ToolError('audio_url must be an http(s) URL.'); f.audio_url = a.audio_url || null; if (a.audio_url) f.audio_key = null; }
+      for (const k of ['season', 'number']) if (a[k] !== undefined) f[k] = a[k] === null ? null : int(a[k]) || null;
+      if (a.episode_type !== undefined) f.episode_type = ['full', 'trailer', 'bonus'].includes(a.episode_type) ? a.episode_type : 'full';
+      for (const k of ['premium', 'explicit']) if (a[k] !== undefined) f[k] = a[k] ? 1 : 0;
+      if (a.image_url !== undefined) f.image_url = String(a.image_url || '').slice(0, 1000) || null;
+      if (a.transcript !== undefined) f.transcript = String(a.transcript || '').slice(0, 400000) || null;
+      // status + publish time
+      const at = a.publish_at ? Date.parse(a.publish_at) : NaN;
+      if (a.publish_at && isNaN(at)) throw new ToolError('publish_at must be an ISO date-time.');
+      let status: string = a.status || (a.publish_at ? (at > now() ? 'scheduled' : 'published') : existing?.status || 'draft');
+      if (status === 'archived') throw new ToolError('Use archive_episode to archive.');
+      if (!['draft', 'published', 'scheduled'].includes(status)) throw new ToolError('status must be draft, published or scheduled.');
+      if (status === 'scheduled') { if (isNaN(at) && !existing?.published_at) throw new ToolError('Pass publish_at to schedule.'); if (!isNaN(at) && at <= now()) status = 'published'; }
+      f.status = status;
+      if (!isNaN(at)) f.published_at = at;
+      else if (status === 'published' && !existing?.published_at) f.published_at = now();
+      const audioUrl = 'audio_url' in f ? f.audio_url : existing?.audio_url;
+      const audioKey = 'audio_key' in f ? f.audio_key : existing?.audio_key;
+      const hasAudio = !!(audioUrl || audioKey);
+      if (status !== 'draft' && !hasAudio) throw new ToolError('Add audio (audio_url) before publishing or scheduling.');
+      if (existing?.status === 'archived') f.archived_at = null;
+      f.updated_at = now();
+      if (existing) {
+        // episode URLs stay stable on rename (same as the dashboard)
+        if (f.audio_key === null && existing.audio_key) await env.MEDIA.delete(existing.audio_key).catch(() => {});
+        await update(env, 'episodes', existing.id, f, pub.id);
+        const fresh = await one<any>(env, 'SELECT * FROM episodes WHERE id = ?', existing.id);
+        await emitEp(env, fresh.status === 'published' && existing.status !== 'published' ? 'podcast.episode.published' : 'podcast.episode.updated', fresh, show);
+        return serEp(fresh, show);
+      }
+      const eid = id();
+      await insert(env, 'episodes', { id: eid, podcast_id: show.id, pub_id: pub.id, guid: crypto.randomUUID(), slug: await uniqueSlugIn(env, 'episodes', 'podcast_id', show.id, String(f.title)), description: '', ...f, created_at: now() });
+      const fresh = await one<any>(env, 'SELECT * FROM episodes WHERE id = ?', eid);
+      if (fresh.status === 'published') await emitEp(env, 'podcast.episode.published', fresh, show);
+      return serEp(fresh, show);
+    }
+    case 'archive_episode':
+    case 'unarchive_episode':
+    case 'delete_episode': {
+      if (!ep) throw new ToolError('episode_id is required.');
+      if (a.action === 'archive_episode') {
+        await run(env, `UPDATE episodes SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?`, now(), now(), ep.id);
+        await emitEp(env, 'podcast.episode.archived', { ...ep, status: 'archived' }, show);
+        return { id: ep.id, status: 'archived', note: 'Removed from feeds and the website; restore with unarchive_episode.' };
+      }
+      if (a.action === 'unarchive_episode') {
+        await run(env, `UPDATE episodes SET status = 'draft', archived_at = NULL, updated_at = ? WHERE id = ?`, now(), ep.id);
+        return { id: ep.id, status: 'draft' };
+      }
+      if (ep.audio_key) await env.MEDIA.delete(ep.audio_key).catch(() => {});
+      await run(env, 'DELETE FROM episode_downloads WHERE episode_id = ?', ep.id);
+      await run(env, 'DELETE FROM episodes WHERE id = ?', ep.id);
+      await emitEp(env, 'podcast.episode.deleted', ep, show);
+      return { id: ep.id, deleted: true };
+    }
+  }
+  throw new ToolError('Unknown action.');
+}
+
+// ───────── products & promo codes ─────────
+const PRODUCT_KINDS = ['download', 'link', 'guide', 'template', 'ebook', 'membership', 'coaching'];
+const usd = (v: unknown) => Math.max(0, Math.round((Number(v) || 0) * 100));
+const isoOrNull = (v: unknown): number | null => {
+  if (v === null || v === '') return null;
+  const t = Date.parse(String(v));
+  if (isNaN(t)) throw new ToolError('Dates must be ISO 8601 (e.g. 2026-12-31 or 2026-12-31T23:59:59Z).');
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? t + DAY - 1000 : t; // a bare date means "through the end of that day"
+};
+
+async function productsTool(env: Env, pub: Publication, a: any): Promise<unknown> {
+  const base = siteUrl(env, pub);
+  const serProduct = (p: any) => ({ id: p.id, name: p.name, slug: p.slug, kind: p.kind, price: money(p.price_cents), price_cents: p.price_cents, status: p.status, sales_count: p.sales_count, revenue: money(p.revenue_cents), url: `${base}/shop/${p.slug}` });
+  const serCode = (o: any) => ({
+    id: o.id, code: o.code, name: o.name, discount: o.percent_off ? `${o.percent_off}% off` : `${money(o.amount_off_cents)} off`, percent_off: o.percent_off, amount_off_cents: o.amount_off_cents,
+    applies_to: o.applies_to, target_id: o.target_id, duration: o.duration, duration_months: o.duration_months, redemptions: o.redemptions, max_redemptions: o.max_redemptions,
+    expires_at: iso(o.expires_at), active: !!o.active && (!o.expires_at || o.expires_at > now()),
+    share_url: `${base}/${o.applies_to === 'product' ? 'shop' : 'upgrade'}?code=${encodeURIComponent(o.code)}`,
+  });
+  const product = async () => {
+    const p = await one<any>(env, 'SELECT * FROM products WHERE pub_id = ? AND (id = ? OR slug = ?)', pub.id, a.product_id, a.product_id);
+    if (!p) throw new ToolError('Product not found. Use list to find ids.');
+    return p;
+  };
+  const promo = async () => {
+    const o = a.promo_code_id
+      ? await one<any>(env, 'SELECT * FROM offers WHERE id = ? AND pub_id = ?', a.promo_code_id, pub.id)
+      : await one<any>(env, 'SELECT * FROM offers WHERE pub_id = ? AND code = ? COLLATE NOCASE', pub.id, String(a.code || '').trim());
+    if (!o) throw new ToolError('Promo code not found. Use list_promo_codes.');
+    return o;
+  };
+  const productFields = (existing?: any) => {
+    const f: Record<string, unknown> = {};
+    if (!existing || a.name !== undefined) { const n = String(a.name ?? '').trim().slice(0, 160); if (!n) throw new ToolError('name is required.'); f.name = n; }
+    if (a.price !== undefined) f.price_cents = usd(a.price);
+    if (a.kind !== undefined) { if (!PRODUCT_KINDS.includes(a.kind)) throw new ToolError(`kind must be one of ${PRODUCT_KINDS.join(', ')}.`); f.kind = a.kind; }
+    if (a.description !== undefined) f.description = String(a.description).slice(0, 20000);
+    if (a.link_url !== undefined) f.link_url = String(a.link_url || '').slice(0, 2000) || null;
+    if (a.content !== undefined) f.content = String(a.content || '').slice(0, 200000) || null;
+    if (a.status !== undefined) { if (!['active', 'draft', 'archived'].includes(a.status)) throw new ToolError('status must be active, draft or archived.'); f.status = a.status; }
+    return f;
+  };
+  switch (a.action) {
+    case 'list':
+      return (await all<any>(env, 'SELECT * FROM products WHERE pub_id = ? ORDER BY status = \'archived\', created_at DESC', pub.id)).map(serProduct);
+    case 'get_product': {
+      const p = await product();
+      return { ...serProduct(p), description: p.description, link_url: p.link_url, has_file: !!p.file_key, promo_codes: (await all<any>(env, `SELECT * FROM offers WHERE pub_id = ? AND (target_id = ? OR (applies_to IN ('all','product') AND target_id IS NULL))`, pub.id, p.id)).map(serCode) };
+    }
+    case 'create_product': {
+      const f = productFields();
+      const pid = id();
+      await insert(env, 'products', { id: pid, pub_id: pub.id, slug: await uniqueSlugIn(env, 'products', 'pub_id', pub.id, String(f.name)), description: '', kind: 'guide', price_cents: 0, status: 'active', ...f, created_at: now() });
+      return serProduct(await one<any>(env, 'SELECT * FROM products WHERE id = ?', pid));
+    }
+    case 'update_product': {
+      const p = await product();
+      const f = productFields(p);
+      if (!Object.keys(f).length) throw new ToolError('Nothing to update.');
+      if (f.name && f.name !== p.name) f.slug = await uniqueSlugIn(env, 'products', 'pub_id', pub.id, String(f.name), p.id);
+      await update(env, 'products', p.id, f, pub.id);
+      return serProduct(await one<any>(env, 'SELECT * FROM products WHERE id = ?', p.id));
+    }
+    case 'archive_product': {
+      const p = await product();
+      await run(env, `UPDATE products SET status = 'archived' WHERE id = ?`, p.id);
+      return { ...serProduct({ ...p, status: 'archived' }), note: 'Hidden from the shop; existing buyers keep access. Restore with update_product status=active.' };
+    }
+    case 'list_promo_codes':
+      return (await all<any>(env, 'SELECT * FROM offers WHERE pub_id = ? ORDER BY created_at DESC', pub.id)).map(serCode).filter((o) => !a.active_only || o.active);
+    case 'create_promo_code':
+    case 'create_coupon': {
+      const code = String(a.code || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 40);
+      if (!code) throw new ToolError('code is required (letters, numbers, - and _).');
+      const pct = clamp(int(a.percent_off), 0, 100);
+      const amt = pct ? 0 : usd(a.amount_off);
+      if (!pct && !amt) throw new ToolError('percent_off or amount_off is required.');
+      if (await one(env, 'SELECT 1 FROM offers WHERE pub_id = ? AND code = ? COLLATE NOCASE', pub.id, code)) throw new ToolError('That code already exists.');
+      const appliesTo = ['all', 'subscription', 'product', 'event'].includes(a.applies_to) ? a.applies_to : 'all';
+      if (a.target_id) {
+        const table = appliesTo === 'product' ? 'products' : appliesTo === 'event' ? 'live_events' : appliesTo === 'subscription' ? 'tiers' : null;
+        if (table && !(await one(env, `SELECT 1 FROM ${table} WHERE id = ? AND pub_id = ?`, a.target_id, pub.id))) throw new ToolError(`target_id not found among ${table}.`);
+      }
+      const duration = ['once', 'repeating', 'forever'].includes(a.duration) ? a.duration : 'once';
+      const oid = id();
+      await insert(env, 'offers', {
+        id: oid, pub_id: pub.id, code, name: String(a.name || '').slice(0, 80), applies_to: appliesTo, target_id: a.target_id || null, percent_off: pct, amount_off_cents: amt,
+        duration, duration_months: duration === 'repeating' ? Math.max(1, int(a.duration_months, 1)) : null, max_redemptions: a.max_redemptions ? Math.max(1, int(a.max_redemptions)) : null,
+        expires_at: a.expires_at ? isoOrNull(a.expires_at) : null, active: 1, created_at: now(),
+      });
+      return serCode(await one<any>(env, 'SELECT * FROM offers WHERE id = ?', oid));
+    }
+    case 'update_promo_code': {
+      const o = await promo();
+      const f: Record<string, unknown> = {};
+      if (a.active !== undefined) f.active = a.active ? 1 : 0;
+      if (a.name !== undefined) f.name = String(a.name || '').slice(0, 80);
+      if (a.max_redemptions !== undefined) f.max_redemptions = a.max_redemptions === null ? null : Math.max(1, int(a.max_redemptions));
+      if (a.expires_at !== undefined) f.expires_at = isoOrNull(a.expires_at);
+      if (!Object.keys(f).length) throw new ToolError('Nothing to update (active, name, max_redemptions, expires_at). Discounts can’t change after creation — create a new code instead.');
+      await update(env, 'offers', o.id, f, pub.id);
+      return serCode(await one<any>(env, 'SELECT * FROM offers WHERE id = ?', o.id));
+    }
+    case 'delete_promo_code': {
+      const o = await promo();
+      await run(env, 'DELETE FROM offers WHERE id = ? AND pub_id = ?', o.id, pub.id);
+      return { id: o.id, code: o.code, deleted: true, note: o.redemptions ? `It had ${o.redemptions} redemptions; past orders keep their discount.` : undefined };
+    }
+  }
+  throw new ToolError('Unknown action.');
 }
 
 const FIELD_DOC = Object.entries(FIELDS).map(([k, f]) => `${k} (${f.cmps.join('|')}${f.options ? `; values: ${f.options.join(',')}` : ''})`).join('; ');
@@ -227,37 +473,32 @@ export const TOOLS: Tool[] = [
   },
   // ───────── automations ─────────
   {
-    name: 'list_automations', title: 'List automations', description: 'List automations with trigger, status and enrollment counts.',
+    name: 'list_automations', title: 'List automations', description: 'List automations with trigger, status, enrollment counts and whether unpublished draft changes exist.',
     inputSchema: S({}), annotations: { readOnlyHint: true },
-    run: async (env, pub) => (await all<any>(env, `SELECT a.id, a.name, a.status, a.trigger, (SELECT COUNT(*) FROM automation_runs r WHERE r.automation_id = a.id) AS enrolled FROM automations a WHERE a.pub_id = ? ORDER BY a.created_at DESC`, pub.id)).map((a) => ({ ...a, trigger: parseJSON(a.trigger, {}) })),
+    run: async (env, pub) => (await all<any>(env, `SELECT a.id, a.name, a.status, a.trigger, a.draft_trigger, a.draft_steps, (SELECT COUNT(*) FROM automation_runs r WHERE r.automation_id = a.id) AS enrolled FROM automations a WHERE a.pub_id = ? ORDER BY a.created_at DESC`, pub.id))
+      .map(({ draft_trigger, draft_steps, ...a }) => ({ ...a, trigger: parseJSON(draft_trigger && a.trigger === '{}' ? draft_trigger : a.trigger, {}), has_unpublished_draft: draft_trigger != null || draft_steps != null })),
   },
   {
-    name: 'create_automation', title: 'Create an automation', description: `Create an automation. trigger = {"type", "config"}; types: ${Object.entries(TRIGGERS).map(([k, t]) => `${k} (${t.label}${t.fields ? `; config: ${t.fields.join(',')}` : ''})`).join('; ')}. steps = [{"id","type","config","yes"?,"no"?}]; step types: ${Object.entries(STEP_TYPES).map(([k, l]) => `${k}=${l}`).join(', ')}. Configs: send_email {subject, preview_text, markdown (converted) or doc}, delay {amount, unit: minutes|hours|days|weeks}, condition {rules} with yes/no branches, add_tag {tags}, update_field {key,value}, webhook {url, method}, wait_until {mode: datetime|weekday_time|condition, ...}. Created as draft unless activate=true.`,
-    inputSchema: S({ name: str('Name'), description: str(''), trigger: obj('Trigger'), steps: arr('Steps', { type: 'object' }), activate: { type: 'boolean', description: 'Activate immediately' } }, ['name', 'trigger', 'steps']),
+    name: 'create_automation', title: 'Create an automation', description: `Create an automation (saved as a draft; activate=true publishes it and turns it on). trigger = {"type", "config"}; types: ${Object.entries(TRIGGERS).map(([k, t]) => `${k} (${t.label}${t.fields ? `; config: ${t.fields.join(',')}` : ''})`).join('; ')}. steps = [{"id","type","config","yes"?,"no"?}]; step types: ${Object.entries(STEP_TYPES).map(([k, l]) => `${k}=${l}`).join(', ')}. Configs: send_email {subject, preview_text, markdown (converted) or doc}, delay {amount, unit: minutes|hours|days|weeks}, condition {rules} with yes/no branches, add_tag {tags}, update_field {key,value}, webhook {url, method}, wait_until {mode: datetime|weekday_time|condition, ...}.`,
+    inputSchema: S({ name: str('Name'), description: str(''), trigger: obj('Trigger'), steps: arr('Steps', { type: 'object' }), allow_reentry: { type: 'boolean', description: 'Let subscribers enter more than once' }, activate: { type: 'boolean', description: 'Publish and turn on immediately' } }, ['name', 'trigger', 'steps']),
     run: async (env, pub, a) => {
-      if (!TRIGGERS[a.trigger?.type]) throw new ToolError(`Unknown trigger type "${a.trigger?.type}".`);
-      const steps = normalizeSteps(a.steps || []);
-      const aid = id();
-      await insert(env, 'automations', { id: aid, pub_id: pub.id, name: String(a.name), description: String(a.description || ''), status: a.activate ? 'active' : 'draft', trigger: JSON.stringify({ type: a.trigger.type, config: a.trigger.config || {} }), steps: JSON.stringify(steps), published_at: a.activate ? now() : null, created_at: now(), updated_at: now() });
-      return { id: aid, status: a.activate ? 'active' : 'draft', steps: steps.length, edit_url: `${env.APP_URL.replace(/\/$/, '')}/app/automations/${aid}` };
+      const au = await createAutomation(env, pub, a);
+      return { id: au.id, status: au.status, steps: parseJSON<any[]>(au.draft_steps ?? au.steps, []).length, edit_url: `${env.APP_URL.replace(/\/$/, '')}/app/automations/${au.id}` };
     },
   },
   {
-    name: 'update_automation', title: 'Edit an automation', description: 'Edit an automation. For a live (active) automation, changes go to a draft version while the live one keeps running; set publish=true to make them live. status can be active|paused.',
-    inputSchema: S({ id: str('Automation id'), name: str(''), trigger: obj('Trigger'), steps: arr('Steps', { type: 'object' }), status: str('active|paused'), publish: { type: 'boolean', description: 'Publish draft changes' } }, ['id']),
+    name: 'update_automation', title: 'Edit an automation', description: 'Edit an automation. Trigger/step changes go to a draft version while the live one keeps running; publish=true makes them live (running journeys continue on the new version). status: active (publishes the draft and turns it on) | paused.',
+    inputSchema: S({ id: str('Automation id'), name: str(''), description: str(''), trigger: obj('Trigger'), steps: arr('Steps', { type: 'object' }), allow_reentry: { type: 'boolean' }, status: { type: 'string', enum: ['active', 'paused'] }, publish: { type: 'boolean', description: 'Publish draft changes' } }, ['id']),
     run: async (env, pub, a) => {
-      const au = await one<any>(env, 'SELECT * FROM automations WHERE id = ? AND pub_id = ?', a.id, pub.id);
+      let au = await one<any>(env, 'SELECT * FROM automations WHERE id = ? AND pub_id = ?', a.id, pub.id);
       if (!au) throw new ToolError('Automation not found.');
-      const patch: Record<string, unknown> = { updated_at: now() };
-      if (a.name) patch.name = a.name;
-      const live = au.status === 'active';
-      if (a.trigger) patch[live ? 'draft_trigger' : 'trigger'] = JSON.stringify({ type: a.trigger.type, config: a.trigger.config || {} });
-      if (a.steps) patch[live ? 'draft_steps' : 'steps'] = JSON.stringify(normalizeSteps(a.steps));
-      if (a.status && ['active', 'paused'].includes(a.status)) patch.status = a.status;
-      await update(env, 'automations', au.id, patch, pub.id);
-      if (a.publish && live) await publishDraft(env, au.id, pub.id);
-      const fresh = await one<any>(env, 'SELECT status, draft_steps FROM automations WHERE id = ?', au.id);
-      return { id: au.id, status: fresh.status, has_unpublished_draft: !!fresh.draft_steps };
+      const edit: Record<string, unknown> = {};
+      for (const k of ['name', 'description', 'trigger', 'steps', 'allow_reentry']) if (a[k] !== undefined) edit[k] = a[k];
+      if (Object.keys(edit).length) au = await updateAutomation(env, pub, au, edit);
+      if (a.status === 'active') au = await activateAutomation(env, pub, au);
+      else if (a.publish && (au.draft_steps != null || au.draft_trigger != null)) au = await publishAutomation(env, pub, au);
+      if (a.status === 'paused' && au.status === 'active') au = await setAutomationPaused(env, pub, au, true);
+      return { id: au.id, status: au.status, has_unpublished_draft: au.draft_steps != null || au.draft_trigger != null };
     },
   },
   {
@@ -391,53 +632,45 @@ export const TOOLS: Tool[] = [
   },
   // ───────── podcasts ─────────
   {
-    name: 'podcasts', title: 'Podcast shows & episodes', description: 'action: list_shows | list_episodes {podcast_id} | create_episode {podcast_id, title, description?, audio_url?, season?, number?, premium?, publish_at? (ISO)}.',
-    inputSchema: S({ action: str(''), podcast_id: str(''), title: str(''), description: str(''), audio_url: str(''), season: num(''), number: num(''), premium: { type: 'boolean' }, publish_at: str('') }, ['action']),
-    run: async (env, pub, a) => {
-      if (a.action === 'list_shows') return all(env, `SELECT p.id, p.title, p.slug, p.access, (SELECT COUNT(*) FROM episodes e WHERE e.podcast_id = p.id) AS episodes FROM podcasts p WHERE p.pub_id = ?`, pub.id);
-      const pod = await one<any>(env, 'SELECT * FROM podcasts WHERE id = ? AND pub_id = ?', a.podcast_id, pub.id);
-      if (!pod) throw new ToolError('Podcast not found.');
-      if (a.action === 'list_episodes') return (await all<any>(env, `SELECT e.id, e.title, e.status, e.published_at, (SELECT COUNT(*) FROM episode_downloads d WHERE d.episode_id = e.id AND d.is_bot = 0) AS downloads FROM episodes e WHERE e.podcast_id = ? ORDER BY e.created_at DESC LIMIT 100`, pod.id)).map((e) => ({ ...e, published_at: iso(e.published_at) }));
-      if (a.action === 'create_episode') {
-        if (!a.title) throw new ToolError('title is required.');
-        const at = a.publish_at ? Date.parse(a.publish_at) : NaN;
-        const eid = id();
-        let slug = slugify(a.title);
-        if (await one(env, 'SELECT 1 FROM episodes WHERE podcast_id = ? AND slug = ?', pod.id, slug)) slug += '-' + id(4);
-        const status = !isNaN(at) ? (at > now() ? 'scheduled' : 'published') : 'draft';
-        await insert(env, 'episodes', { id: eid, podcast_id: pod.id, pub_id: pub.id, guid: crypto.randomUUID(), title: a.title, slug, description: a.description || '', audio_url: a.audio_url || null, season: a.season ?? null, number: a.number ?? null, premium: a.premium ? 1 : 0, status, published_at: isNaN(at) ? null : at, created_at: now(), updated_at: now() });
-        if (status === 'published') await emit(env, { pubId: pub.id, type: 'podcast.episode.published', refId: eid, data: { episode_id: eid, title: a.title }, activity: false });
-        return { id: eid, status, page_url: `${siteUrl(env, pub)}/podcasts/${pod.slug}/${slug}` };
-      }
-      throw new ToolError('Unknown action.');
-    },
+    name: 'podcasts', title: 'Podcast shows & episodes',
+    description: [
+      'Manage podcast shows and episodes. Actions:',
+      'list_shows | create_show {title, description?, author?, owner_email?, cover_url?, language?, category? ("Technology" or "Business|Marketing"), explicit?, kind?: episodic|serial, access?: public|premium|both, copyright?} | update_show {podcast_id, …same fields}',
+      'list_episodes {podcast_id, status?} | create_episode {podcast_id, title, description?, audio_url?, season?, number?, episode_type?: full|trailer|bonus, premium?, explicit?, image_url?, transcript?, status?: draft|published|scheduled, publish_at? (ISO)}',
+      'update_episode {episode_id, …episode fields} | archive_episode {episode_id} (removed from feeds, restorable) | unarchive_episode {episode_id} (back to draft) | delete_episode {episode_id} (permanent, removes audio + download stats).',
+      'Publishing or scheduling needs audio (audio_url, or a file uploaded in the dashboard). publish_at in the future schedules; in the past publishes.',
+    ].join(' '),
+    inputSchema: S({
+      action: { type: 'string', enum: ['list_shows', 'create_show', 'update_show', 'list_episodes', 'create_episode', 'update_episode', 'archive_episode', 'unarchive_episode', 'delete_episode'] },
+      podcast_id: str('Show id'), episode_id: str('Episode id'),
+      title: str(''), description: str('Show description (plain text) or episode show notes (HTML allowed)'),
+      author: str('Show author'), owner_email: str('Show owner email (Apple/Spotify verification)'), cover_url: str('Show cover art URL (3000×3000)'), language: str('e.g. en'), category: str('Apple category, optionally "Category|Subcategory"'),
+      kind: { type: 'string', enum: ['episodic', 'serial'] }, access: { type: 'string', enum: ['public', 'premium', 'both'] }, copyright: str(''),
+      audio_url: str('Public audio file URL'), season: num(''), number: num(''), episode_type: { type: 'string', enum: ['full', 'trailer', 'bonus'] },
+      premium: { type: 'boolean', description: 'Episode only for paid subscribers' }, explicit: { type: 'boolean' }, image_url: str('Episode artwork URL'), transcript: str('Plain-text transcript'),
+      status: { type: 'string', enum: ['draft', 'published', 'scheduled', 'archived'] }, publish_at: str('ISO date-time'),
+    }, ['action']),
+    run: async (env, pub, a) => podcastsTool(env, pub, a),
   },
-  // ───────── products ─────────
+  // ───────── products & promo codes ─────────
   {
-    name: 'products', title: 'Digital products & codes', description: 'action: list | create_product {name, price (USD, 0 = free lead magnet), kind?: download|link|guide|template|ebook|membership|coaching, description?, link_url?, content?} | create_coupon {code, percent_off? | amount_off (USD)?, applies_to?: all|subscription|product|event, target_id?, max_redemptions?, expires_at?}.',
-    inputSchema: S({ action: str(''), name: str(''), price: { type: 'number' }, kind: str(''), description: str(''), link_url: str(''), content: str(''), code: str(''), percent_off: num(''), amount_off: { type: 'number' }, applies_to: str(''), target_id: str(''), max_redemptions: num(''), expires_at: str('') }, ['action']),
-    run: async (env, pub, a) => {
-      if (a.action === 'list') return (await all<any>(env, 'SELECT id, name, slug, kind, price_cents, status, sales_count, revenue_cents FROM products WHERE pub_id = ? ORDER BY created_at DESC', pub.id)).map((p) => ({ ...p, price: money(p.price_cents), revenue: money(p.revenue_cents) }));
-      if (a.action === 'create_product') {
-        if (!a.name) throw new ToolError('name is required.');
-        const pid = id();
-        let slug = slugify(a.name);
-        if (await one(env, 'SELECT 1 FROM products WHERE pub_id = ? AND slug = ?', pub.id, slug)) slug += '-' + id(4);
-        const kinds = ['download', 'link', 'guide', 'template', 'ebook', 'membership', 'coaching'];
-        await insert(env, 'products', { id: pid, pub_id: pub.id, name: a.name, slug, description: a.description || '', kind: kinds.includes(a.kind) ? a.kind : 'guide', price_cents: Math.max(0, Math.round((Number(a.price) || 0) * 100)), link_url: a.link_url || null, content: a.content || null, status: 'active', created_at: now() });
-        return { id: pid, url: `${siteUrl(env, pub)}/shop/${slug}` };
-      }
-      if (a.action === 'create_coupon') {
-        const code = String(a.code || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '');
-        if (!code) throw new ToolError('code is required.');
-        if (!a.percent_off && !a.amount_off) throw new ToolError('percent_off or amount_off is required.');
-        if (await one(env, 'SELECT 1 FROM offers WHERE pub_id = ? AND code = ?', pub.id, code)) throw new ToolError('That code exists.');
-        const oid = id();
-        await insert(env, 'offers', { id: oid, pub_id: pub.id, code, name: code, applies_to: ['all', 'subscription', 'product', 'event'].includes(a.applies_to) ? a.applies_to : 'all', target_id: a.target_id || null, percent_off: clamp(int(a.percent_off), 0, 100), amount_off_cents: Math.round((Number(a.amount_off) || 0) * 100), max_redemptions: a.max_redemptions || null, expires_at: a.expires_at ? Date.parse(a.expires_at) || null : null, active: 1, created_at: now() });
-        return { id: oid, code };
-      }
-      throw new ToolError('Unknown action.');
-    },
+    name: 'products', title: 'Digital products & promo codes',
+    description: [
+      'Manage digital products and promo codes. Promo codes (a.k.a. coupons/offers — one concept in OpenHive) discount paid subscriptions, products or event tickets; readers enter them at checkout or use the share link (?code=…).',
+      'Actions: list | get_product {product_id} | create_product {name, price (USD, 0 = free lead magnet), kind?, description?, link_url?, content?, status?} | update_product {product_id, name?, price?, kind?, description?, link_url?, content?, status?: active|draft|archived} | archive_product {product_id} (hidden from the shop, buyers keep access)',
+      '| list_promo_codes {active_only?} | create_promo_code {code, percent_off? | amount_off (USD)?, applies_to?: all|subscription|product|event, target_id?, duration?: once|repeating|forever, duration_months?, max_redemptions?, expires_at? (ISO), name?} | update_promo_code {code or promo_code_id, active?, name?, max_redemptions?, expires_at? (ISO or null)} | delete_promo_code {code or promo_code_id}.',
+      'create_coupon is accepted as an alias of create_promo_code.',
+    ].join(' '),
+    inputSchema: S({
+      action: { type: 'string', enum: ['list', 'get_product', 'create_product', 'update_product', 'archive_product', 'list_promo_codes', 'create_promo_code', 'create_coupon', 'update_promo_code', 'delete_promo_code'] },
+      product_id: str('Product id'), name: str('Product name, or promo code label'), price: { type: 'number', description: 'USD' },
+      kind: { type: 'string', enum: PRODUCT_KINDS }, description: str(''), link_url: str('For link products'), content: str('Guide body (HTML or text)'), status: { type: 'string', enum: ['active', 'draft', 'archived'] },
+      code: str('Promo code, e.g. SPRING25'), promo_code_id: str('Promo code id'), percent_off: num('0-100'), amount_off: { type: 'number', description: 'USD off (when not using percent_off)' },
+      applies_to: { type: 'string', enum: ['all', 'subscription', 'product', 'event'] }, target_id: str('Tier / product / event id the code is limited to'),
+      duration: { type: 'string', enum: ['once', 'repeating', 'forever'], description: 'Subscriptions: how long the discount applies' }, duration_months: num('For duration=repeating'),
+      max_redemptions: { type: ['integer', 'null'], description: 'null = unlimited' }, expires_at: { type: ['string', 'null'], description: 'ISO date; null = never' }, active: { type: 'boolean' }, active_only: { type: 'boolean' },
+    }, ['action']),
+    run: async (env, pub, a) => productsTool(env, pub, a),
   },
   // ───────── docs ─────────
   {
@@ -446,14 +679,6 @@ export const TOOLS: Tool[] = [
     run: async (_env, _pub, a) => searchDocs(String(a.query || '')),
   },
 ];
-
-function normalizeSteps(steps: any[]): any[] {
-  return steps.map((s) => {
-    const config = { ...(s.config || {}) };
-    if (s.type === 'send_email' && config.markdown && !config.doc) { config.doc = { blocks: markdownToBlocks(config.markdown) }; delete config.markdown; }
-    return { id: s.id || id(8), type: String(s.type), config, ...(s.yes ? { yes: normalizeSteps(s.yes) } : {}), ...(s.no ? { no: normalizeSteps(s.no) } : {}) };
-  });
-}
 
 export function searchDocs(query: string) {
   const terms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
@@ -503,7 +728,7 @@ export async function handleRpc(env: Env, pub: Publication, msg: RpcReq): Promis
         const result = await tool.run(env, pub, msg.params?.arguments || {});
         return ok(msg.id, { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: Array.isArray(result) ? { items: result } : (result as object), isError: false });
       } catch (e: any) {
-        return ok(msg.id, { content: [{ type: 'text', text: e instanceof ToolError ? e.message : `Error: ${e?.message || e}` }], isError: true });
+        return ok(msg.id, { content: [{ type: 'text', text: e instanceof ToolError || e instanceof BadRequest || e instanceof NotFound ? e.message : `Error: ${e?.message || e}` }], isError: true });
       }
     }
     default:

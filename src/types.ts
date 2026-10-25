@@ -30,6 +30,11 @@ export interface Env {
   DISCORD_CLIENT_ID?: string;     // Discord OAuth2 app for verified member linking (or per publication in Community → Settings)
   DISCORD_CLIENT_SECRET?: string;
   DISCORD_API_BASE?: string;      // override for testing (default https://discord.com/api)
+  // Inbound mail (Email Routing → email() handler). See docs/DELIVERABILITY.md.
+  INBOUND_FORWARD_TO?: string;  // verified destination for human replies that reach a routed address (otherwise rejected)
+  BOUNCE_ADDRESS?: string;      // shown in Settings → Email; default bounces@<MAIL_FROM domain>
+  FBL_ADDRESS?: string;         // address you register with mailbox-provider FBLs; default fbl@<MAIL_FROM domain>
+  MAIL_FROM_WARMUP?: string;    // 'off' disables warm-up caps for the default MAIL_FROM domain
 }
 
 export type Role = 'owner' | 'admin' | 'member' | 'contributor';

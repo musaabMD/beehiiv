@@ -10,6 +10,7 @@ import { logBot } from './lib/tracking';
 import { runJobs, runPeriodic, logError } from './lib/jobs';
 import { now } from './lib/util';
 import { withMedia } from './lib/mediashim';
+import { handleInboundEmail, handleSendingEvent, type SendingEvent } from './lib/inbound';
 import './lib/webhooks';
 import './lib/sender';
 import './lib/automations';
@@ -136,6 +137,30 @@ export default {
       return app.fetch(new Request(url.toString(), req), env, ctx);
     }
     return app.fetch(req, env, ctx);
+  },
+  /**
+   * Cloudflare Email Routing: route bounces@ / fbl@ (and optionally the sender address, for mailto: unsubscribes and
+   * bounces that go to the From address) to this Worker. DSNs and ARF reports become suppressions — see lib/inbound.ts.
+   */
+  async email(message: ForwardableEmailMessage, env: Env, _ctx: ExecutionContext) {
+    try {
+      await handleInboundEmail(env, message);
+    } catch (e) {
+      await logError(env, 'email:inbound', e).catch(() => {});
+      throw e; // let Email Routing retry / report the failure instead of silently dropping a report
+    }
+  },
+  /** Cloudflare Email Sending event subscriptions (message.bounced / complained / rejected / deferred) via a Queue. */
+  async queue(batch: MessageBatch<SendingEvent>, env: Env, _ctx: ExecutionContext) {
+    for (const m of batch.messages) {
+      try {
+        await handleSendingEvent(env, m.body);
+        m.ack();
+      } catch (e) {
+        await logError(env, 'email:events', e).catch(() => {});
+        m.retry();
+      }
+    }
   },
   async scheduled(_evt: ScheduledController, env: Env, ctx: ExecutionContext) {
     withMedia(env);
