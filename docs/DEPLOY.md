@@ -146,3 +146,9 @@ npx wrangler deploy
 ## Instant demo (no Cloudflare login)
 
 `npx wrangler deploy --temporary -c wrangler.demo.jsonc --var EMAIL_MODE:simulate --var APP_URL:<the workers.dev URL it prints>` deploys to a temporary Cloudflare preview account (claim it within 60 minutes from the URL Wrangler prints to keep it). Preview accounts have no R2 and no cron triggers: OpenHive then stores uploads in D1 (`src/lib/mediashim.ts`) and runs background jobs from incoming traffic, at most once a minute.
+
+## Optional extras added in October 2026
+
+- **Image resizing:** the `images` binding in `wrangler.jsonc` (Cloudflare Images) resizes imported and pasted images to 1,600px WebP. Remove the binding to keep originals.
+- **Large webinars:** create a Realtime SFU app (Cloudflare dashboard → Realtime, or `POST /accounts/:id/calls/apps`), then `wrangler secret put REALTIME_APP_ID` and `wrangler secret put REALTIME_APP_TOKEN`.
+- **"Send me a sample" page (`/try`):** demo only. Set `TRY_IT=1` (the `deploy:demo` script does) to let visitors get one real issue of the publication named by `TRY_PUB_SLUG` (default `demo`). Capped by `TRY_DAILY_CAP` (default 100 a day), one per address a day, three per visitor an hour.

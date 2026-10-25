@@ -3,6 +3,33 @@ export interface ChangelogEntry { date: string; slug: string; title: string; bod
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-26', slug: 'try-it', title: 'Get a real sample issue in your inbox',
+    body: [
+      'On the demo, type your email on the Try it page and get the latest issue for real, then watch it on a live status page as it\'s sent, opened and clicked. It scores 10/10 on mail-tester.com, with SPF, DKIM and DMARC all passing.',
+      'The Deliverability page now counts only real emails, so these samples are its data.',
+    ],
+    links: [['Try it', '/try'], ['Deliverability', '/open']],
+  },
+  {
+    date: '2026-10-26', slug: 'accurate-numbers', title: 'More accurate opens and clicks',
+    body: [
+      'Security scanners that open and click every link are now filtered: very old browser versions, clicks from cloud data centers, and an open and click arriving together. A real test showed one scanner counted as a reader before; now it isn\'t.',
+      'A post\'s numbers are the same everywhere: the post page, lists, the API and AI tools. Delivered means accepted by the mailbox provider, unsubscribes count readers who left within 7 days, and test and sample sends are left out.',
+      'Emails hide their preview text in a way spam filters don\'t flag.',
+    ],
+  },
+  {
+    date: '2026-10-26', slug: 'co-editing-merge', title: 'Co-editing merges edits in the same paragraph',
+    body: ['Two people typing in the same paragraph no longer overwrite each other: both edits merge as you type, and your cursor stays where it was.'],
+  },
+  {
+    date: '2026-10-26', slug: 'speed-images-webinars', title: 'Faster pages, smaller images, bigger webinars',
+    body: [
+      'Publication pages are cached at Cloudflare\'s edge for readers who aren\'t logged in, load their styles inline and fonts without blocking, and run their database reads together. Analytics → Website now shows real visitors\' page speed.',
+      'Images added by URL or pasted are resized to 1,600px WebP on the server: a 14.7 MB photo becomes 189 KB. Webinars stream through Cloudflare Realtime for large audiences.',
+    ],
+  },
+  {
     date: '2026-10-25', slug: 'bounces-in-app', title: 'Bounces and complaints come straight back',
     body: [
       'OpenHive now receives bounce and spam-complaint reports itself, through Cloudflare Email Routing and Cloudflare\'s sending events, and turns them into suppressions. Settings → Email shows every report it received. Reports only count for addresses this install actually emailed, so nobody can be suppressed by a forged report.',

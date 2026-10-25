@@ -2132,9 +2132,14 @@
       const focusedTop = focused ? ed.topItem(focused) : null;
       if (op.k === 'upsert') {
         const it = ed.findItem(op.block.id);
+        const baseJSON = this.sent.get(op.block.id);
         this.sent.set(op.block.id, JSON.stringify(op.block));
         if (it && it.list === ed.root) {
-          if (focusedTop === it) { this.pending.set(op.block.id, op); return; }
+          if (focusedTop === it) {
+            // Someone else edited the paragraph we're typing in: merge both edits when they don't overlap.
+            if (this.mergeInto(it, baseJSON, op.block)) return;
+            this.pending.set(op.block.id, op); return;
+          }
           const idx = ed.root.items.indexOf(it);
           ed.root.remove(it, true);
           ed.root.insert(op.block, idx);
@@ -2156,6 +2161,52 @@
       ed.opts.onChange && ed.opts.onChange(ed.getDoc());
       ed.emit('change', ed.getDoc());
       this.paintPeers();
+    }
+    /** Three-way merge of a text block's HTML: base (last synced), ours (being typed), theirs (just arrived).
+     *  Each side's edit is reduced to one changed region; non-overlapping regions are both applied. */
+    mergeInto(it, baseJSON, theirs) {
+      try {
+        const ed = this.ed;
+        const base = baseJSON ? JSON.parse(baseJSON) : null;
+        const ours = it.block && ed.root.toJSON().find((b) => b.id === theirs.id);
+        const B = base?.data?.html, O = ours?.data?.html, T = theirs?.data?.html;
+        if (typeof B !== 'string' || typeof O !== 'string' || typeof T !== 'string' || ours.type !== theirs.type || base.type !== theirs.type) return false;
+        const region = (a, b) => {
+          let p = 0; while (p < a.length && p < b.length && a[p] === b[p]) p++;
+          let q = 0; while (q < a.length - p && q < b.length - p && a[a.length - 1 - q] === b[b.length - 1 - q]) q++;
+          return { start: p, end: a.length - q, ins: b.slice(p, b.length - q) };
+        };
+        const ro = region(B, O), rt = region(B, T);
+        const oursChanged = ro.start !== ro.end || ro.ins, theirsChanged = rt.start !== rt.end || rt.ins;
+        if (!theirsChanged) return true;                     // nothing new from them
+        if (oursChanged && !(ro.end <= rt.start || rt.end <= ro.start)) return false; // same words: keep old behaviour
+        const apply = (src, r) => src.slice(0, r.start) + r.ins + src.slice(r.end);
+        const merged = !oursChanged ? T : ro.start >= rt.start ? apply(apply(B, ro), rt) : apply(apply(B, rt), ro);
+        // keep the caret: shift it by the length their edit added before it
+        const el = it.el.querySelector('[contenteditable=true]');
+        const textLen = (h) => { const d = document.createElement('div'); d.innerHTML = h; return d.textContent.length; };
+        const before = el ? rangeText(el, true) : null;
+        let caret = before ? before.text.length : null;
+        // Their edit moves our caret only if it sits before it. Compare in the same (base) coordinates:
+        // when we also edited, theirs is "before" if it ends where ours starts or earlier.
+        const theirDelta = textLen(rt.ins) - textLen(B.slice(rt.start, rt.end));
+        if (caret != null && (oursChanged ? rt.end <= ro.start : textLen(B.slice(0, rt.start)) < caret)) caret += theirDelta;
+        const block = { ...theirs, data: { ...theirs.data, html: merged } };
+        const idx = ed.root.items.indexOf(it);
+        ed.root.remove(it, true);
+        ed.root.insert(block, idx);
+        const fresh = ed.root.items[idx];
+        const nel = fresh && fresh.el.querySelector('[contenteditable=true]');
+        if (nel && caret != null) { nel.focus({ preventScroll: true }); placeCaretAtOffset(nel, Math.max(0, caret)); }
+        // the room has their version; send ours on top of it
+        this.sent.set(theirs.id, JSON.stringify(theirs));
+        this.order = ed.root.items.map((i) => i.block.id);
+        ed.lastJSON = JSON.stringify(ed.getDoc());
+        ed.syncInput();
+        this.diff();
+        this.paintPeers();
+        return true;
+      } catch (e) { return false; }
     }
     applyPending() {
       if (!this.pending.size) return;
