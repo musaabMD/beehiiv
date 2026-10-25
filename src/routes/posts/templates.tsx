@@ -27,41 +27,108 @@ async function loadTpl(c: any, tid: string, editable = false) {
   return t;
 }
 
+/** Category order for the library filter (templates.category; team templates without one fall under “Team”). */
+export const CATEGORIES = ['Digest', 'Editorial', 'Curation', 'Business', 'Media & events', 'Education', 'Data', 'Welcome', 'Seasonal', 'Automation'];
+
+/** Shared styles + filter script for template galleries (templates page, new-post picker, automation picker). */
+export function GalleryAssets() {
+  return raw(`<style>
+.tg-filter{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}
+.tg-filter button{border:1px solid var(--border,#e5e7eb);background:var(--surface,#fff);color:inherit;border-radius:999px;padding:5px 12px;font:inherit;font-size:13px;cursor:pointer}
+.tg-filter button.on{background:var(--text,#111827);border-color:var(--text,#111827);color:var(--bg,#fff)}
+.tg-filter button small{opacity:.6;margin-left:4px}
+.tg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:16px}
+.tg-card{margin:0;display:flex;flex-direction:column;overflow:hidden}
+.tg-card[hidden]{display:none}
+.tg-thumb{display:block;height:250px;overflow:hidden;position:relative;border-bottom:1px solid var(--border,#e5e7eb);background:#f4f4f5}
+.tg-thumb iframe{position:absolute;top:0;left:0;width:200%;height:500px;border:0;transform:scale(.5);transform-origin:0 0;pointer-events:none;background:#fff}
+.tg-thumb::after{content:"";position:absolute;inset:auto 0 0 0;height:40px;background:linear-gradient(to bottom,rgba(255,255,255,0),rgba(0,0,0,.06))}
+.tg-thumb:hover{outline:2px solid var(--accent,#f59e0b);outline-offset:-2px}
+.tg-blank{display:flex;align-items:center;justify-content:center;font-size:44px;color:#9ca3af;background:repeating-linear-gradient(45deg,#fafafa,#fafafa 10px,#f4f4f5 10px,#f4f4f5 20px)}
+.tg-body{padding:14px;display:flex;flex-direction:column;gap:8px;flex:1}
+.tg-body p{margin:0}
+.tg-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.tg-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto;padding-top:4px}
+.tg-swatches{display:flex;gap:3px}
+</style><script>
+document.addEventListener('click',function(e){var b=e.target.closest('[data-tg-filter]');if(!b)return;var bar=b.closest('.tg-filter');var scope=document.querySelector(bar.dataset.target||'body');bar.querySelectorAll('button').forEach(function(x){x.classList.toggle('on',x===b)});var cat=b.dataset.tgFilter;scope.querySelectorAll('.tg-card[data-cat]').forEach(function(card){card.hidden=!(cat==='all'||card.dataset.cat===cat)});});
+</script>`);
+}
+
+/** Category filter chips for a gallery (client-side). */
+export function CategoryFilter(p: { items: Array<{ category?: string; pub_id?: string | null }>; target: string }) {
+  const counts = new Map<string, number>();
+  for (const t of p.items) { const k = catOf(t); counts.set(k, (counts.get(k) || 0) + 1); }
+  const cats = [...counts.keys()].sort((a, b) => (a === 'Team' ? -1 : b === 'Team' ? 1 : (CATEGORIES.indexOf(a) + 1 || 99) - (CATEGORIES.indexOf(b) + 1 || 99)));
+  return (
+    <div class="tg-filter" data-target={p.target} role="toolbar" aria-label="Filter templates by category">
+      <button type="button" class="on" data-tg-filter="all">All<small>{p.items.length}</small></button>
+      {cats.map((k) => <button type="button" data-tg-filter={k}>{k}<small>{counts.get(k)}</small></button>)}
+    </div>
+  );
+}
+
+export const catOf = (t: { category?: string; pub_id?: string | null }) => (t.pub_id ? 'Team' : t.category || 'Other');
+const KIND_LABEL: Record<string, string> = { post: 'Post', welcome: 'Welcome email', automation: 'Automation email' };
+
+/** One template card with a live thumbnail rendered from the template itself. */
+export function TemplateCard(p: { t: any; children?: any }) {
+  const t = p.t;
+  const st = parseJSON<any>(t.style, {});
+  const colors = [st.email?.bg, st.email?.content_bg, st.email?.accent, st.email?.button_bg, st.email?.link].filter((x, i, a) => x && a.indexOf(x) === i).slice(0, 5);
+  return (
+    <div class="card tg-card" data-cat={catOf(t)}>
+      <a class="tg-thumb" href={`/app/posts/templates/${t.id}/preview`} target="_blank" aria-label={`Preview ${t.name}`}>
+        <iframe src={`/app/posts/templates/${t.id}/preview?thumb=1`} loading="lazy" tabindex={-1} title="" />
+      </a>
+      <div class="tg-body">
+        <div class="row between" style="gap:6px;align-items:flex-start"><strong>{t.name}</strong>{colors.length > 0 && <span class="tg-swatches">{colors.map((col) => <span class="swatch" style={`background:${col}`} />)}</span>}</div>
+        <div class="tg-meta">
+          {t.is_default ? <Badge tone="green">Default</Badge> : null}
+          <Badge tone={t.pub_id ? 'blue' : 'gray'}>{t.pub_id ? 'Team' : t.category || 'Library'}</Badge>
+          {t.kind !== 'post' && <Badge tone="purple">{KIND_LABEL[t.kind] || t.kind}</Badge>}
+        </div>
+        <p class="small muted">{t.description || (t.author ? `By ${t.author} · ${fmtDate(t.updated_at)}` : '')}</p>
+        <div class="tg-actions">{p.children}</div>
+      </div>
+    </div>
+  );
+}
+
+/** The right primary action for a template: posts → new post; welcome/automation emails → a new automation from it. */
+export function UseTemplate(p: { t: any; label?: string }) {
+  if (p.t.kind === 'welcome' || p.t.kind === 'automation') {
+    return <form method="post" action="/app/automations/from-template" class="inline-form"><input type="hidden" name="template_id" value={p.t.id} /><Btn small kind="primary">{p.t.kind === 'welcome' ? 'Use as welcome email' : 'Use in automation'}</Btn></form>;
+  }
+  return <form method="post" action="/app/posts/new" class="inline-form"><input type="hidden" name="template_id" value={p.t.id} /><Btn small kind="primary">{p.label || 'Use'}</Btn></form>;
+}
+
 app.get('/templates', async (c) => {
   const pub = c.get('pub');
   const rows = await all<any>(c.env, `SELECT t.*, u.name AS author FROM templates t LEFT JOIN users u ON u.id = t.created_by WHERE (t.pub_id IS NULL OR t.pub_id = ?) AND t.kind IN ('post','welcome','automation') ORDER BY t.pub_id IS NULL, t.is_default DESC, t.updated_at DESC`, pub.id);
   const team = rows.filter((r) => r.pub_id);
-  const lib = rows.filter((r) => !r.pub_id);
-  const card = (t: any) => {
-    const st = parseJSON<any>(t.style, {});
-    const colors = [st.email?.accent, st.email?.link, st.email?.button_bg, st.email?.bg].filter(Boolean);
-    return (
-      <div class="card pe-tpl" style="margin:0">
-        <a class="pe-tpl-thumb" href={`/app/posts/templates/${t.id}/preview`} target="_blank" aria-label={`Preview ${t.name}`}>
-          <iframe src={`/app/posts/templates/${t.id}/preview?thumb=1`} loading="lazy" tabindex={-1} title="" />
-        </a>
-        <div class="card-b stack-sm">
-          <div class="row between"><strong>{t.name}</strong><span class="row" style="gap:4px">{t.is_default ? <Badge tone="green">Default</Badge> : null}<Badge tone={t.pub_id ? 'blue' : 'gray'}>{t.pub_id ? KINDS.find((k) => k[0] === t.kind)?.[1] : 'Library'}</Badge></span></div>
-          <p class="small muted" style="margin:0">{t.description || (t.author ? `By ${t.author} · ${fmtDate(t.updated_at)}` : '')}</p>
-          {colors.length > 0 && <div class="row" style="gap:4px">{colors.map((col) => <span class="swatch" style={`background:${col}`} />)}</div>}
-          <div class="row" style="gap:6px">
-            <form method="post" action="/app/posts/new" class="inline-form"><input type="hidden" name="template_id" value={t.id} /><Btn small>Use</Btn></form>
-            {t.pub_id && <LinkBtn small href={`/app/posts/templates/${t.id}/edit`}>Edit</LinkBtn>}
-            <ActionForm action={`/app/posts/templates/${t.id}/duplicate`} label="Duplicate" />
-            {!t.is_default && t.kind === 'post' && <ActionForm action={`/app/posts/templates/${t.id}/default`} label="Make default" kind="ghost" />}
-            {t.pub_id && <ActionForm action={`/app/posts/templates/${t.id}/delete`} label="Delete" kind="danger" confirm={`Delete template “${t.name}”?`} />}
-          </div>
-        </div>
-      </div>
-    );
-  };
+  const order = (t: any) => (CATEGORIES.indexOf(t.category) + 1 || 99) * 1000 + (String(t.id).startsWith('tpl_lib_') ? 0 : 500);
+  const lib = rows.filter((r) => !r.pub_id).sort((a, b) => order(a) - order(b) || a.created_at - b.created_at);
+  const card = (t: any) => (
+    <TemplateCard t={t}>
+      <UseTemplate t={t} />
+      <a class="btn btn-ghost btn-sm" href={`/app/posts/templates/${t.id}/preview`} target="_blank">Preview</a>
+      {t.pub_id && <LinkBtn small href={`/app/posts/templates/${t.id}/edit`}>Edit</LinkBtn>}
+      <ActionForm action={`/app/posts/templates/${t.id}/duplicate`} label={t.pub_id ? 'Duplicate' : 'Customize'} />
+      {!t.is_default && t.kind === 'post' && <ActionForm action={`/app/posts/templates/${t.id}/default`} label="Make default" kind="ghost" />}
+      {t.pub_id && <ActionForm action={`/app/posts/templates/${t.id}/delete`} label="Delete" kind="danger" confirm={`Delete template “${t.name}”?`} />}
+    </TemplateCard>
+  );
   return c.html(
     <DashLayout c={c} title="Templates" section="posts" sub="templates" styles={['/static/editor.css']}
       actions={<form method="post" action="/app/posts/templates"><Btn>+ New template</Btn></form>}>
+      <GalleryAssets />
+      <p class="muted" style="margin-top:0">Templates hold a content outline and a style (colors, fonts, spacing for email and web). Posts stay linked to their template: editing a template’s style restyles every post made from it, except values a post overrides in its own Style tab.</p>
       <h2>Team templates</h2>
-      {team.length ? <div class="grid g3">{team.map(card)}</div> : <Card><Empty icon="🧩" title="No team templates yet" body="Save colors, fonts, spacing and a content outline once — reuse it for every post. Duplicate a library template to start." /></Card>}
-      <h2 style="margin-top:28px">Template library</h2>
-      <div class="grid g3">{lib.map(card)}</div>
+      {team.length ? <div class="tg-grid">{team.map(card)}</div> : <Card><Empty icon="🧩" title="No team templates yet" body="Click “Customize” on any library template to make your own copy, or save a post as a template from the editor." /></Card>}
+      <h2 style="margin-top:28px">Template library <span class="muted small" style="font-weight:400">· {lib.length} designs</span></h2>
+      <CategoryFilter items={lib} target="#tg-lib" />
+      <div class="tg-grid" id="tg-lib">{lib.map(card)}</div>
     </DashLayout>,
   );
 });
@@ -83,7 +150,7 @@ app.get('/templates/:id/preview', async (c) => {
   }
   const b = await buildEmail(c.env, pub, { title: t.kind === 'post' ? t.name : '', subtitle: t.kind === 'post' ? t.description : '', doc: parseDoc(t.content), style: JSON.stringify(parseJSON<any>(t.style, {}).email || {}), hideHeader: t.kind !== 'post' }, null, { access: true, preview: true });
   let html = b.html;
-  if (c.req.query('thumb')) html = html.replace('</head>', '<style>html{zoom:.42;overflow:hidden;pointer-events:none}</style></head>');
+  if (c.req.query('thumb')) html = html.replace('</head>', '<style>html{overflow:hidden;pointer-events:none}</style></head>');
   return c.html(html);
 });
 
@@ -122,7 +189,7 @@ app.get('/templates/:id/edit', async (c) => {
               <section data-panel="settings" class="on">
                 <label class="field"><span class="field-l">Used for</span><select class="input" name="kind">{KINDS.map(([v, l]) => <option value={v} selected={t.kind === v}>{l}</option>)}</select></label>
                 <label class="toggle"><input type="checkbox" name="is_default" checked={!!t.is_default} /><span class="toggle-ui" /><span>Default for new posts<small class="field-h">New blank posts start with this template's style.</small></span></label>
-                <p class="small muted">Templates are shared with your whole team. Add an outline, sponsor slots (ad blocks), referral and recommendation blocks — every post created from it starts with them. Posts created from this template (including via the API) pick up changes made here.</p>
+                <p class="small muted">Templates are shared with your whole team. Add an outline, sponsor slots (ad blocks), referral and recommendation blocks — every post created from it starts with a copy of that content. Style is linked, not copied: posts created from this template (in the editor or via the API) pick up style changes made here, except the values a post overrides in its own Style tab.</p>
               </section>
               <section data-panel="style"><StyleFields style={style} /></section>
             </form>
@@ -163,7 +230,7 @@ app.post('/templates/:id/duplicate', async (c) => {
   const t = await loadTpl(c, c.req.param('id'));
   if (!t) return c.notFound();
   const tid = id();
-  await insert(c.env, 'templates', { id: tid, pub_id: c.get('pub').id, name: `${t.name}${t.pub_id ? ' (copy)' : ''}`, kind: t.kind, description: t.description, content: t.content, style: t.style, created_by: c.get('user').id, created_at: now(), updated_at: now() });
+  await insert(c.env, 'templates', { id: tid, pub_id: c.get('pub').id, name: `${t.name}${t.pub_id ? ' (copy)' : ''}`, kind: t.kind, description: t.description, content: t.content, style: t.style, category: t.category || '', created_by: c.get('user').id, created_at: now(), updated_at: now() });
   return back(c, `/app/posts/templates/${tid}/edit`, 'Template duplicated');
 });
 

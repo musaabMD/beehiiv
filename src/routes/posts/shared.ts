@@ -88,6 +88,28 @@ export async function simulatedSubscriber(env: Env, pub: Publication, sim?: Simu
   };
 }
 
+/** The linked template's style tokens ({email, web}), or {} when the post has no (visible) template. */
+export async function templateStyle(env: Env, pubId: string, templateId: string | null | undefined): Promise<{ email?: Record<string, any>; web?: Record<string, any> }> {
+  if (!templateId) return {};
+  const t = await one<{ style: string }>(env, 'SELECT style FROM templates WHERE id = ? AND (pub_id IS NULL OR pub_id = ?)', templateId, pubId);
+  return parseJSON<any>(t?.style, {}) || {};
+}
+
+/**
+ * Effective style of a post = template style ⊕ the post's own overrides (publication defaults are applied
+ * underneath by styleFor()/themeOf()). Posts store only their overrides, so template edits reach existing posts.
+ */
+export async function effectiveStyle(env: Env, pubId: string, post: Pick<Post, 'style' | 'template_id'>): Promise<{ email: Record<string, any>; web: Record<string, any> }> {
+  const tpl = await templateStyle(env, pubId, post.template_id);
+  const own = parseJSON<any>(post.style, {}) || {};
+  return { email: { ...(tpl.email || {}), ...(own.email || {}) }, web: { ...(tpl.web || {}), ...(own.web || {}) } };
+}
+
+/** Effective web theme for a post page: publication theme ⊕ template web style ⊕ post web overrides. */
+export async function postTheme(env: Env, pub: Publication, post: Pick<Post, 'style' | 'template_id'>) {
+  return { ...themeOf(pub), ...(await effectiveStyle(env, pub.id, post)).web };
+}
+
 /** Render a preview (email = full email document; web = standalone article page with the publication theme). */
 export async function renderPreview(env: Env, pub: Publication, post: Post, mode: 'email' | 'web', sim?: Simulate | null): Promise<{ html: string; bytes: number }> {
   const sub = await simulatedSubscriber(env, pub, sim);
@@ -99,14 +121,27 @@ export async function renderPreview(env: Env, pub: Publication, post: Post, mode
   }
   const access = sub ? sub.tier === 'premium' : sim?.tier ? sim.tier === 'premium' : true;
   const r = await renderDoc(parseDoc(post.content), { env, mode: 'web', pub, siteUrl: siteUrl(env, pub), post, subscriber: sub, access, preview: !sub });
-  const html = webPage(env, pub, post, r.html);
+  const html = webPage(env, pub, { ...post, style: JSON.stringify(await effectiveStyle(env, pub.id, post)) }, r.html);
   return { html, bytes: new TextEncoder().encode(html).length };
+}
+
+/** Standalone article page. `post.style` must already be the effective style (see effectiveStyle) when a template is linked. */
+const WEB_FONTS = ['Inter', 'Lora', 'Merriweather', 'Playfair Display', 'Source Serif 4', 'DM Sans', 'Space Grotesk', 'IBM Plex Sans', 'Libre Baskerville', 'Work Sans', 'Manrope', 'Fraunces', 'Roboto', 'Open Sans', 'Poppins'];
+/** Google Fonts <link> for the web fonts a (post/template) theme uses, '' when none. */
+export function webFontLink(t: { font?: string; heading_font?: string }): string {
+  const fams = new Set<string>();
+  for (const f of [t.font, t.heading_font]) {
+    const first = String(f || '').split(',')[0].replace(/["']/g, '').trim();
+    if (WEB_FONTS.includes(first)) fams.add(first);
+  }
+  if (!fams.size) return '';
+  return `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?${[...fams].map((f) => `family=${encodeURIComponent(f)}:ital,wght@0,400;0,600;0,700;1,400`).join('&')}&display=swap">`;
 }
 
 export function webPage(env: Env, pub: Publication, post: Pick<Post, 'title' | 'subtitle' | 'thumbnail_url' | 'style'>, body: string, authors = ''): string {
   const t = { ...themeOf(pub), ...(parseJSON<any>(post.style, {}).web || {}) };
   const vars = `--font:${t.font};--hfont:${t.heading_font};--bg:${t.bg};--surface:${t.surface};--text:${t.text};--muted:${t.muted};--accent:${t.accent};--accent-text:${t.accent_text};--border:${t.border};--radius:${t.radius}px;--shadow:${t.shadow};--maxw:${t.max_width}px`;
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><link rel="stylesheet" href="${env.APP_URL.replace(/\/$/, '')}/static/site.css"><style>:root{${vars}}body{margin:0}</style></head><body class="site"><article class="s-article"><header class="s-article-h"><h1>${esc(post.title || 'Untitled')}</h1>${post.subtitle ? `<p class="s-sub">${esc(post.subtitle)}</p>` : ''}<div class="s-byline">${esc(authors || pub.name)} · ${fmtDate(Date.now(), { dateStyle: 'medium' }, pub.timezone)}</div></header>${post.thumbnail_url ? `<img class="s-thumb" src="${esc(post.thumbnail_url)}" alt="">` : ''}<div class="s-body">${body}</div></article></body></html>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><link rel="stylesheet" href="${env.APP_URL.replace(/\/$/, '')}/static/site.css">${webFontLink(t)}<style>:root{${vars}}body{margin:0}</style></head><body class="site"><article class="s-article"><header class="s-article-h"><h1>${esc(post.title || 'Untitled')}</h1>${post.subtitle ? `<p class="s-sub">${esc(post.subtitle)}</p>` : ''}<div class="s-byline">${esc(authors || pub.name)} · ${fmtDate(Date.now(), { dateStyle: 'medium' }, pub.timezone)}</div></header>${post.thumbnail_url ? `<img class="s-thumb" src="${esc(post.thumbnail_url)}" alt="">` : ''}<div class="s-body">${body}</div></article></body></html>`;
 }
 
 export function autoSeo(post: Pick<Post, 'title' | 'subtitle' | 'content' | 'seo'>): { title: string; description: string } {

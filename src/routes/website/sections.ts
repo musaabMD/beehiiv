@@ -231,34 +231,102 @@ async function renderOne(c: Ctx, env: Env, pub: Publication, base: string, s: Se
   }
 }
 
-/** Built-in starter page templates (used in "New page" and the AI fallback). */
-export const STARTER_PAGES: Record<string, { title: string; slug: string; sections: Omit<Section, 'id'>[] }> = {
+/** Built-in page template library (used in "New page", the page gallery and the AI fallback). Section bg colors use theme variables so they fit every theme. */
+export interface StarterPage { title: string; slug: string; description: string; category: string; sections: Omit<Section, 'id'>[] }
+
+let _k = 0;
+const tb = (type: string, data: any) => ({ id: `t${++_k}`, type, data });
+const doc = (...blocks: any[]) => ({ doc: { blocks } });
+const P = (html: string, align?: string) => tb('paragraph', align ? { html, align } : { html });
+const H = (level: number, html: string, align?: string) => tb('heading', align ? { level, html, align } : { level, html });
+const LINK = (label: string, url: string) => tb('button', { label, url, align: 'center' });
+const SURFACE = 'var(--surface)';
+
+export const STARTER_PAGES: Record<string, StarterPage> = {
   landing: {
-    title: 'Home', slug: '', sections: [
-      { type: 'hero', data: { title: 'Smart, short, and worth your inbox', subtitle: 'Join thousands of readers who get the best ideas every week.', show_form: true }, style: { padding: 'xl', align: 'center' } },
-      { type: 'columns', data: { columns: [{ title: 'Weekly deep dives', body: 'One thoughtful issue every week.' }, { title: 'No fluff', body: 'Five-minute reads you will actually finish.' }, { title: 'Community', body: 'Join the conversation with other readers.' }] }, style: { padding: 'lg', align: 'center' } },
+    title: 'Home', slug: '', category: 'Landing', description: 'Conversion-focused home page: bold hero with signup, benefits, latest posts, social proof and a final call to subscribe.', sections: [
+      { type: 'hero', data: { eyebrow: 'A weekly newsletter', title: 'Smart, short, and worth your inbox', subtitle: 'Join thousands of readers who get the best ideas in our field every week — in five minutes or less.', show_form: true, button: 'Subscribe free' }, style: { padding: 'xl', align: 'center' } },
+      { type: 'columns', data: { columns: [{ title: '📬 One email a week', body: 'A single, carefully edited issue every Tuesday. No spam, ever.' }, { title: '⏱ Five-minute reads', body: 'Everything that matters, nothing that doesn’t. Read it with your coffee.' }, { title: '💬 A real community', body: 'Reply to any issue — we read every message and feature the best ones.' }] }, style: { padding: 'lg', align: 'center', bg: SURFACE } },
       { type: 'posts', data: { title: 'Latest posts', count: 6 }, style: { padding: 'lg' } },
-      { type: 'testimonials', data: { title: 'What readers say', items: [{ quote: 'The one newsletter I read every week.', name: 'A happy reader' }] }, style: { padding: 'lg', bg: '#f8fafc' } },
+      { type: 'testimonials', data: { title: 'What readers say', items: [{ quote: 'The one newsletter I read every single week.', name: 'Alex Rivera', role: 'Product designer' }, { quote: 'Smarter than anything in my feed — and shorter.', name: 'Priya Shah', role: 'Founder' }, { quote: 'I forward it to my team every Tuesday.', name: 'Sam Lee', role: 'Engineering manager' }] }, style: { padding: 'lg', bg: SURFACE } },
       { type: 'subscribe', data: { title: 'Get the next issue', body: 'Free, every week. Unsubscribe anytime.' }, style: { padding: 'lg', width: 'narrow' } },
     ],
   },
+  archive_landing: {
+    title: 'Read', slug: 'read', category: 'Landing', description: 'Content-first archive landing: compact hero, the full feed in list layout, topic columns and a subscribe box.', sections: [
+      { type: 'hero', data: { eyebrow: 'The archive', title: 'Every issue, in one place', subtitle: 'Browse everything we’ve published — or get new issues straight to your inbox.', show_form: true, button: 'Subscribe' }, style: { padding: 'lg', align: 'center' } },
+      { type: 'posts', data: { title: 'Most recent', count: 12, layout: 'list' }, style: { padding: 'md', width: 'narrow' } },
+      { type: 'columns', data: { columns: [{ title: 'Deep dives', body: 'Long-form analysis of the ideas shaping our field.', label: 'Browse', link: 'archive' }, { title: 'Interviews', body: 'Conversations with the people doing the work.', label: 'Browse', link: 'archive' }, { title: 'Guides', body: 'Practical, step-by-step how-tos you can use today.', label: 'Browse', link: 'archive' }] }, style: { padding: 'lg', bg: SURFACE } },
+      { type: 'subscribe', data: { title: 'Never miss an issue', body: 'Join free. One email a week.' }, style: { padding: 'lg', width: 'narrow' } },
+    ],
+  },
   about: {
-    title: 'About', slug: 'about', sections: [
-      { type: 'hero', data: { title: 'About us', subtitle: 'Why this newsletter exists and who writes it.', show_form: false }, style: { padding: 'lg', align: 'center' } },
-      { type: 'text', data: { doc: { blocks: [{ id: 'a1', type: 'paragraph', data: { html: 'Tell your story here: who you are, what you write about, and why readers should subscribe.' } }] } }, style: { width: 'narrow' } },
-      { type: 'faq', data: { title: 'FAQ', items: [{ q: 'How often do you publish?', a: 'Every week.' }, { q: 'Is it free?', a: 'Yes — with an optional premium tier.' }] }, style: { width: 'narrow' } },
-      { type: 'subscribe', data: {}, style: { width: 'narrow' } },
+    title: 'About', slug: 'about', category: 'Company', description: 'Tell your story: mission hero, the why behind the newsletter, what readers get, who writes it, FAQ and signup.', sections: [
+      { type: 'hero', data: { eyebrow: 'About us', title: 'Why this newsletter exists', subtitle: 'We started writing because the conversation we wanted to read didn’t exist yet.', show_form: false }, style: { padding: 'xl', align: 'center' } },
+      { type: 'text', data: doc(H(2, 'Our story'), P('Tell readers who you are, what you noticed that nobody else was saying, and the moment you decided to start writing. Two or three short paragraphs is plenty.'), P('Then make a promise: what will a reader know, feel or be able to do after a few months of reading?')), style: { width: 'narrow', padding: 'md' } },
+      { type: 'columns', data: { columns: [{ title: 'Independent', body: 'Reader-supported and free of corporate agendas.' }, { title: 'Researched', body: 'Every claim is sourced. Every source is linked.' }, { title: 'Useful', body: 'Each issue ends with something you can act on.' }] }, style: { padding: 'lg', align: 'center', bg: SURFACE } },
+      { type: 'text', data: doc(H(2, 'Who writes it'), P('<b>Your Name</b> — one line on your background and why readers should trust you on this topic. Add co-writers and contributors here too.')), style: { width: 'narrow', padding: 'md' } },
+      { type: 'faq', data: { title: 'Frequently asked questions', items: [{ q: 'How often do you publish?', a: 'Every week, on Tuesday morning.' }, { q: 'Is it free?', a: 'Yes. An optional premium membership unlocks deep dives and the full archive.' }, { q: 'Can I write for you?', a: 'We feature guest writers every month — reply to any issue with your pitch.' }] }, style: { width: 'narrow' } },
+      { type: 'subscribe', data: { title: 'Join the readers', body: 'Free, every week.' }, style: { width: 'narrow', padding: 'lg' } },
+    ],
+  },
+  start_here: {
+    title: 'Start here', slug: 'start-here', category: 'Company', description: 'Onboard new visitors: what this is, the three best posts to read first, reading paths by interest and how to get involved.', sections: [
+      { type: 'hero', data: { eyebrow: 'New here?', title: 'Start here', subtitle: 'The fastest way to get the most out of this newsletter — in about ten minutes.', show_form: false }, style: { padding: 'lg', align: 'center' } },
+      { type: 'text', data: doc(H(2, '1. What this is'), P('One paragraph: the topic, the reader it’s for, and how often it arrives. Link to the About page for the longer story.'), H(2, '2. Read these three first'), P('Hand-pick the posts that best represent your work. Most readers who read these become regulars.')), style: { width: 'narrow', padding: 'md' } },
+      { type: 'columns', data: { columns: [{ title: 'The classic', body: 'The post that explains our core idea.', label: 'Read it', link: 'archive' }, { title: 'The reader favorite', body: 'Our most-shared issue of all time.', label: 'Read it', link: 'archive' }, { title: 'The practical one', body: 'A guide you can use today.', label: 'Read it', link: 'archive' }] }, style: { padding: 'lg', bg: SURFACE } },
+      { type: 'text', data: doc(H(2, '3. Pick your path'), P('<b>If you’re new to the topic:</b> start with the beginner’s guide and the glossary.'), P('<b>If you’re a practitioner:</b> the interview series and teardown issues are for you.'), P('<b>If you’re a leader:</b> read the monthly strategy deep dives.')), style: { width: 'narrow', padding: 'md' } },
+      { type: 'cta', data: { title: '4. Get the next issue', body: 'Subscribe free and reply to the welcome email — we read every response.', label: 'Subscribe free', url: 'subscribe' }, style: { padding: 'lg', bg: SURFACE } },
+    ],
+  },
+  sponsor: {
+    title: 'Advertise with us', slug: 'advertise', category: 'Business', description: 'Media-kit page for sponsors: audience stats, who reads, placements & pricing table, sponsor testimonials, FAQ and a booking CTA.', sections: [
+      { type: 'hero', data: { eyebrow: 'Partner with us', title: 'Reach readers who actually read', subtitle: 'Put your brand in front of an engaged, high-intent audience — in the inbox and on the web.', show_form: false, cta_label: 'Book a placement', cta_url: 'sponsor' }, style: { padding: 'xl', align: 'center' } },
+      { type: 'columns', data: { columns: [{ title: '25,000+', body: 'Subscribers, growing 8% month over month' }, { title: '54%', body: 'Average open rate (bot-filtered)' }, { title: '6.1%', body: 'Average click rate on sponsor slots' }, { title: '72%', body: 'Readers in decision-making roles' }] }, style: { padding: 'lg', align: 'center', bg: SURFACE } },
+      { type: 'text', data: doc(H(2, 'Who reads'), P('Describe your audience in concrete terms: job titles, industries, company sizes, geography and what they buy. Sponsors care about fit more than size.'), H(2, 'Placements'), tb('table', { header: true, rows: [['Placement', 'What you get', 'Price'], ['Primary sponsor', 'Top-of-issue placement with image, 100 words and CTA', '$1,200 / issue'], ['Secondary sponsor', 'Mid-issue text placement, 50 words', '$600 / issue'], ['Classified', 'One line with link near the end', '$200 / issue'], ['Dedicated send', 'A full email written with you', '$3,500']] }), P('Multi-issue packages get 10–20% off. Prices include a performance report after each send.')), style: { width: 'narrow', padding: 'md' } },
+      { type: 'testimonials', data: { title: 'What sponsors say', items: [{ quote: 'Our best-performing newsletter placement this year, by a wide margin.', name: 'Jordan Kim', role: 'Head of Growth, Acme' }, { quote: 'Clicks turned into customers. We booked the next quarter on the spot.', name: 'Maria Lopez', role: 'Marketing Lead, Brightside' }] }, style: { padding: 'lg', bg: SURFACE } },
+      { type: 'faq', data: { title: 'Sponsor FAQ', items: [{ q: 'How far in advance should I book?', a: 'Slots usually fill 3–4 weeks out. Book early for launches.' }, { q: 'Do you write the copy?', a: 'You can send copy, or we can write it in our voice — readers respond better to that.' }, { q: 'What reporting do I get?', a: 'Opens, unique clicks (bot-filtered) and click-through rate within 72 hours.' }] }, style: { width: 'narrow' } },
+      { type: 'cta', data: { title: 'Ready to reach our readers?', body: 'Tell us about your product and goals — we reply within one business day.', label: 'Book a placement', url: 'sponsor' }, style: { padding: 'lg' } },
+    ],
+  },
+  podcast: {
+    title: 'Podcast', slug: 'listen', category: 'Media', description: 'Show home page: split hero, latest episodes (auto-updating), where to listen, listener reviews and newsletter signup.', sections: [
+      { type: 'hero', data: { eyebrow: 'The podcast', title: 'Conversations worth your commute', subtitle: 'Weekly interviews with the people building what’s next. New episodes every Thursday.', show_form: false, cta_label: 'Listen to the latest', cta_url: 'podcasts' }, style: { padding: 'xl', align: 'center' } },
+      { type: 'podcast', data: { title: 'Latest episodes', count: 6 }, style: { padding: 'lg', width: 'narrow' } },
+      { type: 'columns', data: { columns: [{ title: '🎧 Apple Podcasts', body: 'Subscribe and leave a review.', label: 'Open', link: 'https://podcasts.apple.com' }, { title: '🟢 Spotify', body: 'Follow the show to get every episode.', label: 'Open', link: 'https://open.spotify.com' }, { title: '📡 RSS', body: 'Use any podcast app you like.', label: 'Get the feed', link: 'podcasts' }] }, style: { padding: 'lg', align: 'center', bg: SURFACE } },
+      { type: 'testimonials', data: { title: 'Listener reviews', items: [{ quote: 'The only show I never skip.', name: '★★★★★ on Apple Podcasts' }, { quote: 'Great guests, sharper questions.', name: '★★★★★ on Spotify' }] }, style: { padding: 'lg' } },
+      { type: 'subscribe', data: { title: 'Get show notes by email', body: 'Every episode’s notes, links and timestamps in your inbox.' }, style: { padding: 'lg', width: 'narrow', bg: SURFACE } },
+    ],
+  },
+  events: {
+    title: 'Events', slug: 'meetups', category: 'Media', description: 'Events hub: hero, auto-updating list of upcoming events, what to expect, past-event photos/testimonials, FAQ and signup for invites.', sections: [
+      { type: 'hero', data: { eyebrow: 'Live & online', title: 'Meet the community in person', subtitle: 'Talks, workshops and meetups for readers — online and in cities around the world.', show_form: false, cta_label: 'See upcoming events', cta_url: 'events' }, style: { padding: 'xl', align: 'center' } },
+      { type: 'events', data: { title: 'Upcoming events', count: 6 }, style: { padding: 'lg', width: 'narrow' } },
+      { type: 'columns', data: { columns: [{ title: 'Small rooms', body: 'Capped at 60 people so everyone actually meets.' }, { title: 'Real talks', body: 'Practitioners, not pitches. Every session has Q&A.' }, { title: 'Replays', body: 'Missed it? Registered readers get the recording.' }] }, style: { padding: 'lg', align: 'center', bg: SURFACE } },
+      { type: 'testimonials', data: { title: 'From past attendees', items: [{ quote: 'I met two future colleagues at the last meetup.', name: 'Chris Park', role: 'Attendee, Berlin' }, { quote: 'The best two hours of my month.', name: 'Dana Wu', role: 'Attendee, online' }] }, style: { padding: 'lg' } },
+      { type: 'faq', data: { title: 'Event FAQ', items: [{ q: 'Are events free?', a: 'Most are free for subscribers; workshops may have a small ticket price.' }, { q: 'Can I host one in my city?', a: 'Yes! Reply to any issue and tell us where.' }] }, style: { width: 'narrow' } },
+      { type: 'subscribe', data: { title: 'Get event invites first', body: 'Subscribers hear about new events before anyone else.' }, style: { padding: 'lg', width: 'narrow', bg: SURFACE } },
+    ],
+  },
+  link_in_bio: {
+    title: 'Links', slug: 'links', category: 'Landing', description: 'Link-in-bio landing for social profiles: compact centered profile, stacked link buttons, inline signup and latest posts.', sections: [
+      { type: 'hero', data: { title: 'Your Name', subtitle: 'Writer of a weekly newsletter about your topic. Everything I make, in one place 👇', show_form: false }, style: { padding: 'lg', align: 'center', width: 'narrow' } },
+      { type: 'text', data: doc(LINK('📬 Subscribe to the newsletter', 'subscribe'), LINK('✨ Start here: my best posts', 'archive'), LINK('🎧 Listen to the podcast', 'podcasts'), LINK('📅 Upcoming events', 'events'), LINK('🛍 Shop guides & templates', 'shop')), style: { width: 'narrow', padding: 'sm', align: 'center' } },
+      { type: 'subscribe', data: { title: 'Get the weekly email', body: 'Join free — one email a week.', button: 'Join' }, style: { width: 'narrow', padding: 'md', bg: SURFACE } },
+      { type: 'posts', data: { title: 'Latest', count: 3, layout: 'list' }, style: { width: 'narrow', padding: 'md' } },
     ],
   },
   premium: {
-    title: 'Go premium', slug: 'premium', sections: [
-      { type: 'hero', data: { title: 'Support independent writing', subtitle: 'Unlock every premium post, the full archive, and member-only perks.', show_form: false }, style: { padding: 'lg', align: 'center' } },
-      { type: 'pricing', data: { title: '' }, style: { padding: 'md' } },
-      { type: 'faq', data: { title: 'Questions', items: [{ q: 'Can I cancel anytime?', a: 'Yes, cancel or pause from your account page.' }] }, style: { width: 'narrow' } },
+    title: 'Go premium', slug: 'premium', category: 'Business', description: 'Upgrade page: value-focused hero, what members get, pricing tiers, member testimonials and a cancellation-friendly FAQ.', sections: [
+      { type: 'hero', data: { eyebrow: 'Membership', title: 'Support independent writing', subtitle: 'Unlock every premium post, the full archive, and member-only perks.', show_form: false }, style: { padding: 'xl', align: 'center' } },
+      { type: 'columns', data: { columns: [{ title: '🔓 Every deep dive', body: 'Weekly members-only analysis and the full archive.' }, { title: '🧰 Templates & tools', body: 'Downloadable resources you can use right away.' }, { title: '💬 Community', body: 'Comment, join live Q&As and meet other members.' }] }, style: { padding: 'lg', align: 'center', bg: SURFACE } },
+      { type: 'pricing', data: { title: 'Choose your plan' }, style: { padding: 'lg' } },
+      { type: 'testimonials', data: { title: 'Members say', items: [{ quote: 'Paid for itself in the first month.', name: 'Taylor Brooks', role: 'Member since 2024' }] }, style: { padding: 'lg', bg: SURFACE } },
+      { type: 'faq', data: { title: 'Questions', items: [{ q: 'Can I cancel anytime?', a: 'Yes — cancel or pause from your account page in two clicks.' }, { q: 'Do you offer team or student discounts?', a: 'Yes, reply to any email and we’ll sort you out.' }] }, style: { width: 'narrow' } },
     ],
   },
   links: {
-    title: 'Watch', slug: 'watch', sections: [
+    title: 'Watch', slug: 'watch', category: 'Media', description: 'Video & audio hub: auto-updating YouTube channel and latest podcast episodes.', sections: [
       { type: 'hero', data: { title: 'Watch & listen', subtitle: 'Our latest videos and episodes, updated automatically.', show_form: false }, style: { align: 'center' } },
       { type: 'youtube', data: { title: 'Latest videos', channel_id: '', count: 6 } },
       { type: 'podcast', data: { title: 'Latest episodes', count: 5 } },

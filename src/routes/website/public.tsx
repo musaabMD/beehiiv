@@ -17,6 +17,7 @@ import { flash } from '../../ui/components';
 import { SiteLayout, SiteMessage, SubscribeForm, themeOf } from '../../ui/site';
 import { esc, fmtDate, hmac, id, now, parseJSON, stripTags, truncate, form, str, int, DAY, b64url } from '../../lib/util';
 import { renderSections, parseSections, postCard, withAuthors, PUBLIC_POSTS, type CardPost } from './sections';
+import { effectiveStyle, webFontLink } from '../posts/shared';
 
 const site = new Hono<AppEnv>();
 const PER_PAGE = 12;
@@ -204,9 +205,15 @@ site.get('/p/:post', async (c) => {
     publisher: { '@type': 'Organization', name: pub.name, logo: pub.logo_url ? { '@type': 'ImageObject', url: pub.logo_url } : undefined },
   };
   const tree = threadComments(comments);
+  // Post look on the web = site theme ⊕ linked template's web style ⊕ the post's own web overrides
+  const webStyle = (await effectiveStyle(c.env, pub.id, post)).web;
+  const cssv = (v: unknown) => String(v).replace(/[;"'<>{}\\]/g, '');
+  const VARS: Record<string, string> = { font: '--font', heading_font: '--hfont', text: '--text', bg: '--bg', accent: '--accent', accent_text: '--accent-text' };
+  const postVars = Object.entries(VARS).filter(([k]) => webStyle[k]).map(([k, v]) => `${v}:${cssv(webStyle[k])}`).join(';');
+  const postHead = postVars ? raw(`${webFontLink(webStyle)}<style>:root{${postVars}}</style>`) : undefined;
   return c.html(
     await SiteLayout({
-      c, title, description: desc, image, canonical: seo.canonical || url, noindex: !!seo.noindex, jsonld,
+      c, title, description: desc, image, canonical: seo.canonical || url, noindex: !!seo.noindex, jsonld, head: postHead,
       children: (
         <article class="s-article">
           <header class="s-article-h">
