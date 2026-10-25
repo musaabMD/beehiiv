@@ -394,6 +394,7 @@ export function normalizeSteps(steps: any[], depth = 0): any[] {
     if (!STEP_TYPES[s.type]) throw new BadRequest(`Unknown step type "${s.type}". Valid: ${Object.keys(STEP_TYPES).join(', ')}.`);
     const config = { ...(s.config || {}) };
     if (s.type === 'send_email' && config.markdown && !config.doc) { config.doc = { blocks: markdownToBlocks(String(config.markdown)) }; delete config.markdown; }
+    if (s.type === 'send_email' && Array.isArray(config.blocks) && !config.doc) { config.doc = { blocks: config.blocks }; delete config.blocks; }
     return { id: String(s.id || id(8)).slice(0, 40), type: String(s.type), config, ...(s.yes ? { yes: normalizeSteps(s.yes, depth + 1) } : {}), ...(s.no ? { no: normalizeSteps(s.no, depth + 1) } : {}) };
   });
 }
@@ -409,6 +410,8 @@ export async function activateAutomation(env: any, pub: Publication, a: any): Pr
   if (a.draft_steps != null || a.draft_trigger != null) await publishDraft(env, a.id, pub.id);
   const fresh = await one<any>(env, 'SELECT * FROM automations WHERE id = ?', a.id);
   if (!parseJSON<any[]>(fresh.steps, []).length) throw new BadRequest('Add at least one step before activating.');
+  const emptyEmail = (steps: any[]): boolean => steps.some((st) => (st.type === 'send_email' && (!st.config?.subject || !(st.config?.doc?.blocks || []).length)) || emptyEmail(st.yes || []) || emptyEmail(st.no || []));
+  if (emptyEmail(parseJSON<any[]>(fresh.steps, []))) throw new BadRequest('Every send_email step needs a subject and content (config.markdown, config.doc or config.blocks) before activating.');
   if (!TRIGGERS[parseJSON<any>(fresh.trigger, {}).type]) throw new BadRequest('Set a trigger before activating.');
   await run(env, `UPDATE automations SET status = 'active', updated_at = ? WHERE id = ?`, now(), a.id);
   return one<any>(env, 'SELECT * FROM automations WHERE id = ?', a.id);
@@ -460,7 +463,7 @@ export async function setAutomationPaused(env: any, pub: Publication, a: any, pa
 const AUTO_BODY = {
   name: 'string', description: 'string', allow_reentry: 'boolean',
   trigger: `{type, config} — types: ${Object.keys(TRIGGERS).join(', ')}`,
-  steps: `[{id?, type, config, yes?, no?}] — types: ${Object.keys(STEP_TYPES).join(', ')}; send_email config accepts markdown`,
+  steps: `[{id?, type, config, yes?, no?}] — types: ${Object.keys(STEP_TYPES).join(', ')}; send_email config: {subject, markdown | doc | blocks}`,
 };
 route('POST', '/automations', 'Automations', 'Create an automation (saved as a draft; activate=true publishes it and turns it on)', async (c, pub) => {
   const b = await body(c);
