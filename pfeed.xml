@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:podcast="https://podcastindex.org/namespace/1.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Open Web Talk (Premium)</title>
+    <link>http://localhost:8787/s/demo/podcasts/open-web-talk</link>
+    <atom:link href="http://localhost:8787/s/demo/podcasts/open-web-talk/private/ptok123/feed.xml" rel="self" type="application/rss+xml"/>
+    <language>en</language>
+    <description><![CDATA[Conversations about the open web]]></description>
+    <itunes:summary>Conversations about the open web</itunes:summary>
+    <itunes:author>Demo Host</itunes:author>
+    <itunes:type>episodic</itunes:type>
+    <itunes:owner><itunes:name>Demo Host</itunes:name><itunes:email>host@example.com</itunes:email></itunes:owner>
+    <itunes:category text="Technology"/>
+    <itunes:explicit>false</itunes:explicit>
+    <podcast:guid>t5vg1a6emoq6s433</podcast:guid>
+    <podcast:locked>yes</podcast:locked>
+    <itunes:block>Yes</itunes:block>
+    <generator>OpenHive</generator>
+    <lastBuildDate>Sun, 25 Oct 2026 07:45:14 GMT</lastBuildDate>
+    <item>
+      <title>Bonus premium</title>
+      <link>http://localhost:8787/s/demo/podcasts/open-web-talk/bonus-premium</link>
+      <description><![CDATA[]]></description>
+      <content:encoded><![CDATA[]]></content:encoded>
+      <itunes:summary></itunes:summary>
+      <guid isPermaLink="false">63d0d29a-4494-4ac8-bcc9-005f22f2673a</guid>
+      <pubDate>Sun, 25 Oct 2026 07:44:35 GMT</pubDate>
+      <enclosure url="http://localhost:8787/listen/c9xmbe0lyqflepm7.mp3?k=ptok123" length="80044" type="audio/wav"/>
+      <itunes:duration>5</itunes:duration>
+      <itunes:episodeType>bonus</itunes:episodeType>
+      <itunes:explicit>false</itunes:explicit>
+    </item>
+    <item>
+      <title>Episode 1: Hello &amp; welcome</title>
+      <link>http://localhost:8787/s/demo/podcasts/open-web-talk/episode-1-hello-welcome</link>
+      <description><![CDATA[<p>Show <b>notes</b> </p>]]></description>
+      <content:encoded><![CDATA[<p>Show <b>notes</b> </p>]]></content:encoded>
+      <itunes:summary>Show notes</itunes:summary>
+      <guid isPermaLink="false">600b5e00-0cf5-47bc-b2dd-01bde24fefbc</guid>
+      <pubDate>Sun, 25 Oct 2026 07:44:34 GMT</pubDate>
+      <enclosure url="http://localhost:8787/listen/3um38yyl16n260qu.mp3?k=ptok123" length="80044" type="audio/wav"/>
+      <itunes:duration>5</itunes:duration>
+      <itunes:episodeType>full</itunes:episodeType>
+      <itunes:season>1</itunes:season>
+      <itunes:episode>1</itunes:episode>
+      <itunes:explicit>false</itunes:explicit>
+      <podcast:transcript url="http://localhost:8787/s/demo/podcasts/open-web-talk/episode-1-hello-welcome/transcript.txt" type="text/plain"/>
+    </item>
+  </channel>
+</rss>

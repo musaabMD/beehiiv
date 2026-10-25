@@ -124,7 +124,7 @@ export async function summary(env: Env, pubId: string, days = 30) {
     web_views: views,
   };
   const sentence = `Over the last ${days} days you gained ${added} subscribers (${unsubs} unsubscribed, net ${added - unsubs >= 0 ? '+' : ''}${added - unsubs}) and now have ${total} active subscribers (${premium} premium). ` +
-    `You published ${posts} posts; ${delivered} emails were delivered with a ${data.open_rate}% open rate and ${data.click_rate}% click rate. ` +
+    `You published ${posts} ${posts === 1 ? "post" : "posts"}; ${delivered} emails were delivered with a ${data.open_rate}% open rate and ${data.click_rate}% click rate. ` +
     `Revenue was ${money(revenue)}${wallet ? ` plus ${money(wallet)} from ads, boosts and sponsorships` : ''}. The website had ${views} page views.`;
   return { ...data, summary: sentence };
 }
