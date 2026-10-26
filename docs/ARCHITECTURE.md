@@ -54,6 +54,7 @@ Public site (`/s/:slug/...`):
 - **website** (mounted last): `/`, `/archive`, `/p/:slug` (+ `/p/:slug/comments`, `/p/:slug/react`), `/feed.xml`, `/sitemap.xml`, `/news-sitemap.xml`, `/robots.txt`, `/authors/:id`, `/tag/:slug`, `/search`, `/account`, `/privacy`, `/terms`, `/:page` (custom pages catch-all)
 
 Root:
+- **platform** (`routes/platform.tsx`): `/checkout/plan/:id` (simulated plan checkout); dash `/app/admin/*` (superadmin Platform admin)
 - **core** (`routes/core.tsx`): `/health`, `/media/*`, `/t/o/:token` (open pixel), `/t/c/:token` (click), `/u/:tok` (unsubscribe incl. RFC 8058 one-click POST), `/pref/:tok`, `/checkout/simulate/:id`, `/hooks/stripe`, `/hooks/bounce`, `/hooks/fbl`
 - **landing**: `/` (sales page), `/docs`, `/docs/*`
 - **auth**: `/login`, `/signup`, `/logout`, `/forgot`, `/reset/:token`, `/magic/:token`, `/device`, `/device/:code`, `/invite/:token`, `/transfer/:token`, `/verify/:token`
@@ -93,7 +94,11 @@ Dashboard shared endpoints:
 | media.ts | `storeFile`, `importFromUrl`, `serveObject` (range requests) |
 | tracking.ts | `recordOpen`, `recordClick`, `trackView`, `channelOf`, `logBot` |
 | ai.ts | Workers AI text / JSON / image / speech / transcription (graceful when not configured) |
-| pub.ts | `settings(pub)`, `siteUrl`, `appUrl`, `senderFor` |
+| pub.ts | `settings(pub)`, `siteUrl`, `appUrl`, `senderFor` (applies the shared sender) |
+| plans.ts | hosted-service plans: `listPlans(env)`, `DEFAULT_PLANS`, `LIMITS`, workspace usage, `planStatus`, `checkSend`/`assertCanSend` (`SendBlockedError`), branding, 80% usage warning |
+| platformbilling.ts | platform plan billing: `changePlan` (upgrade now / downgrade at period end), Stripe Checkout subscriptions or simulated checkout, `handlePlatformStripeEvent`, failed-payment grace, lifecycle job |
+| safety.ts | multi-tenant sending safety: campaign auto-pause (bounces/complaints), account suspension, first-large-campaign approval, new-account ramp |
+| sharedsender.ts | `<slug>@SHARED_FROM_DOMAIN` From address for publications without a verified domain; Reply-To fallback to the owner |
 
 ## Editor document
 

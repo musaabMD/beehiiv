@@ -69,7 +69,7 @@ dash.get('/', async (c) => {
     </Stats>
     <form method="get" class="row" style="margin:14px 0;gap:8px">
       <input class="input" name="q" value={q} placeholder="Search workspace, owner email, publication…" style="max-width:360px" />
-      <Select name="status" value={status} options={[['', 'All'], ['suspended', 'Suspended'], ['paid', 'Paid plans'], ['past_due', 'Payment failed']]} />
+      <Select name="status" value={status} options={[['', 'All'], ['suspended', 'Suspended'], ['paid', 'Paid plans'], ['past_due', 'Payment failed']]} attrs={{ style: 'max-width:200px' }} />
       <Btn kind="secondary" small>Filter</Btn>
     </form>
     <Card pad={false}>

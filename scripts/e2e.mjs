@@ -254,6 +254,14 @@ cookies = {}; await req('/login', { form: { email: opsEmail, password: 'correct-
 await req(`/app/admin/w/${wsId}/unsuspend`, { form: {} });
 ok(sql(`SELECT sending_status FROM workspaces WHERE id = '${wsId}'`)[0].sending_status === 'active', 'superadmin can unsuspend');
 cookies = userCookies;
+// failed payment: paid limits during the grace period, Free limits after it
+sql(`UPDATE workspaces SET plan_status = 'past_due', plan_grace_until = ${Date.now() + 86400000} WHERE id = '${wsId}'`);
+r = await req('/app/settings/plan'); let gp = await r.text();
+ok(gp.includes('Payment failed') && !gp.includes('Free limits apply'), 'failed payment: grace period keeps paid limits');
+sql(`UPDATE workspaces SET plan_grace_until = ${Date.now() - 1000} WHERE id = '${wsId}'`);
+r = await req('/app/settings/plan'); gp = await r.text();
+ok(gp.includes('Free limits apply') && gp.includes('/ 500 ('), 'after the grace period Free limits apply');
+sql(`UPDATE workspaces SET plan_status = 'active', plan_grace_until = NULL WHERE id = '${wsId}'`);
 sql(`UPDATE sends SET status = 'cancelled' WHERE id = '${send4}'`);
 sql(`DELETE FROM subscribers WHERE id LIKE 'big%${rnd}' OR id LIKE 'bnc%${rnd}'`);
 
