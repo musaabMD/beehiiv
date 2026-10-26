@@ -242,6 +242,11 @@ export async function startSend(env: Env, pub: Publication, post: Post, override
   return sendId;
 }
 
+/** Deliveries left in 'queued' by an error mid-send go to the deferred-retry path (re-render + resend, 26h window). */
+async function requeueStuck(env: Env, sendId: string) {
+  await run(env, `UPDATE deliveries SET status = 'deferred', next_attempt_at = ?, error = COALESCE(error, 'retry after a temporary error') WHERE send_id = ? AND status = 'queued' AND COALESCE(next_attempt_at, created_at) < ?`, now() + 5 * MIN, sendId, now() - 30_000).catch(() => {});
+}
+
 registerJob('send.batch', async (env, p) => {
   const send = await one<any>(env, 'SELECT * FROM sends WHERE id = ?', p.send_id);
   if (!send || !['sending', 'testing'].includes(send.status)) return;
@@ -301,8 +306,22 @@ registerJob('send.batch', async (env, p) => {
       const v = variantParts(o, q.letter, base);
       return deliver(env, pub, send.id, q.sub, q.subject, v.content, v.from, { variant: q.variant, cohort: q.cohort, post });
     }));
-    for (const r of res) if (r.status === 'rejected') await logError(env, 'send.deliver', r.reason, pub.id);
+    for (let k = 0; k < res.length; k++) {
+      const r = res[k];
+      if (r.status !== 'rejected') continue;
+      await logError(env, 'send.deliver', r.reason, pub.id);
+      // A transient database error must not silently skip this reader: the cursor has already moved past them.
+      // If no delivery row was written, try once more now; a row left half-done is picked up by the retry job below.
+      const q = queue[i + k];
+      const has = await one<{ id: string }>(env, 'SELECT id FROM deliveries WHERE send_id = ? AND subscriber_id = ?', send.id, q.sub.id).catch(() => null);
+      if (!has) {
+        await new Promise((ok) => setTimeout(ok, 250));
+        const v = variantParts(o, q.letter, base);
+        await deliver(env, pub, send.id, q.sub, q.subject, v.content, v.from, { variant: q.variant, cohort: q.cohort, post }).catch((e) => logError(env, 'send.deliver.retry', e, pub.id));
+      }
+    }
   }
+  await requeueStuck(env, send.id);
   const exhausted = processed < limit && (recipients.length < limit * 3 || o.only_subscriber_ids);
   await run(env, 'UPDATE sends SET cursor = ?, sent = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'sent\',\'deferred\')), failed = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'failed\',\'bounced\',\'suppressed\')) WHERE id = ?', last, send.id, send.id, send.id);
   // campaign safety: hard bounces / complaints above the limits pause the send and alert the owner
@@ -390,7 +409,7 @@ async function deliverDue(env: Env, pub: Publication, post: Post, send: any, o: 
   const work: Array<() => Promise<unknown>> = [];
   for (const d of due) {
     // claim it, so overlapping batch jobs never send the same email twice
-    const claimed = await run(env, `UPDATE deliveries SET status = 'queued' WHERE id = ? AND status = 'scheduled'`, d.id);
+    const claimed = await run(env, `UPDATE deliveries SET status = 'queued', next_attempt_at = ? WHERE id = ? AND status = 'scheduled'`, now(), d.id); // claim time, so stuck-row recovery never grabs an in-flight send
     if (!claimed.meta.changes) continue;
     const sub = byId.get(d.subscriber_id);
     if (!sub || sub.status !== 'active') { await run(env, `UPDATE deliveries SET status = 'skipped', error = 'subscriber no longer active' WHERE id = ?`, d.id); continue; }
@@ -403,6 +422,7 @@ async function deliverDue(env: Env, pub: Publication, post: Post, send: any, o: 
     const res = await Promise.allSettled(work.slice(i, i + PARALLEL).map((f) => f()));
     for (const r of res) if (r.status === 'rejected') await logError(env, 'send.deliver', r.reason, pub.id);
   }
+  await requeueStuck(env, send.id);
   await run(env, 'UPDATE sends SET sent = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'sent\',\'deferred\')), failed = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'failed\',\'bounced\',\'suppressed\')) WHERE id = ?', send.id, send.id, send.id);
   if (await checkCampaign(env, send)) return;
   const rest = await one<{ n: number; t: number | null }>(env, `SELECT COUNT(*) AS n, MIN(next_attempt_at) AS t FROM deliveries WHERE send_id = ? AND status = 'scheduled'`, send.id);
@@ -483,6 +503,8 @@ async function applyResult(env: Env, pub: Publication, did: string, sub: Subscri
 
 /** Retry deferred deliveries (re-render + resend). */
 registerPeriodic('deliveries.retry', 5 * MIN, async (env) => {
+  // Anything still 'queued' two minutes after it was created was interrupted mid-send: hand it to the retry path.
+  await run(env, `UPDATE deliveries SET status = 'deferred', next_attempt_at = ?, error = COALESCE(error, 'retry after a temporary error') WHERE status = 'queued' AND COALESCE(next_attempt_at, created_at) < ?`, now(), now() - 2 * MIN).catch(() => {});
   const due = await all<any>(env, `SELECT d.*, se.post_id, se.subject AS send_subject, se.automation_id, se.step_id FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE d.status = 'deferred' AND d.next_attempt_at <= ? LIMIT 100`, now());
   for (const d of due) {
     const pub = await getPub(env, d.pub_id);
