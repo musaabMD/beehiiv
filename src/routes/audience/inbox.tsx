@@ -37,7 +37,7 @@ inbox.get('/', async (c) => {
       <Card pad={false} title={
         <div class="row" style="justify-content:space-between;width:100%">
           <Tabs active={view === 'open' ? '/app/audience/inbox' : `/app/audience/inbox?view=${view}`} items={[['/app/audience/inbox', 'Open'], ['/app/audience/inbox?view=unread', `Unread${unread ? ` (${unread})` : ''}`], ['/app/audience/inbox?view=archived', 'Archived']]} />
-          <form method="get" class="row"><input type="hidden" name="view" value={view} /><Input name="q" value={q.q} placeholder="Search name, email, subject" /><Btn kind="secondary" small>Search</Btn></form>
+          <form method="get" class="row" style="flex-wrap:nowrap"><input type="hidden" name="view" value={view} /><Input name="q" value={q.q} placeholder="Search name, email, subject" /><Btn kind="secondary" small>Search</Btn></form>
         </div>
       }>
         {threads.length ? (
@@ -82,7 +82,7 @@ inbox.get('/:id', async (c) => {
   const msgs = await all<any>(c.env, 'SELECT * FROM inbox_messages WHERE thread_id = ? ORDER BY created_at', t.id);
   const sub = t.subscriber_id ? await one<any>(c.env, 'SELECT id, email, name, status, tier FROM subscribers WHERE id = ?', t.subscriber_id) : null;
   return c.html(
-    <DashLayout c={c} title={t.subject || 'Conversation'} section="audience" sub="inbox" crumbs={[['Inbox', '/app/audience/inbox']]}
+    <DashLayout c={c} title={t.subject || 'Conversation'} section="audience" sub="inbox" crumbs={[['/app/audience/inbox', 'Inbox']]}
       actions={<div class="row">
         <ActionForm action={`/app/audience/inbox/${t.id}/unread`} label="Mark unread" kind="ghost" small />
         <ActionForm action={`/app/audience/inbox/${t.id}/${t.status === 'archived' ? 'unarchive' : 'archive'}`} label={t.status === 'archived' ? 'Move to inbox' : 'Archive'} kind="secondary" small />
