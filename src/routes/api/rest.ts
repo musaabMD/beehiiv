@@ -291,6 +291,26 @@ route('GET', '/subscriptions/:id/referrals', 'Referral program', "A subscriber's
   return c.json({ data: { referral_code: s.referral_code, referral_url: `${siteUrl(c.env, pub)}/subscribe?ref=${s.referral_code}`, referral_count: s.referral_count, next_milestone: next || null, rewards_earned: awards.map((a) => ({ ...a, created_at: iso(a.created_at) })), referred: referred.map((r) => ({ ...r, created_at: iso(r.created_at) })) } });
 });
 
+// ───────── subscriber intelligence (lib/predict, lib/signals, lib/anomalies, lib/nextaction) ─────────
+route('GET', '/subscriptions/:id/insights', 'Subscriber intelligence', 'Value score, lifetime value, purchase likelihood, churn risk and public signals for a subscriber', async (c, pub) => {
+  const { subscriberInsights } = await import('../../lib/predict');
+  return c.json({ data: await subscriberInsights(c.env, pub.id, (await needSub(c, pub)).id) });
+});
+route('GET', '/insights/top_subscribers', 'Subscriber intelligence', 'Most valuable subscribers (sort: value | clv | purchase | churn)', async (c, pub) => {
+  const { topSubscribers } = await import('../../lib/predict');
+  const sort = (['value', 'clv', 'purchase', 'churn'].includes(c.req.query('sort') || '') ? c.req.query('sort') : 'value') as any;
+  const rows = await topSubscribers(c.env, pub.id, { sort, limit: clamp(int(c.req.query('limit'), 25), 1, 100) });
+  return c.json({ data: rows.map((x) => ({ id: x.id, email: x.email, name: x.name, value_score: x.value_score, value_percentile: x.value_percentile, clv_cents: x.clv_cents, revenue_cents: x.revenue_cents, predicted_cents: x.predicted_cents, purchase_likelihood: x.purchase_likelihood, churn_risk: x.churn_risk, last_active_at: iso(x.last_active_at), computed_at: iso(x.computed_at) })) });
+}, { query: { sort: 'value|clv|purchase|churn', limit: '1-100' } });
+route('GET', '/insights/anomalies', 'Subscriber intelligence', 'Unusual changes in the last 24 hours vs the trailing 14 days (undismissed, last 7 days)', async (c, pub) => {
+  const { activeAnomalies } = await import('../../lib/anomalies');
+  return c.json({ data: (await activeAnomalies(c.env, pub.id, 50)).map((a) => ({ ...a, created_at: iso(a.created_at) })) });
+});
+route('GET', '/insights/next_actions', 'Subscriber intelligence', 'Suggested next steps computed from your data, each with a dashboard link', async (c, pub) => {
+  const { suggestions } = await import('../../lib/nextaction');
+  return c.json({ data: (await suggestions(c.env, pub, 10)).map((s) => ({ key: s.key, title: s.title, body: s.body, action: { label: s.action.label, method: (s.action.method || 'get').toUpperCase(), url: s.action.href, fields: s.action.fields } })) });
+});
+
 // ───────── custom field definitions ─────────
 route('GET', '/custom_fields', 'Custom fields', 'List custom field definitions', async (c, pub) => c.json({ data: await all(c.env, 'SELECT id, key, label, kind, options, created_at FROM custom_fields WHERE pub_id = ? ORDER BY label', pub.id).then((r) => r.map((x: any) => ({ ...x, options: parseJSON(x.options, []), created_at: iso(x.created_at) }))) }));
 route('POST', '/custom_fields', 'Custom fields', 'Create a custom field', async (c, pub) => {
