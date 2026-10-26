@@ -3,6 +3,19 @@ export interface ChangelogEntry { date: string; slug: string; title: string; bod
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-26', slug: 'kit-mailchimp-parity', title: 'Everything Kit and Mailchimp do, and more',
+    body: [
+      'Automations: 45 templates, several entry points per automation, triggers from Calendly, Typeform, Thinkific, Kajabi or any app through incoming webhooks, and cart abandonment from Shopify and WooCommerce.',
+      'Sending: content A/B and multivariate tests (subject, preview, sender and body), send-time optimization, delivery by each reader\'s time zone, and a subject line helper.',
+      'Subscribers: Subscriber Signals from public profiles, a value score and Top subscribers, lifetime value, purchase likelihood, churn risk and predictive segments.',
+      'Content: 45 templates, synced snippets, custom-coded HTML templates and personalized product recommendations.',
+      'Commerce: Shopify, WooCommerce and Stripe purchase sync, a transactional email API and a reply inbox.',
+      'Growth: social posting to Bluesky and Mastodon, a marketing calendar, campaigns with combined reports, Google and Meta ad audiences, anomaly alerts, comparative reports and suggested next steps.',
+      'Accounts: sign in with Google, enterprise single sign-on, and an installable app.',
+    ],
+    links: [['All features', '/features']],
+  },
+  {
     date: '2026-10-26', slug: 'lnkbase-newsletter', title: 'Now Lnkbase Newsletter, hosted at hive.lnkbase.com',
     body: [
       'The product is now a hosted service and part of Lnkbase. Sign up, and you\'re writing your first issue in a minute: Free up to 500 subscribers, then Starter, Pro and Scale plans by list size, with every feature on every plan and 0% of your revenue.',

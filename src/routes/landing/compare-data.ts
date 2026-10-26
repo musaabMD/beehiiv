@@ -79,7 +79,7 @@ export const PLATFORMS: Platform[] = [
     prices: [{ plan: 'Essentials', usd: 26.5 }, { plan: 'Essentials', usd: 75 }, { plan: 'Essentials', usd: 110 }, { plan: 'Essentials', usd: 385 }, { plan: 'Standard', usd: 800 }],
     priceNote: 'List prices. Mailchimp currently offers 50% off for the first 12 months.',
     features: { 'Fee on paid subscriptions': 'No paid newsletters', 'Official MCP server for AI agents': 'Claude connector (drafts only)', 'Free plan': 'Up to 250 contacts', 'Hosted for you': true, 'Recommendation network': false, 'Ad network': false, 'Support': 'Yes' },
-    theyHave: ['SMS and multichannel campaigns', '300+ integrations and customer journeys', 'Phone and priority support on Premium'],
+    theyHave: ['SMS and postcards alongside email', '300+ integrations and an app marketplace', 'Phone and priority support on Premium'],
     weHave: ['Paid subscriptions built in', ...WE_HAVE_COMMON],
     exportSteps: ['In Mailchimp, go to <b>Audience → Export audience → Export CSV</b>.', 'You get a zip with one CSV per status: subscribed, unsubscribed, non-subscribed and cleaned (bounced). Import only <b>subscribed</b>, or import them all: Lnkbase Newsletter keeps unsubscribed and cleaned readers out when the file has a status column.'],
     exportSource: 'https://mailchimp.com/help/view-export-contacts/',
