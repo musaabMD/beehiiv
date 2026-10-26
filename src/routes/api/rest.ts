@@ -6,7 +6,10 @@ import { apiError } from '../../lib/apiauth';
 import { validateEmail } from '../../lib/guard';
 import { subscribe, getSubscriber, unsubscribe, deleteSubscriber, addTags, removeTags, getTags, setFields, joinLists, leaveLists } from '../../lib/subscribers';
 import { recalcSegment, listMatching, countMatching, EMPTY_GROUP, type RuleGroup } from '../../lib/segments';
-import { enroll, publishDraft, TRIGGERS, STEP_TYPES } from '../../lib/automations';
+import { enroll, publishDraft, triggerList, packTriggers, TRIGGERS, STEP_TYPES } from '../../lib/automations';
+import { availableTemplates, templateByKey, templateTrigger, outline } from '../../lib/automation-templates';
+import { normalizeAb } from '../../lib/sender';
+import { normalizeTiming } from '../../lib/sendtime';
 import { publishPost, sendTest, buildEmail, postContent } from '../../lib/sender';
 import { renderDoc, parseDoc, styleFor, GMAIL_CLIP_BYTES, type Block } from '../../lib/render';
 import { emit } from '../../lib/events';
@@ -379,7 +382,7 @@ route('DELETE', '/lists/:id/subscribers/:sid', 'Lists', 'Remove a subscriber fro
 // running unchanged until the draft is published — the same model as the visual builder.
 const serAuto = (a: any) => ({
   id: a.id, name: a.name, description: a.description, status: a.status, allow_reentry: !!a.allow_reentry,
-  trigger: parseJSON(a.trigger, {}), steps: parseJSON(a.steps, []),
+  trigger: parseJSON(a.trigger, {}), triggers: triggerList(parseJSON(a.trigger, {})), steps: parseJSON(a.steps, []),
   has_draft: a.draft_steps != null || a.draft_trigger != null,
   draft: a.draft_steps != null || a.draft_trigger != null ? { trigger: parseJSON(a.draft_trigger ?? a.trigger, {}), steps: parseJSON(a.draft_steps ?? a.steps, []) } : null,
   published_at: iso(a.published_at), created_at: iso(a.created_at), updated_at: iso(a.updated_at),
@@ -399,9 +402,16 @@ export function normalizeSteps(steps: any[], depth = 0): any[] {
   });
 }
 
-function normalizeTrigger(t: any): { type: string; config: Record<string, unknown> } {
-  if (!t || typeof t !== 'object' || !TRIGGERS[t.type]) throw new BadRequest(`Unknown trigger type "${t?.type}". Valid: ${Object.keys(TRIGGERS).join(', ')}.`);
-  return { type: String(t.type), config: t.config && typeof t.config === 'object' ? t.config : {} };
+/** One trigger `{type, config, filter?}`, or several entry points (`triggers: [...]`, OR'ed) → stored trigger JSON. */
+function normalizeTrigger(t: any): any {
+  const one = (x: any) => {
+    if (!x || typeof x !== 'object' || !TRIGGERS[x.type]) throw new BadRequest(`Unknown trigger type "${x?.type}". Valid: ${Object.keys(TRIGGERS).join(', ')}.`);
+    return { type: String(x.type), config: x.config && typeof x.config === 'object' ? x.config : {}, ...(x.filter?.rules?.length ? { filter: x.filter } : {}) };
+  };
+  const list = Array.isArray(t) ? t : t && Array.isArray(t.triggers) ? t.triggers : [t];
+  if (!list.length) throw new BadRequest('triggers needs at least one entry point.');
+  if (list.length > 10) throw new BadRequest('At most 10 entry points per automation.');
+  return packTriggers(list.map(one));
 }
 
 /** Make the draft version live and set status active (requires at least one step). */
@@ -420,12 +430,14 @@ export async function activateAutomation(env: any, pub: Publication, a: any): Pr
 /** Create an automation (as a draft version; `activate: true` publishes it and turns it on). */
 export async function createAutomation(env: any, pub: Publication, b: Record<string, any>): Promise<any> {
   const name = String(b.name || '').trim().slice(0, 120);
-  if (!name) throw new BadRequest('name is required.');
-  const trigger = normalizeTrigger(b.trigger);
-  const steps = normalizeSteps(b.steps || []);
+  const tpl = b.template ? templateByKey(String(b.template)) : undefined;
+  if (b.template && !tpl) throw new BadRequest(`Unknown template "${b.template}". GET /automation_templates lists them.`);
+  if (!name && !tpl) throw new BadRequest('name is required.');
+  const trigger = b.triggers !== undefined || b.trigger !== undefined || !tpl ? normalizeTrigger(b.triggers ?? b.trigger) : templateTrigger(tpl);
+  const steps = b.steps !== undefined || !tpl ? normalizeSteps(b.steps || []) : tpl.steps();
   const aid = id();
   await insert(env, 'automations', {
-    id: aid, pub_id: pub.id, name, description: String(b.description || '').slice(0, 500), status: 'draft', trigger: '{}', steps: '[]',
+    id: aid, pub_id: pub.id, name: name || tpl!.name, description: String(b.description || tpl?.description || '').slice(0, 500), status: 'draft', trigger: '{}', steps: '[]',
     draft_trigger: JSON.stringify(trigger), draft_steps: JSON.stringify(steps), allow_reentry: b.allow_reentry ? 1 : 0, created_at: now(), updated_at: now(),
   });
   const row = await one<any>(env, 'SELECT * FROM automations WHERE id = ?', aid);
@@ -439,7 +451,7 @@ export async function updateAutomation(env: any, pub: Publication, a: any, b: Re
   if (b.name !== undefined) { const n = String(b.name).trim().slice(0, 120); if (!n) throw new BadRequest('name cannot be empty.'); patch.name = n; }
   if (b.description !== undefined) patch.description = String(b.description || '').slice(0, 500);
   if (b.allow_reentry !== undefined) patch.allow_reentry = b.allow_reentry ? 1 : 0;
-  if (b.trigger !== undefined) patch.draft_trigger = JSON.stringify(normalizeTrigger(b.trigger));
+  if (b.triggers !== undefined || b.trigger !== undefined) patch.draft_trigger = JSON.stringify(normalizeTrigger(b.triggers ?? b.trigger));
   if (b.steps !== undefined) patch.draft_steps = JSON.stringify(normalizeSteps(b.steps));
   await update(env, 'automations', a.id, patch, pub.id);
   return one<any>(env, 'SELECT * FROM automations WHERE id = ?', a.id);
@@ -462,14 +474,15 @@ export async function setAutomationPaused(env: any, pub: Publication, a: any, pa
 
 const AUTO_BODY = {
   name: 'string', description: 'string', allow_reentry: 'boolean',
-  trigger: `{type, config} — types: ${Object.keys(TRIGGERS).join(', ')}`,
+  trigger: `{type, config, filter?} — types: ${Object.keys(TRIGGERS).join(', ')}`,
+  triggers: '[{type, config, filter?}] — several entry points (subscribers enter when any matches); replaces trigger',
   steps: `[{id?, type, config, yes?, no?}] — types: ${Object.keys(STEP_TYPES).join(', ')}; send_email config: {subject, markdown | doc | blocks}`,
 };
 route('POST', '/automations', 'Automations', 'Create an automation (saved as a draft; activate=true publishes it and turns it on)', async (c, pub) => {
   const b = await body(c);
   const a = await createAutomation(c.env, pub, b);
   return c.json({ data: serAuto(a) }, 201);
-}, { body: { ...AUTO_BODY, activate: 'boolean' } });
+}, { body: { ...AUTO_BODY, template: 'string — start from a template key (GET /automation_templates); trigger/steps override it', activate: 'boolean' } });
 route('PATCH', '/automations/:id', 'Automations', 'Edit an automation — trigger/steps go to the draft version; the live version keeps running until published', async (c, pub) => {
   const a: any = await needRow(c, 'automations', pub, 'Automation');
   return c.json({ data: serAuto(await updateAutomation(c.env, pub, a, await body(c))) });
@@ -520,6 +533,16 @@ route('GET', '/automations/:id/journeys', 'Automations', 'List journeys (per-sub
   const a: any = await needRow(c, 'automations', pub, 'Automation');
   return paginate(c, 'automation_runs', 'automation_id = ?', [a.id], (r) => ({ id: r.id, subscriber_id: r.subscriber_id, status: r.status, step_path: parseJSON(r.step_path, []), next_run_at: iso(r.next_run_at), created_at: iso(r.created_at), updated_at: iso(r.updated_at) }));
 }, { query: PAGE_Q });
+route('GET', '/automation_templates', 'Automations', 'List the automation templates library (use the key as `template` when creating an automation)', async (c) => {
+  const cat = c.req.query('category');
+  return c.json({ data: availableTemplates().filter((t) => !cat || t.category === cat).map((t) => ({ key: t.key, name: t.name, description: t.description, category: t.category, triggers: t.triggers, outline: outline(t.steps()) })) });
+}, { query: { category: 'string' } });
+route('GET', '/automations/:id/webhook', 'Automations', 'Get the secret incoming-webhook URL of an automation (POST JSON with an email to it to subscribe + enroll)', async (c, pub) => {
+  const a: any = await needRow(c, 'automations', pub, 'Automation');
+  const { ensureWebhookToken } = await import('../../lib/automation-webhooks');
+  const t = await ensureWebhookToken(c.env, a.id);
+  return c.json({ data: { url: `${c.env.APP_URL.replace(/\/$/, '')}/hooks/automations/${t}`, enabled: triggerList(parseJSON(a.trigger, {})).some((x) => x.type === 'webhook') && a.status === 'active' } });
+});
 
 // ───────── posts ─────────
 route('GET', '/posts', 'Posts', 'List posts (filter by status; expand=stats includes engagement)', async (c, pub) => {
@@ -595,11 +618,14 @@ route('POST', '/posts/:id/send', 'Send API', 'Publish/send now or schedule (targ
   if (b.platform) patch.platform = b.platform;
   if (b.email_subject) patch.email_subject = b.email_subject;
   if (b.ab_test) {
-    const subjects = (b.ab_test.subjects || []).filter(Boolean).slice(0, 5);
-    if (subjects.length < 2) throw new BadRequest('ab_test.subjects needs at least 2 subject lines.');
-    patch.ab_test = { subjects, sample_pct: clamp(int(b.ab_test.sample_pct, 20), 2, 50), wait_minutes: clamp(int(b.ab_test.wait_minutes, 60), 5, 1440), metric: b.ab_test.metric === 'clicks' ? 'clicks' : 'opens' };
+    const ab = normalizeAb(b.ab_test);
+    if (!ab) throw new BadRequest('ab_test needs at least 2 different variants: subjects: ["A", "B"], or variants: [{subject?, preview_text?, from_name?, content: "a"|"b"}] (up to 4).');
+    if (ab.variants?.some((v) => v.content === 'b') && !b.alt_markdown && !(post as any).alt_content) throw new BadRequest('A variant uses content "b" — send alt_markdown (Variant B content) or set it in the editor first.');
+    patch.ab_test = ab;
   }
   let p = Object.keys(patch).length ? await updatePost(c.env, pub, post, patch) : post;
+  if (b.alt_markdown) { const alt = JSON.stringify({ blocks: markdownToBlocks(String(b.alt_markdown)) }); await run(c.env, 'UPDATE posts SET alt_content = ? WHERE id = ?', alt, p.id); p = { ...p, alt_content: alt } as any; }
+  if (b.send_timing !== undefined) { const tm = normalizeTiming(b.send_timing); await run(c.env, 'UPDATE posts SET send_timing = ? WHERE id = ?', tm ? JSON.stringify(tm) : null, p.id); p = { ...p, send_timing: tm ? JSON.stringify(tm) : null } as any; }
   if (b.list_id) { await run(c.env, 'UPDATE posts SET list_id = ? WHERE id = ?', b.list_id, p.id); p = { ...p, list_id: b.list_id }; }
   const at = b.scheduled_at ? Date.parse(b.scheduled_at) : NaN;
   if (!isNaN(at) && at > now() + 30_000) {
@@ -616,7 +642,7 @@ route('POST', '/posts/:id/send', 'Send API', 'Publish/send now or schedule (targ
   }
   try { const { kick } = await import('../../lib/jobs'); kick(c.env, c.executionCtx); } catch {}
   return c.json({ data: { post_id: p.id, status: 'published', send_id: sendId, email: p.platform !== 'web' } }, 202);
-}, { body: { scheduled_at: 'ISO datetime (omit to send now)', segment_ids: 'string[] send to', exclude_segment_ids: 'string[]', list_id: 'string', audience: 'all|free|premium', platform: 'email|web|both', email_subject: 'string', ab_test: '{subjects: string[2-5], sample_pct, wait_minutes, metric: opens|clicks}' } });
+}, { body: { scheduled_at: 'ISO datetime (omit to send now)', segment_ids: 'string[] send to', exclude_segment_ids: 'string[]', list_id: 'string', audience: 'all|free|premium', platform: 'email|web|both', email_subject: 'string', ab_test: '{subjects: string[2-5] | variants: [{subject?, preview_text?, from_name?, content: a|b}] (2-4), sample_pct, wait_minutes, metric: opens|clicks}', alt_markdown: 'string — Variant B content for content tests', send_timing: '{mode: sto} (each subscriber at their usual open hour, within 24h) | {mode: timezone, local_time: "09:00"} | null' } });
 route('POST', '/posts/:id/unschedule', 'Send API', 'Cancel a scheduled post (back to draft)', async (c, pub) => {
   const post = await needPost(c, pub);
   if (post.status !== 'scheduled') return apiError(c, 409, 'not_scheduled', 'Post is not scheduled.');

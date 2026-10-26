@@ -69,7 +69,7 @@ export async function processSignup(env: Env, req: Request, pub: Publication, f:
     utm: { source: attr.utm_source || str(f.utm_source, 120) || undefined, medium: attr.utm_medium || str(f.utm_medium, 120) || undefined, campaign: attr.utm_campaign || str(f.utm_campaign, 120) || undefined, term: attr.utm_term, content: attr.utm_content },
     referrer: attr.referrer || req.headers.get('referer'), landingPath: attr.landing || null,
     referralCode: refCode, tags: form?.tags || [], custom: Object.keys(custom).length ? custom : undefined,
-    listIds: lists.length ? lists : undefined, country: (req as any).cf?.country ?? null, ip, strict: true, reactivate: true,
+    listIds: lists.length ? lists : undefined, country: (req as any).cf?.country ?? null, timezone: (req as any).cf?.timezone ?? null, ip, strict: true, reactivate: true,
   });
   if (!res.ok) return { kind: 'error', message: res.error || 'Could not subscribe.', suggestion: res.suggestion, status: 400 };
   if (formId && form) await run(env, 'UPDATE forms SET submissions = submissions + 1 WHERE id = ?', formId);

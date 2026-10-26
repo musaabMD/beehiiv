@@ -1,5 +1,34 @@
 // OpenHive visual automation builder.
 // Reads #af-data ({trigger, steps}), #af-meta, #rule-catalog. Autosaves the draft via PUT /app/automations/:id/draft.
+
+// ───────── “New automation” template gallery (automations list page) ─────────
+(() => {
+  const g = document.getElementById('af-gallery');
+  if (!g) return;
+  const cards = [...g.querySelectorAll('.af-gal-card')];
+  const search = g.querySelector('[data-gal-search]');
+  let cat = '';
+  const filter = () => {
+    const q = (search?.value || '').trim().toLowerCase();
+    for (const c of cards) c.hidden = (cat && c.dataset.cat !== cat) || (q && !(c.dataset.q || '').includes(q));
+  };
+  const show = (key) => g.querySelectorAll('[data-preview]').forEach((pv) => { pv.hidden = pv.dataset.preview !== key; });
+  g.querySelector('.af-gal-cats')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-gal-cat]');
+    if (!b) return;
+    cat = b.dataset.galCat;
+    g.querySelectorAll('.af-gal-cats button').forEach((x) => x.classList.toggle('on', x === b));
+    filter();
+  });
+  search?.addEventListener('input', filter);
+  search?.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
+  g.addEventListener('change', (e) => { if (e.target.name === 'template') show(e.target.value); });
+  cards.forEach((c) => c.addEventListener('mouseenter', () => show(c.querySelector('input').value)));
+  g.querySelector('.af-gal-list')?.addEventListener('mouseleave', () => show(g.querySelector('input[name=template]:checked')?.value || ''));
+  const pre = new URLSearchParams(location.search).get('template');
+  if (pre) { const r = g.querySelector(`input[name=template][value="${CSS.escape(pre)}"]`); if (r) { r.checked = true; show(pre); document.getElementById('new-automation')?.showModal?.(); } }
+})();
+
 (() => {
   const $ = (s, el = document) => el.querySelector(s);
   const canvas = $('#af-canvas');
@@ -13,7 +42,15 @@
   const uid = () => Math.random().toString(36).slice(2, 12);
   const BRANCH = new Set(['condition', 'ab_split']);
 
-  const state = { trigger: data.trigger && data.trigger.type ? data.trigger : { type: 'welcome', config: {} }, steps: Array.isArray(data.steps) ? data.steps : [] };
+  // Several entry points (OR): stored as {...first, triggers: [...]} — see lib/automations triggerList()
+  const initialTriggers = (() => {
+    const t = data.trigger || {};
+    const list = Array.isArray(t.triggers) && t.triggers.length ? t.triggers : t.type ? [{ type: t.type, config: t.config || {}, ...(t.filter ? { filter: t.filter } : {}) }] : [];
+    return list.length ? list : [{ type: 'welcome', config: {} }];
+  })();
+  const state = { triggers: initialTriggers, steps: Array.isArray(data.steps) ? data.steps : [] };
+  let triggerIdx = 0;
+  Object.defineProperty(state, 'trigger', { get: () => state.triggers[triggerIdx] || state.triggers[0] });
   let allowReentry = !!meta.allowReentry;
   let selected = 'trigger';
   const checked = new Set();
@@ -100,8 +137,9 @@
     }
     return '';
   }
-  function triggerSummary() {
-    const t = state.trigger, c = t.config || {}, n = names();
+  function triggerSummary(t = state.trigger) {
+    const c = t.config || {}, n = names();
+    if (t.type === 'webhook') return [c.tags?.length ? `tags: ${[].concat(c.tags).join(', ')}` : '', c.email_path ? `email at ${c.email_path}` : 'email detected automatically'].filter(Boolean).join(' · ');
     const bits = [];
     if (c.sources?.length) bits.push(c.sources.join(', '));
     for (const k of ['tag', 'key', 'url_contains']) if (c[k]) bits.push(c[k]);
@@ -128,10 +166,22 @@
 
   function render() {
     canvas.innerHTML = '';
-    const t = el('div', 'af-card af-trigger' + (selected === 'trigger' ? ' on' : ''), `<span class="af-ic">⚡</span><div class="af-body"><div class="af-kicker">Trigger</div><strong>${esc(meta.triggers[state.trigger.type]?.label || 'Choose a trigger')}</strong><div class="af-sum">${esc(triggerSummary())}</div></div>`);
-    t.tabIndex = 0;
-    t.onclick = () => select('trigger');
-    canvas.append(t, renderList(state.steps, 'root'), el('div', 'af-end', 'End of automation'));
+    const entries = el('div', 'af-entries');
+    state.triggers.forEach((tr, i) => {
+      if (i) entries.append(el('span', 'af-or', 'OR'));
+      const multi = state.triggers.length > 1;
+      const t = el('div', 'af-card af-trigger' + (selected === 'trigger' && triggerIdx === i ? ' on' : ''), `<span class="af-ic">${tr.type === 'webhook' ? '🔌' : '⚡'}</span><div class="af-body"><div class="af-kicker">${multi ? `Entry point ${i + 1}` : 'Trigger'}</div><strong>${esc(meta.triggers[tr.type]?.label || 'Choose a trigger')}</strong><div class="af-sum">${esc(triggerSummary(tr))}</div></div>`);
+      t.tabIndex = 0;
+      t.dataset.entry = String(i);
+      t.onclick = () => { triggerIdx = i; select('trigger'); };
+      entries.append(t);
+    });
+    const add = el('button', 'af-add-entry', '+ Add another entry point');
+    add.type = 'button';
+    add.title = 'Subscribers enter when ANY entry point matches';
+    add.onclick = () => { state.triggers.push({ type: 'tag_added', config: {} }); triggerIdx = state.triggers.length - 1; selected = 'trigger'; changed(); renderPanel(); };
+    entries.append(add);
+    canvas.append(entries, renderList(state.steps, 'root'), el('div', 'af-end', 'End of automation'));
     updateBulk();
   }
 
@@ -391,7 +441,83 @@
     date_field: (c) => [F.field('Date field', F.select(c, 'key', (catalog.options.custom || []).map((x) => [x.key, x.label]), 'Choose a field…'), 'Field values like 1990-05-21. Runs yearly on the anniversary.'), F.field('Offset (days)', F.number(c, 'offset_days'), 'Negative = before the date, positive = after.')],
     inactive: (c) => [F.field('Days without opening', F.number(c, 'days', { min: 1, placeholder: '30' }))],
     api: () => [F.note(`Enroll subscribers from your app:<br><code>POST ${esc(meta.apiUrl)}</code><br><span class="small">Body: {"email": "reader@example.com"}. Authorization: Bearer &lt;API key&gt;.</span>`)],
+    webhook: (c) => webhookFields(c),
   };
+
+  // ───────── incoming webhook entry point ─────────
+  const SNIPPETS = {
+    Calendly: (u) => `<ol><li>Create a webhook subscription for <b>invitee.created</b> (Calendly API or an integration like Zapier).</li><li>Calendly sends the invitee as <code>payload.email</code> / <code>payload.name</code> / <code>payload.timezone</code> — detected automatically, and the time zone is saved for delivery by time zone.</li></ol><pre>curl -X POST https://api.calendly.com/webhook_subscriptions \\
+  -H "Authorization: Bearer $CALENDLY_TOKEN" -H "Content-Type: application/json" \\
+  -d '{"url": "${u}", "events": ["invitee.created"],
+       "organization": "https://api.calendly.com/organizations/YOUR_ORG", "scope": "organization"}'</pre>`,
+    Typeform: () => `<ol><li>In your form: <b>Connect → Webhooks → Add a webhook</b>, paste the URL and switch it on.</li><li>The email answer inside <code>form_response.answers</code> is found automatically. Map other answers with “Custom fields” below, e.g. <code>company = form_response.hidden.company</code>.</li></ol>`,
+    Thinkific: () => `<ol><li><b>Settings → Code &amp; analytics → Webhooks → New webhook</b>.</li><li>Pick a topic such as <b>User signup</b>, <b>Enrollment created</b> or <b>Order created</b> and paste the URL.</li><li>The student email (<code>payload.email</code> or <code>payload.user.email</code>) is detected automatically.</li></ol>`,
+    Kajabi: () => `<ol><li>Use Kajabi's outbound webhook for a Form or Offer (or Zapier's Kajabi trigger) and paste the URL.</li><li>The member's email is detected automatically; set “Email field” below if your payload has several emails.</li></ol>`,
+    Zapier: (u) => `<ol><li>Add an action: <b>Webhooks by Zapier → POST</b>.</li><li>URL: <code>${u}</code> · Payload type: <b>JSON</b>.</li><li>Data: <code>email</code>, <code>name</code> and any extra fields (map them below).</li></ol>`,
+    Make: (u) => `<ol><li>Add <b>HTTP → Make a request</b>, method <b>POST</b>, URL <code>${u}</code>.</li><li>Body type <b>Raw</b>, content type <b>JSON</b>: <code>{"email": "{{1.email}}", "name": "{{1.name}}"}</code></li></ol>`,
+    n8n: (u) => `<ol><li>Add an <b>HTTP Request</b> node: method <b>POST</b>, URL <code>${u}</code>.</li><li>Send body → JSON: <code>{"email": "={{$json.email}}"}</code></li></ol>`,
+    cURL: (u) => `<pre>curl -X POST '${u}' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"email": "reader@example.com", "name": "Ada", "data": {"plan": "pro"}}'</pre><p class="small">Responses: 202 enrolled · 409 automation not active / not published · 422 no email found · 429 rate limited (120/min).</p>`,
+  };
+  let snipOpen = 'Calendly';
+  function webhookFields(c) {
+    const out = [];
+    const urlBox = el('div', 'af-hook-url');
+    const inp = el('input', 'input');
+    inp.readOnly = true;
+    inp.value = meta.webhookUrl;
+    inp.setAttribute('aria-label', 'Webhook URL');
+    const copy = el('button', 'btn btn-secondary btn-sm', 'Copy');
+    copy.type = 'button';
+    copy.onclick = () => { navigator.clipboard?.writeText(inp.value).then(() => toast('Webhook URL copied'), () => { inp.select(); document.execCommand('copy'); }); };
+    urlBox.append(inp, copy);
+    out.push(F.field('Your secret webhook URL', urlBox, 'Anyone with this URL can add subscribers to this automation — keep it private.'));
+    if (!meta.webhookLive) out.push(F.note(meta.status === 'active' ? 'Publish your changes to start accepting webhook requests.' : 'Activate this automation to start accepting webhook requests (until then the URL answers 409).', 'callout warn'));
+    out.push(F.field('Email field (JSON path)', F.input(c, 'email_path', { placeholder: 'Auto: ' + (meta.emailPaths || []).slice(0, 4).join(', ') + '…' }), 'Leave empty to detect it. Use dots and [0] for nesting, e.g. payload.invitee.email. Several paths: separate with commas.'));
+    out.push(F.field('Name field (JSON path)', F.input(c, 'name_path', { placeholder: 'Auto: name, payload.name, first_name…' })));
+    const tagsIn = el('input', 'input');
+    tagsIn.value = [].concat(c.tags || []).join(', ');
+    tagsIn.placeholder = 'e.g. calendly, booked-call';
+    tagsIn.addEventListener('input', () => { c.tags = tagsIn.value.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean); changed(); });
+    out.push(F.field('Add tags', withList(tagsIn, catalog.options.tag), 'Added to every subscriber who comes in through this webhook.'));
+    out.push(F.field('Custom fields', F.textarea(c, 'field_map', 3, { placeholder: 'company = payload.questions_and_answers[0].answer\nplan = data.plan' }), 'One per line: custom_field_key = json.path'));
+    const dbl = el('label', 'toggle', `<input type="checkbox" ${c.double_opt_in ? 'checked' : ''}><span class="toggle-ui"></span><span>Require email confirmation<small class="field-h">Off: people from the integration are subscribed right away (they gave you their email there).</small></span>`);
+    dbl.querySelector('input').addEventListener('change', (e) => { c.double_opt_in = e.target.checked || undefined; changed({ render: false }); });
+    out.push(dbl);
+    const snip = el('div', 'field');
+    snip.append(el('span', 'field-l', 'Setup guides'));
+    const tabs = el('div', 'af-snips');
+    const body = el('div', 'af-snip');
+    const draw = () => { tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.k === snipOpen)); body.innerHTML = SNIPPETS[snipOpen](esc(inp.value)); };
+    for (const k of Object.keys(SNIPPETS)) { const b = el('button', null, k); b.type = 'button'; b.dataset.k = k; b.onclick = () => { snipOpen = k; draw(); }; tabs.append(b); }
+    snip.append(tabs, body);
+    draw();
+    out.push(snip);
+    const row = el('div', 'row');
+    const test = el('button', 'btn btn-secondary btn-sm', 'Send a test request');
+    test.type = 'button';
+    test.title = `Posts {"email": "${meta.userEmail}"} to the URL`;
+    test.onclick = async () => {
+      try {
+        const r = await fetch(inp.value.replace(/^https?:\/\/[^/]+/, ''), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: meta.userEmail, name: 'Webhook test', source: 'openhive-test' }) });
+        const j = await r.json().catch(() => ({}));
+        toast(r.ok ? `Test accepted (${r.status}) — ${j.enrolled ? 'enrolled' : j.reason || 'not enrolled'}` : `${r.status}: ${j.message || j.error || 'failed'}`);
+      } catch (e) { toast('Test failed: ' + e.message); }
+    };
+    row.append(test);
+    if (meta.canPublish) {
+      const rot = el('button', 'btn btn-ghost btn-sm', 'Regenerate URL');
+      rot.type = 'button';
+      rot.onclick = async () => {
+        if (!confirm('Create a new secret URL? The current one stops working immediately — update your integrations.')) return;
+        try { const r = await OH.json(`/app/automations/${meta.id}/webhook/rotate`, {}); meta.webhookUrl = r.url; inp.value = r.url; draw(); toast('New webhook URL created'); } catch (e) { toast(e.message); }
+      };
+      row.append(rot);
+    }
+    out.push(row);
+    return out;
+  }
   function catalogSources() { return (meta.sources || []).map((s) => [s, s.replace(/_/g, ' ')]); }
   function withList(input, opts) {
     const id = 'dl' + uid();
@@ -428,13 +554,18 @@
   }
 
   function triggerPanel() {
+    if (triggerIdx >= state.triggers.length) triggerIdx = 0;
     const t = state.trigger;
     t.config = t.config || {};
-    panel.append(el('div', 'af-panel-h', `<span class="af-ic">⚡</span><div><div class="af-kicker">Trigger</div><strong>When should subscribers enter?</strong></div>`));
+    const multi = state.triggers.length > 1;
+    const h = el('div', 'af-panel-h', `<span class="af-ic">⚡</span><div><div class="af-kicker">${multi ? `Entry point ${triggerIdx + 1} of ${state.triggers.length}` : 'Trigger'}</div><strong>When should subscribers enter?</strong></div>${multi ? '<span class="af-panel-tools"><button type="button" class="btn btn-danger btn-sm" data-act="rm-entry">Remove</button></span>' : ''}`);
+    h.querySelector('[data-act=rm-entry]')?.addEventListener('click', () => { state.triggers.splice(triggerIdx, 1); triggerIdx = 0; changed(); renderPanel(); });
+    panel.append(h);
+    if (multi) panel.append(el('p', 'help', 'Subscribers enter when <b>any</b> entry point matches (each subscriber enters once unless re-entry is on).'));
     const sel = el('select', 'input');
     sel.innerHTML = Object.entries(meta.triggers).map(([k, d]) => `<option value="${k}" ${k === t.type ? 'selected' : ''}>${esc(d.label)}</option>`).join('');
     sel.addEventListener('change', () => { t.type = sel.value; t.config = {}; changed(); renderPanel(); });
-    panel.append(F.field('Trigger', sel));
+    panel.append(F.field(multi ? 'Entry point' : 'Trigger', sel));
     for (const node of (TRIGGER_FIELDS[t.type] || (() => []))(t.config)) panel.append(node);
     panel.append(F.rules(t, 'filter', 'Audience filter (optional)', 'Only subscribers matching these conditions enter. Leave empty for everyone.'));
     const re = el('label', 'toggle', `<input type="checkbox" ${allowReentry ? 'checked' : ''}><span class="toggle-ui"></span><span>Allow re-entry<small class="field-h">Let subscribers go through this automation more than once.</small></span>`);
@@ -659,7 +790,7 @@
     if (!dirty) return;
     dirty = false;
     setSave('Saving…');
-    saving = fetch(`/app/automations/${meta.id}/draft`, { method: 'PUT', headers: { 'content-type': 'application/json', accept: 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ trigger: state.trigger, steps: state.steps, allow_reentry: allowReentry }) })
+    saving = fetch(`/app/automations/${meta.id}/draft`, { method: 'PUT', headers: { 'content-type': 'application/json', accept: 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ triggers: state.triggers, steps: state.steps, allow_reentry: allowReentry }) })
       .then(async (r) => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const j = await r.json();

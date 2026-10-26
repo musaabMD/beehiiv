@@ -102,7 +102,7 @@ const mods: Array<[string, Module]> = [
 for (const [path, m] of mods) if (m.dash) app.route(path, m.dash);
 
 // Root (public, non-publication) routes
-for (const m of [core, platform, landing, auth, api, audience, posts, podcasts, events, monetize, grow, community, settingsMod, dashboard, website] as Module[]) if (m.root) app.route('/', m.root);
+for (const m of [core, platform, landing, auth, api, automations, audience, posts, podcasts, events, monetize, grow, community, settingsMod, dashboard, website] as Module[]) if (m.root) app.route('/', m.root);
 
 // Publication site routes — website last (it owns the "/:page" catch-all)
 for (const m of [auth, audience, monetize, grow, podcasts, events, community, posts, settingsMod, dashboard, website] as Module[]) if (m.site) app.route('/s/:slug', m.site);

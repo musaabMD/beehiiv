@@ -5,6 +5,9 @@ import { one, all, run, val, insert, update } from './db';
 import { parseDoc, type Block } from './render';
 import { FIELDS, recalcSegment, snapshotToStatic, countMatching, EMPTY_GROUP, type RuleGroup } from './segments';
 import { TRIGGERS, STEP_TYPES, publishDraft, enroll } from './automations';
+import { availableTemplates } from './automation-templates';
+import { normalizeAb } from './sender';
+import { normalizeTiming } from './sendtime';
 import { aiImage } from './ai';
 import { getSubscriber, getTags, subscribe, addTags } from './subscribers';
 import { siteUrl, settings } from './pub';
@@ -363,16 +366,17 @@ export const TOOLS: Tool[] = [
     },
   },
   {
-    name: 'set_ab_test', title: 'Set subject line A/B test', description: 'Configure a subject line A/B test on a draft or scheduled post. A sample of the audience receives each subject; the winner (by opens or clicks) goes to everyone else.',
-    inputSchema: S({ post_id: str('Post id or slug'), subjects: arr('2-5 subject lines'), sample_pct: num('Percent of audience in the test (2-50, default 20)'), wait_minutes: num('Minutes before picking the winner (default 60)'), metric: str('opens|clicks') }, ['post_id', 'subjects']),
+    name: 'set_ab_test', title: 'Set A/B or multivariate test', description: 'Configure an A/B test on a draft or scheduled post: either subjects (2-5 subject lines) or variants (2-4 combinations of subject, preview_text, from_name and content "a" = main / "b" = Variant B content, set with alt_markdown). A sample receives the variants; the winner (by opens or clicks) goes to everyone else. send_timing optionally delivers by send-time optimization ({"mode":"sto"}) or local time zone ({"mode":"timezone","local_time":"09:00"}).',
+    inputSchema: S({ post_id: str('Post id or slug'), subjects: arr('2-5 subject lines'), variants: arr('2-4 variants {subject?, preview_text?, from_name?, content: a|b}', { type: 'object' }), alt_markdown: str('Variant B content (Markdown)'), sample_pct: num('Percent of audience in the test (2-50, default 20)'), wait_minutes: num('Minutes before picking the winner (default 60)'), metric: str('opens|clicks'), send_timing: obj('Optional delivery timing') }, ['post_id']),
     run: async (env, pub, a) => {
       const p = await findPost(env, pub, a.post_id);
       if (!['draft', 'scheduled'].includes(p.status)) throw new ToolError('A/B tests can only be set before sending.');
-      const subjects = (a.subjects || []).filter(Boolean).slice(0, 5);
-      if (subjects.length < 2) throw new ToolError('Provide at least 2 subject lines.');
-      const ab = { subjects, sample_pct: clamp(int(a.sample_pct, 20), 2, 50), wait_minutes: clamp(int(a.wait_minutes, 60), 5, 1440), metric: a.metric === 'clicks' ? 'clicks' : 'opens' };
-      await updatePost(env, pub, p, { ab_test: ab, email_subject: subjects[0] });
-      return { post_id: p.id, ab_test: ab, note: `${ab.sample_pct}% of recipients will be split across ${subjects.length} subjects; the winner by ${ab.metric} is sent to the rest after ${ab.wait_minutes} minutes.` };
+      const ab = normalizeAb({ subjects: a.subjects, variants: a.variants, sample_pct: a.sample_pct ?? 20, wait_minutes: a.wait_minutes ?? 60, metric: a.metric });
+      if (!ab) throw new ToolError('Provide at least 2 different subject lines or variants.');
+      if (a.alt_markdown) await run(env, 'UPDATE posts SET alt_content = ? WHERE id = ?', JSON.stringify({ blocks: markdownToBlocks(String(a.alt_markdown)) }), p.id);
+      if (a.send_timing !== undefined) { const tm = normalizeTiming(a.send_timing); await run(env, 'UPDATE posts SET send_timing = ? WHERE id = ?', tm ? JSON.stringify(tm) : null, p.id); }
+      await updatePost(env, pub, p, { ab_test: ab, ...(ab.subjects[0] && !ab.variants ? { email_subject: ab.subjects[0] } : {}) });
+      return { post_id: p.id, ab_test: ab, note: `${ab.sample_pct}% of recipients will be split across ${ab.subjects.length} variants; the winner by ${ab.metric} is sent to the rest after ${ab.wait_minutes} minutes.` };
     },
   },
   // ───────── analytics ─────────
@@ -480,20 +484,25 @@ export const TOOLS: Tool[] = [
   },
   {
     name: 'create_automation', title: 'Create an automation', description: `Create an automation (saved as a draft; activate=true publishes it and turns it on). trigger = {"type", "config"}; types: ${Object.entries(TRIGGERS).map(([k, t]) => `${k} (${t.label}${t.fields ? `; config: ${t.fields.join(',')}` : ''})`).join('; ')}. steps = [{"id","type","config","yes"?,"no"?}]; step types: ${Object.entries(STEP_TYPES).map(([k, l]) => `${k}=${l}`).join(', ')}. Configs: send_email {subject, preview_text, markdown (converted) or doc}, delay {amount, unit: minutes|hours|days|weeks}, condition {rules} with yes/no branches, add_tag {tags}, update_field {key,value}, webhook {url, method}, wait_until {mode: datetime|weekday_time|condition, ...}.`,
-    inputSchema: S({ name: str('Name'), description: str(''), trigger: obj('Trigger'), steps: arr('Steps', { type: 'object' }), allow_reentry: { type: 'boolean', description: 'Let subscribers enter more than once' }, activate: { type: 'boolean', description: 'Publish and turn on immediately' } }, ['name', 'trigger', 'steps']),
+    inputSchema: S({ name: str('Name'), description: str(''), trigger: obj('Trigger'), triggers: arr('Several entry points [{type, config}] — subscribers enter when any matches (use instead of trigger)', { type: 'object' }), template: str('Optional template key from list_automation_templates; trigger/steps override it'), steps: arr('Steps', { type: 'object' }), allow_reentry: { type: 'boolean', description: 'Let subscribers enter more than once' }, activate: { type: 'boolean', description: 'Publish and turn on immediately' } }, []),
     run: async (env, pub, a) => {
       const au = await createAutomation(env, pub, a);
       return { id: au.id, status: au.status, steps: parseJSON<any[]>(au.draft_steps ?? au.steps, []).length, edit_url: `${env.APP_URL.replace(/\/$/, '')}/app/automations/${au.id}` };
     },
   },
   {
+    name: 'list_automation_templates', title: 'Automation templates', description: 'List the 45-template automation library (welcome series, lead magnets, courses, launches, cart abandonment, win-back, webinars, paid trials, churn save, birthdays, Calendly/Typeform/Thinkific webhooks…). Pass a key as `template` to create_automation.',
+    inputSchema: S({ category: str('Optional category filter') }, []),
+    run: async (_env, _pub, a) => availableTemplates().filter((t) => !a.category || t.category === a.category).map((t) => ({ key: t.key, name: t.name, category: t.category, description: t.description, entry_points: t.triggers.map((x) => x.type) })),
+  },
+  {
     name: 'update_automation', title: 'Edit an automation', description: 'Edit an automation. Trigger/step changes go to a draft version while the live one keeps running; publish=true makes them live (running journeys continue on the new version). status: active (publishes the draft and turns it on) | paused.',
-    inputSchema: S({ id: str('Automation id'), name: str(''), description: str(''), trigger: obj('Trigger'), steps: arr('Steps', { type: 'object' }), allow_reentry: { type: 'boolean' }, status: { type: 'string', enum: ['active', 'paused'] }, publish: { type: 'boolean', description: 'Publish draft changes' } }, ['id']),
+    inputSchema: S({ id: str('Automation id'), name: str(''), description: str(''), trigger: obj('Trigger'), triggers: arr('Several entry points [{type, config}] (OR)', { type: 'object' }), steps: arr('Steps', { type: 'object' }), allow_reentry: { type: 'boolean' }, status: { type: 'string', enum: ['active', 'paused'] }, publish: { type: 'boolean', description: 'Publish draft changes' } }, ['id']),
     run: async (env, pub, a) => {
       let au = await one<any>(env, 'SELECT * FROM automations WHERE id = ? AND pub_id = ?', a.id, pub.id);
       if (!au) throw new ToolError('Automation not found.');
       const edit: Record<string, unknown> = {};
-      for (const k of ['name', 'description', 'trigger', 'steps', 'allow_reentry']) if (a[k] !== undefined) edit[k] = a[k];
+      for (const k of ['name', 'description', 'trigger', 'triggers', 'steps', 'allow_reentry']) if (a[k] !== undefined) edit[k] = a[k];
       if (Object.keys(edit).length) au = await updateAutomation(env, pub, au, edit);
       if (a.status === 'active') au = await activateAutomation(env, pub, au);
       else if (a.publish && (au.draft_steps != null || au.draft_trigger != null)) au = await publishAutomation(env, pub, au);

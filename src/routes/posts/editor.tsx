@@ -8,7 +8,8 @@ import { can, audit } from '../../lib/auth';
 import { emit } from '../../lib/events';
 import { kick } from '../../lib/jobs';
 import { ruleCatalog } from '../../lib/catalog';
-import { countRecipients, publishPost, sendTest, buildEmail, postContent, type SendOptions } from '../../lib/sender';
+import { countRecipients, publishPost, sendTest, buildEmail, postContent, normalizeAb, type SendOptions } from '../../lib/sender';
+import { normalizeTiming } from '../../lib/sendtime';
 import { checkSend, SendBlockedError, LIMITS } from '../../lib/plans';
 import { rampRemaining, needsApproval } from '../../lib/safety';
 import { parseDoc, renderDoc, GMAIL_CLIP_BYTES, htmlToText, parseEmbed, resolveBlueskyDid } from '../../lib/render';
@@ -105,6 +106,7 @@ app.get('/:id/edit', async (c) => {
     senderFor(c.env, pub, 'newsletter'),
   ]);
   const ab = parseJSON<any>(post.ab_test, null);
+  const sendTiming = normalizeTiming(parseJSON<any>((post as any).send_timing, null));
   const cohort = parseJSON<any>(post.cohort_test, null);
   const seo = parseJSON<any>(post.seo, {});
   const style = parseJSON<any>(post.style, {});
@@ -118,6 +120,8 @@ app.get('/:id/edit', async (c) => {
   const data = {
     post: { id: post.id, title: post.title, subtitle: post.subtitle, slug: post.slug, status: post.status, platform: post.platform, updated_at: post.updated_at, scheduled_at: post.scheduled_at, published_at: post.published_at, audio: post.audio_key ? mediaUrl(c.env, post.audio_key) : null },
     doc: parseDoc(post.content),
+    altDoc: (post as any).alt_content ? parseDoc((post as any).alt_content) : null,
+    sendTiming,
     me: { id: user.id, name: user.name || user.email },
     catalog,
     canPublish,
@@ -172,7 +176,15 @@ app.get('/:id/edit', async (c) => {
               <textarea id="pe-title" class="pe-title" rows={1} placeholder="Title" aria-label="Title">{post.title}</textarea>
               <textarea id="pe-subtitle" class="pe-subtitle" rows={1} placeholder="Add a subtitle…" aria-label="Subtitle">{post.subtitle}</textarea>
               <div class="pe-byline small muted">{authors.map((a) => a.name).join(', ') || user.name}</div>
+              <div class="pe-vswitch" id="pe-vswitch" hidden={!ab?.subjects?.length}>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0;padding:8px 10px;border:1px dashed var(--border-strong);border-radius:10px">
+                  <span class="small muted">Email content</span>
+                  <div class="device-toggle" role="tablist" aria-label="Content variant"><button type="button" data-v="a" class="on">Main (A)</button><button type="button" data-v="b">Variant B</button></div>
+                  <span class="small muted">A/B variants set to “Variant B content” get the second version.</span>
+                </div>
+              </div>
               <div id="pe-editor" />
+              <div id="pe-editor-b" hidden />
             </div>
           </main>
           <aside class="pe-side">
@@ -217,15 +229,30 @@ app.get('/:id/edit', async (c) => {
                   <small class="field-h"><a href="/app/settings/email">Manage sender addresses</a></small>
                 </label>
                 <div class="pe-box">
-                  <label class="toggle"><input type="checkbox" name="ab_enabled" checked={!!ab?.subjects?.length} data-reveal="#pe-ab" /><span class="toggle-ui" /><span><strong>A/B test subject lines</strong><small class="field-h">Send variants to a sample, then the winner to everyone else.</small></span></label>
+                  <label class="toggle"><input type="checkbox" name="ab_enabled" checked={!!ab?.subjects?.length} data-reveal="#pe-ab" /><span class="toggle-ui" /><span><strong>A/B &amp; multivariate test</strong><small class="field-h">Test up to 4 variants of subject, preview text, sender name and content on a sample, then send the winner to everyone else.</small></span></label>
                   <div id="pe-ab" class={ab?.subjects?.length ? '' : 'hide'}>
-                    {[0, 1, 2, 3].map((i) => <label class="field"><span class="field-l">Subject {String.fromCharCode(65 + i)}{i < 2 ? '' : ' (optional)'}</span><input class="input" name="ab_subjects[]" value={ab?.subjects?.[i] || ''} maxlength={200} /></label>)}
+                    {[0, 1, 2, 3].map((i) => {
+                      const v = ab?.variants?.[i] || {};
+                      const L = String.fromCharCode(65 + i);
+                      return (
+                        <fieldset class="pe-variant" data-variant={L} style="border:1px solid var(--border);border-radius:8px;padding:6px 10px 2px;margin:0 0 10px">
+                          <legend style="font-weight:600;font-size:13px;padding:0 4px">Variant {L}{i < 2 ? '' : ' (optional)'}</legend>
+                          <label class="field"><span class="field-l">Subject</span><input class="input" name="ab_subjects[]" value={ab?.subjects?.[i] || ''} maxlength={200} placeholder={i < 2 ? 'Defaults to the subject line' : ''} /></label>
+                          <div class="pe-grid2">
+                            <label class="field"><span class="field-l">Preview text</span><input class="input" name="ab_previews[]" value={v.preview_text || ''} maxlength={200} placeholder="Same as above" /></label>
+                            <label class="field"><span class="field-l">Sender name</span><input class="input" name="ab_from_names[]" value={v.from_name || ''} maxlength={80} placeholder={defaultSender.name} /></label>
+                          </div>
+                          <label class="field"><span class="field-l">Content</span><select class="input" name="ab_contents[]"><option value="a" selected={v.content !== 'b'}>Main content</option><option value="b" selected={v.content === 'b'}>Variant B content</option></select></label>
+                        </fieldset>
+                      );
+                    })}
+                    <p class="small muted">Edit “Variant B content” with the <strong>Main / Variant B</strong> switch above the editor. Leave a field empty to keep the post's value.</p>
                     <div class="pe-grid2">
                       <label class="field"><span class="field-l">Sample size %</span><input class="input" type="number" min="2" max="50" name="ab_sample" value={ab?.sample_pct ?? 20} /></label>
                       <label class="field"><span class="field-l">Wait (minutes)</span><input class="input" type="number" min="10" max="1440" name="ab_wait" value={ab?.wait_minutes ?? 60} /></label>
                     </div>
                     <label class="field"><span class="field-l">Winner chosen by</span><select class="input" name="ab_metric"><option value="opens" selected={ab?.metric !== 'clicks'}>Open rate</option><option value="clicks" selected={ab?.metric === 'clicks'}>Click rate</option></select></label>
-                    {ab?.winner && <p class="small">Winner: <strong>Subject {ab.winner}</strong></p>}
+                    {ab?.winner && <p class="small">Winner: <strong>Variant {ab.winner}</strong></p>}
                   </div>
                 </div>
                 <div class="pe-box">
@@ -347,6 +374,14 @@ app.get('/:id/edit', async (c) => {
                 <input type="datetime-local" class="input" id="pe-when-at" data-utc-value={post.scheduled_at ? new Date(post.scheduled_at).toISOString() : ''} />
                 <small class="field-h">Your local time. Publication time zone: {pub.timezone}</small>
               </div>
+              <div class="pe-box" id="pe-timing">
+                <strong>Delivery</strong>
+                <label class="check" style="margin-top:8px"><input type="radio" name="pe-timing" value="" checked={!sendTiming} /><span>All at once</span></label>
+                <label class="check"><input type="radio" name="pe-timing" value="sto" checked={sendTiming?.mode === 'sto'} /><span>Send-time optimization<small class="field-h">Each subscriber gets it at the hour they usually open, within 24 hours. No history yet → your publication's best hour.</small></span></label>
+                <label class="check"><input type="radio" name="pe-timing" value="timezone" checked={sendTiming?.mode === 'timezone'} /><span>Deliver by time zone<small class="field-h">At a local time in each subscriber's time zone (falls back to {pub.timezone}).</small></span></label>
+                <label class="field" style="margin:4px 0 0 26px"><span class="field-l">Local time</span><input type="time" class="input" id="pe-timing-at" value={sendTiming?.local_time || '09:00'} style="width:130px" /></label>
+                <small class="field-h">Timed sends count against your plan when you start them and still follow sending limits, warm-up and safety checks. The A/B test sample goes out immediately; the winner follows the timing.</small>
+              </div>
               <div class="callout warn hide" id="pe-send-warn" />
               <div class="form-actions"><button type="button" class="btn btn-secondary" data-close>Keep editing</button><button type="button" class="btn btn-primary" id="pe-send-go">Send now</button></div>
             </div>
@@ -402,11 +437,24 @@ app.put('/:id', async (c) => {
   if (content.length > 4_000_000) return c.json({ error: 'Post is too large' }, 413);
   const title = body.title !== undefined ? str(body.title, 300) : post.title;
   const patch: Record<string, unknown> = { title, subtitle: body.subtitle !== undefined ? str(body.subtitle, 500) : post.subtitle, content, word_count: wordCount(doc), updated_at: now() };
+  // "Variant B content" for content A/B tests (null clears it)
+  if (body.alt_content !== undefined) {
+    const alt = body.alt_content && Array.isArray(body.alt_content.blocks) && body.alt_content.blocks.length ? body.alt_content : null;
+    if (alt) await resolveEmbedDids(alt);
+    const altJson = alt ? JSON.stringify(alt) : null;
+    if ((altJson?.length || 0) > 4_000_000) return c.json({ error: 'Variant B content is too large' }, 413);
+    patch.alt_content = altJson;
+  }
   let slug = post.slug;
   if (body.meta) {
     const wantSlug = slugify(str(m.slug) || title || 'untitled');
     if (wantSlug !== post.slug) slug = await uniqueSlug(c.env, pub.id, wantSlug, post.id);
-    const abSubjects = arr(m.ab_subjects).map((s) => s.slice(0, 200)).filter(Boolean);
+    // A/B + multivariate: 4 variant rows (subject, preview text, sender name, content); rows C/D only when filled in
+    const col = (v: any): string[] => (Array.isArray(v) ? v.map((x) => String(x ?? '')) : v !== undefined && v !== null ? [String(v)] : []);
+    const [subs, prevs, froms, conts] = [col(m.ab_subjects), col(m.ab_previews), col(m.ab_from_names), col(m.ab_contents)];
+    const variants = [0, 1, 2, 3].map((i) => ({ subject: (subs[i] || '').trim(), preview_text: (prevs[i] || '').trim(), from_name: (froms[i] || '').trim(), content: conts[i] === 'b' ? 'b' : 'a' }))
+      .filter((v, i) => i < 2 || v.subject || v.preview_text || v.from_name || v.content === 'b');
+    const abTest = m.ab_enabled ? normalizeAb({ variants, sample_pct: m.ab_sample, wait_minutes: Math.max(10, Number(m.ab_wait) || 60), metric: m.ab_metric, winner: parseJSON<any>(post.ab_test, {})?.winner }) : null;
     const cohortNames = arr(m.cohort_names);
     const cohortPcts = Array.isArray(m.cohort_pcts) ? m.cohort_pcts : [];
     const cohorts = cohortNames.map((name, i) => ({ name: name.slice(0, 40), pct: Number(cohortPcts[i]) || 0 })).filter((x) => x.name && x.pct > 0);
@@ -426,7 +474,7 @@ app.put('/:id', async (c) => {
       list_id: str(m.list_id) || null,
       segment_ids: JSON.stringify(validSeg),
       exclude_segment_ids: JSON.stringify(arr(m.exclude_segment_ids)),
-      ab_test: m.ab_enabled && abSubjects.length >= 2 ? JSON.stringify({ ...parseJSON(post.ab_test, {}), subjects: abSubjects, sample_pct: Math.min(50, Math.max(2, Number(m.ab_sample) || 20)), wait_minutes: Math.min(1440, Math.max(10, Number(m.ab_wait) || 60)), metric: m.ab_metric === 'clicks' ? 'clicks' : 'opens' }) : null,
+      ab_test: abTest ? JSON.stringify(abTest) : null,
       cohort_test: m.cohort_enabled && cohorts.length >= 2 ? JSON.stringify({ cohorts }) : null,
       seo: JSON.stringify({ title: str(m.seo_title, 120) || undefined, description: str(m.seo_description, 300) || undefined, og_image: str(m.og_image, 1000) || undefined, canonical: str(m.canonical, 1000) || undefined, noindex: m.noindex ? true : undefined }),
       style: JSON.stringify(styleFromMeta(m)),
@@ -558,6 +606,12 @@ app.post('/:id/publish', async (c) => {
   const b = await c.req.json<any>().catch(() => ({}));
   if (!post.title.trim()) return c.json({ error: 'Add a title before publishing' }, 400);
   if (post.status === 'published') return c.json({ ok: true, message: 'Post updated', redirect: `/app/posts/${post.id}` });
+  // Delivery timing (send-time optimization / time zones) is saved on the post so scheduled sends use it too.
+  if (b.timing !== undefined) {
+    const timing = normalizeTiming(b.timing);
+    await run(c.env, 'UPDATE posts SET send_timing = ? WHERE id = ?', timing ? JSON.stringify(timing) : null, post.id);
+    (post as any).send_timing = timing ? JSON.stringify(timing) : null;
+  }
   if (b.mode === 'schedule') {
     const at = Date.parse(b.scheduled_at);
     if (isNaN(at) || at < now() + 60_000) return c.json({ error: 'Pick a time at least a minute in the future' }, 400);

@@ -56,6 +56,20 @@ app.get('/:id', async (c) => {
       map.set(key, cur);
     }
   }
+  // A/B + multivariate: report the test sample per variant (deliveries before the winner was picked), then the rollout
+  const abSend = [...sends].reverse().find((s) => parseJSON<any>(s.options, {}).ab);
+  const abSendOpts = abSend ? parseJSON<any>(abSend.options, {}) : null;
+  const abTest = abSendOpts?.ab || null;
+  const decidedAt = Number(abSendOpts?.ab_decided_at) || 0;
+  const abSample = abSend ? await all<any>(c.env, `SELECT substr(variant,1,1) AS v, COUNT(*) AS n, SUM(CASE WHEN opened_at IS NOT NULL THEN 1 ELSE 0 END) AS op, SUM(CASE WHEN clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS cl FROM deliveries WHERE send_id = ? AND variant IS NOT NULL AND status NOT IN ('scheduled','skipped') ${decidedAt ? 'AND created_at <= ?' : ''} GROUP BY substr(variant,1,1) ORDER BY v`, abSend.id, ...(decidedAt ? [decidedAt] : [])) : [];
+  const abWinnerRest = abSend && decidedAt ? ((await one<any>(c.env, `SELECT COUNT(*) AS n FROM deliveries WHERE send_id = ? AND created_at > ?`, abSend.id, decidedAt))?.n || 0) : 0;
+  // timed sends (send-time optimization / time zones)
+  const timedSend = [...sends].reverse().find((s) => parseJSON<any>(s.options, {}).timing);
+  const timedInfo = timedSend ? await (async () => {
+    const tm = parseJSON<any>(timedSend.options, {}).timing;
+    const r = await one<any>(c.env, `SELECT SUM(CASE WHEN status = 'scheduled' THEN 1 ELSE 0 END) AS scheduled, SUM(CASE WHEN status IN ('sent','deferred') THEN 1 ELSE 0 END) AS sent, MAX(next_attempt_at) AS last FROM deliveries WHERE send_id = ?`, timedSend.id);
+    return { mode: tm.mode, local_time: tm.local_time, scheduled: r?.scheduled || 0, sent: r?.sent || 0, last: r?.last || 0 };
+  })() : null;
   const links = await all<any>(c.env, `SELECT k.url, COUNT(DISTINCT k.delivery_id) AS uniq, COUNT(*) AS total FROM clicks k JOIN sends s ON s.id = k.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND k.is_bot = 0 GROUP BY k.url ORDER BY uniq DESC LIMIT 50`, pid);
   const providers = await all<any>(c.env, `SELECT COALESCE(d.provider,'other') AS provider, COUNT(*) AS n, SUM(CASE WHEN d.status IN ('sent','complained') THEN 1 ELSE 0 END) AS delivered, SUM(CASE WHEN d.status = 'bounced' THEN 1 ELSE 0 END) AS bounced, SUM(CASE WHEN d.status = 'complained' THEN 1 ELSE 0 END) AS complained, SUM(CASE WHEN d.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS op FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') GROUP BY provider ORDER BY n DESC`, pid);
   const web = await one<any>(c.env, `SELECT COUNT(*) AS views, COUNT(DISTINCT visitor_id) AS visitors FROM page_views WHERE pub_id = ? AND ref_id = ?`, pub.id, pid);
@@ -109,18 +123,40 @@ app.get('/:id', async (c) => {
           <LineChart labels={hours.map((h) => `${h}h`)} series={[{ label: 'Unique opens', values: series(openRows) }, { label: 'Unique clicks', values: series(clickRows) }]} />
         </Card>
       )}
-      <div class="grid g2">
-        {abRows.size > 0 && (
-          <Card title="Subject line A/B test">
-            <Table rows={[...abRows.entries()]} cols={[
-              { h: 'Variant', r: ([k]) => <span>{k} {ab?.winner === k && <Badge tone="green">Winner</Badge>}</span> },
-              { h: 'Subject', r: ([k]) => <span class="small">{ab?.subjects?.[k.charCodeAt(0) - 65] || '—'}</span> },
-              { h: 'Sent', r: ([, v]) => num(v.n), class: 'right' },
-              { h: 'Open rate', r: ([, v]) => rate(v.op, v.n), class: 'right' },
-              { h: 'Click rate', r: ([, v]) => rate(v.cl, v.n), class: 'right' },
-            ]} />
+      {abRows.size > 0 && (() => {
+        const t = abTest || ab || {};
+        const multi = !!t.variants?.length;
+        const winner = abSendOpts?.winner || ab?.winner || null;
+        const testRows = abSample.length ? abSample : [...abRows.entries()].map(([k, v]) => ({ v: k, ...v }));
+        const best = testRows.reduce((m, r) => Math.max(m, (t.metric === 'clicks' ? r.cl : r.op) / Math.max(1, r.n)), 0);
+        return (
+          <Card title={multi ? 'Multivariate test results' : 'A/B test results'} actions={<span class="small muted">{num(t.sample_pct || 0)}% sample · winner by {t.metric === 'clicks' ? 'click rate' : 'open rate'} after {num(t.wait_minutes || 0)} min{winner ? '' : ' · deciding…'}</span>}>
+            <div data-ab-results>
+              <Table rows={testRows} cols={[
+                { h: 'Variant', r: (r) => <span><strong>{r.v}</strong> {winner === r.v && <Badge tone="green">Winner</Badge>}</span> },
+                { h: 'Subject', r: (r) => <span class="small">{t.subjects?.[r.v.charCodeAt(0) - 65] || post.email_subject || post.title}</span> },
+                ...(multi ? [
+                  { h: 'Preview text', r: (r: any) => <span class="small muted">{t.variants?.[r.v.charCodeAt(0) - 65]?.preview_text || '—'}</span> },
+                  { h: 'Sender name', r: (r: any) => <span class="small muted">{t.variants?.[r.v.charCodeAt(0) - 65]?.from_name || 'Default'}</span> },
+                  { h: 'Content', r: (r: any) => <span class="small">{t.variants?.[r.v.charCodeAt(0) - 65]?.content === 'b' ? 'Variant B' : 'Main'}</span> },
+                ] : []),
+                { h: 'Sent', r: (r) => num(r.n), class: 'right' },
+                { h: 'Open rate', r: (r) => <span>{rate(r.op, r.n)}</span>, class: 'right' },
+                { h: 'Click rate', r: (r) => <span>{rate(r.cl, r.n)}</span>, class: 'right' },
+                { h: '', r: (r) => <div style="width:90px;height:6px;border-radius:3px;background:var(--surface-2)"><div style={`width:${best ? Math.round(((t.metric === 'clicks' ? r.cl : r.op) / Math.max(1, r.n) / best) * 100) : 0}%;height:6px;border-radius:3px;background:var(--accent)`} /></div> },
+              ]} />
+              {winner && abWinnerRest > 0 && <p class="small muted" style="margin:8px 0 0">Variant {winner} was then sent to {num(abWinnerRest)} more subscriber{abWinnerRest === 1 ? '' : 's'}.</p>}
+            </div>
           </Card>
-        )}
+        );
+      })()}
+      {timedInfo && (
+        <div class="callout" data-send-timing>
+          <strong>{timedInfo.mode === 'sto' ? 'Send-time optimization: ' : `Delivery by time zone (${timedInfo.local_time}): `}</strong>
+          {num(timedInfo.sent)} delivered{timedInfo.scheduled ? `, ${num(timedInfo.scheduled)} scheduled — the last one goes out ${fmtDateTime(timedInfo.last, pub.timezone)}` : ' — complete'}.
+        </div>
+      )}
+      <div class="grid g2">
         {cohortRows.size > 0 && (
           <Card title="Random cohort test">
             <Table rows={[...cohortRows.entries()]} cols={[

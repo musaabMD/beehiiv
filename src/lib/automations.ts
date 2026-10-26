@@ -35,7 +35,24 @@ export const TRIGGERS: Record<string, { label: string; event?: string; fields?: 
   date_field: { label: 'Date in custom field (birthday, renewal…)', fields: ['key', 'offset_days'] },
   inactive: { label: 'Becomes inactive (no opens for N days)', fields: ['days'] },
   api: { label: 'Enrolled via API or manually' },
+  webhook: { label: 'Incoming webhook (Calendly, Typeform, Thinkific, Kajabi, Zapier…)', fields: ['email_path', 'name_path', 'tags', 'field_map', 'double_opt_in'] },
 };
+
+/**
+ * An automation can have several entry points (OR). Stored trigger JSON is either one trigger `{type, config, filter?}`
+ * or, with several, `{...first, triggers: [t1, t2, …]}` — the first one is mirrored at the top level so code that only
+ * reads `trigger.type` keeps working.
+ */
+export function triggerList(t: any): Array<{ type: string; config: any; filter?: any }> {
+  if (t && Array.isArray(t.triggers) && t.triggers.length) return t.triggers.filter((x: any) => x && typeof x === 'object' && typeof x.type === 'string');
+  return t && typeof t === 'object' && typeof t.type === 'string' && t.type ? [{ type: t.type, config: t.config || {}, ...(t.filter ? { filter: t.filter } : {}) }] : [];
+}
+
+export function packTriggers(list: Array<{ type: string; config: any; filter?: any }>): any {
+  if (!list.length) return {};
+  if (list.length === 1) return list[0];
+  return { ...list[0], triggers: list };
+}
 
 export const STEP_TYPES: Record<string, string> = {
   send_email: 'Send email', delay: 'Wait for a time', wait_until: 'Wait until…', condition: 'If / else branch', ab_split: 'Random split',
@@ -303,9 +320,13 @@ onEvent(async (env, e) => {
   if (!Object.values(TRIGGERS).some((t) => t.event === e.type)) return;
   const autos = await all<any>(env, `SELECT id, trigger FROM automations WHERE pub_id = ? AND status = 'active'`, e.pubId);
   for (const a of autos) {
-    const trig = parseJSON<any>(a.trigger, {});
-    if (trig.filter?.rules?.length && !(await subscriberMatches(env, e.pubId, trig.filter, e.subscriberId))) continue;
-    if (triggerMatches(trig, e)) await enroll(env, a.id, e.subscriberId, { trigger: e.type, ...(e.data || {}) });
+    // several entry points are OR'ed: the first one that matches enrolls (once)
+    for (const trig of triggerList(parseJSON<any>(a.trigger, {}))) {
+      if (!triggerMatches(trig, e)) continue;
+      if (trig.filter?.rules?.length && !(await subscriberMatches(env, e.pubId, trig.filter, e.subscriberId))) continue;
+      await enroll(env, a.id, e.subscriberId, { trigger: e.type, entry: trig.type, ...(e.data || {}) });
+      break;
+    }
   }
 });
 
@@ -318,14 +339,14 @@ registerPeriodic('automations.runs', MIN - 5000, async (env) => {
 // Polling triggers: segment entry, date fields, inactivity
 registerPeriodic('automations.poll_triggers', 15 * MIN, async (env) => {
   const autos = await all<any>(env, `SELECT id, pub_id, trigger FROM automations WHERE status = 'active'`);
-  for (const a of autos) {
-    const trig = parseJSON<any>(a.trigger, {});
+  for (const a of autos) for (const trig of triggerList(parseJSON<any>(a.trigger, {}))) {
     const c = trig.config || {};
     let g: RuleGroup | null = null;
     if (trig.type === 'segment_entered' && c.segment_id) g = { op: 'and', rules: [{ field: 'segment', cmp: 'in', value: c.segment_id }] };
     else if (trig.type === 'inactive') g = { op: 'and', rules: [{ field: 'last_open_at', cmp: 'not_within_days', value: Number(c.days) || 30 }, { field: 'created_at', cmp: 'older_than_days', value: Number(c.days) || 30 }] };
     if (g) {
       g.rules.push({ field: 'automation', cmp: 'not_started', value: a.id });
+      if (trig.filter?.rules?.length) g.rules.push(trig.filter);
       const cc = await compile(env, a.pub_id, g);
       const subs = await all<{ id: string }>(env, `SELECT s.id FROM subscribers s WHERE s.pub_id = ? AND s.status = 'active' AND (${cc.sql}) LIMIT 500`, a.pub_id, ...cc.params);
       for (const s of subs) await enroll(env, a.id, s.id, { trigger: trig.type });
