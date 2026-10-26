@@ -6,17 +6,27 @@ import type { AppEnv } from '../../types';
 import { all, one, run, insert } from '../../lib/db';
 import { can, audit } from '../../lib/auth';
 import { ruleCatalog } from '../../lib/catalog';
-import { parseDoc, renderDoc } from '../../lib/render';
+import { parseDoc, renderDoc, isCodedDoc, sanitizeEmailDocument, ensureUnsubscribe, hasUnsubscribeLink } from '../../lib/render';
 import { buildEmail } from '../../lib/sender';
 import { siteUrl } from '../../lib/pub';
 import { DashLayout } from '../../ui/layout';
-import { Card, Badge, LinkBtn, Btn, Empty, Json, back, ActionForm } from '../../ui/components';
+import { Card, Badge, LinkBtn, Btn, Empty, Json, back, ActionForm, Field, Input } from '../../ui/components';
 import { icon } from '../../ui/icons';
 import { id, now, parseJSON, str, form, fmtDate } from '../../lib/util';
 import { StyleFields, styleFromMeta } from './editor';
 import { newPost, webPage } from './shared';
+import snippets from './snippets';
 
 const app = new Hono<AppEnv>();
+app.route('/', snippets);
+
+/** Custom-coded template content: one html_document block holding the sanitized document (unsubscribe link guaranteed). */
+export function codedContent(html: string): { doc: { blocks: any[] }; addedUnsubscribe: boolean } {
+  const clean = sanitizeEmailDocument(html);
+  const addedUnsubscribe = !hasUnsubscribeLink(clean);
+  return { doc: { blocks: [{ id: id(8), type: 'html_document', data: { html: ensureUnsubscribe(clean) } }] }, addedUnsubscribe };
+}
+export const codedHtmlOf = (content: string): string => (parseDoc(content).blocks.find((b) => b.type === 'html_document')?.data?.html as string) || '';
 const KINDS: Array<[string, string]> = [['post', 'Post'], ['welcome', 'Welcome email'], ['automation', 'Automation email']];
 
 async function loadTpl(c: any, tid: string, editable = false) {
@@ -28,7 +38,7 @@ async function loadTpl(c: any, tid: string, editable = false) {
 }
 
 /** Category order for the library filter (templates.category; team templates without one fall under “Team”). */
-export const CATEGORIES = ['Digest', 'Editorial', 'Curation', 'Business', 'Media & events', 'Education', 'Data', 'Welcome', 'Seasonal', 'Automation'];
+export const CATEGORIES = ['Digest', 'Editorial', 'Curation', 'Business', 'Media & events', 'Education', 'Data', 'Welcome', 'Seasonal', 'Automation', 'Coded'];
 
 /** Shared styles + filter script for template galleries (templates page, new-post picker, automation picker). */
 export function GalleryAssets() {
@@ -87,6 +97,7 @@ export function TemplateCard(p: { t: any; children?: any }) {
           {t.is_default ? <Badge tone="green">Default</Badge> : null}
           <Badge tone={t.pub_id ? 'blue' : 'gray'}>{t.pub_id ? 'Team' : t.category || 'Library'}</Badge>
           {t.kind !== 'post' && <Badge tone="purple">{KIND_LABEL[t.kind] || t.kind}</Badge>}
+          {t.content && String(t.content).includes('"type":"html_document"') && <Badge tone="amber">{'</> Coded'}</Badge>}
         </div>
         <p class="small muted">{t.description || (t.author ? `By ${t.author} · ${fmtDate(t.updated_at)}` : '')}</p>
         <div class="tg-actions">{p.children}</div>
@@ -113,7 +124,7 @@ app.get('/templates', async (c) => {
     <TemplateCard t={t}>
       <UseTemplate t={t} />
       <a class="btn btn-ghost btn-sm" href={`/app/posts/templates/${t.id}/preview`} target="_blank">Preview</a>
-      {t.pub_id && <LinkBtn small href={`/app/posts/templates/${t.id}/edit`}>Edit</LinkBtn>}
+      {t.pub_id && <LinkBtn small href={`/app/posts/templates/${t.id}/${String(t.content || '').includes('"type":"html_document"') ? 'code' : 'edit'}`}>Edit</LinkBtn>}
       <ActionForm action={`/app/posts/templates/${t.id}/duplicate`} label={t.pub_id ? 'Duplicate' : 'Customize'} />
       {!t.is_default && t.kind === 'post' && <ActionForm action={`/app/posts/templates/${t.id}/default`} label="Make default" kind="ghost" />}
       {t.pub_id && <ActionForm action={`/app/posts/templates/${t.id}/delete`} label="Delete" kind="danger" confirm={`Delete template “${t.name}”?`} />}
@@ -121,12 +132,12 @@ app.get('/templates', async (c) => {
   );
   return c.html(
     <DashLayout c={c} title="Templates" section="posts" sub="templates" styles={['/static/editor.css']}
-      actions={<form method="post" action="/app/posts/templates"><Btn>+ New template</Btn></form>}>
+      actions={<span class="row" style="gap:8px"><a class="btn btn-secondary" href="/app/posts/templates/coded/new">{'</>'} New coded template</a><form method="post" action="/app/posts/templates"><Btn>+ New template</Btn></form></span>}>
       <GalleryAssets />
       <p class="muted" style="margin-top:0">Templates hold a content outline and a style (colors, fonts, spacing for email and web). Posts stay linked to their template: editing a template’s style restyles every post made from it, except values a post overrides in its own Style tab.</p>
       <h2>Team templates</h2>
       {team.length ? <div class="tg-grid">{team.map(card)}</div> : <Card><Empty icon="🧩" title="No team templates yet" body="Click “Customize” on any library template to make your own copy, or save a post as a template from the editor." /></Card>}
-      <h2 style="margin-top:28px">Template library <span class="muted small" style="font-weight:400">· {lib.length} designs</span></h2>
+      <h2 style="margin-top:28px">Template library <span class="muted small" style="font-weight:400" data-template-count={lib.length}>· {lib.length} designs</span></h2>
       <CategoryFilter items={lib} target="#tg-lib" />
       <div class="tg-grid" id="tg-lib">{lib.map(card)}</div>
     </DashLayout>,
@@ -137,6 +148,93 @@ app.post('/templates', async (c) => {
   const tid = id();
   await insert(c.env, 'templates', { id: tid, pub_id: c.get('pub').id, name: 'Untitled template', kind: 'post', description: '', content: '{"blocks":[]}', style: '{}', created_by: c.get('user').id, created_at: now(), updated_at: now() });
   return c.redirect(`/app/posts/templates/${tid}/edit`, 303);
+});
+
+// ───────── custom-coded templates (raw HTML) ─────────
+function CodedPage(p: { c: any; t?: any }) {
+  const t = p.t;
+  const html = t ? codedHtmlOf(t.content) : '';
+  const action = t ? `/app/posts/templates/${t.id}/code` : '/app/posts/templates/coded';
+  return (
+    <DashLayout c={p.c} title={t ? `Coded template: ${t.name}` : 'New coded template'} section="posts" sub="templates" crumbs={[['/app/posts/templates', 'Templates']]}>
+      <form method="post" action={action} class="ct-form" id="ct-form">
+        <div class="grid g2">
+          <Field label="Template name"><Input name="name" value={t?.name || ''} placeholder="e.g. Brand newsletter (coded)" required maxlength={120} /></Field>
+          <Field label="Description"><Input name="description" value={t?.description || ''} placeholder="What it’s for" maxlength={500} /></Field>
+        </div>
+        <div class="ct-split">
+          <div class="ct-col">
+            <div class="row between" style="margin-bottom:6px"><strong>HTML</strong><span class="row" style="gap:6px"><label class="btn btn-ghost btn-sm" style="cursor:pointer">Upload .html<input type="file" accept=".html,.htm,text/html" id="ct-file" hidden /></label></span></div>
+            <textarea class="input ct-code" name="html" id="ct-html" spellcheck={false} placeholder="Paste a full email HTML document (<!DOCTYPE html>…) or a fragment">{html}</textarea>
+            <ul class="ct-checks small" id="ct-checks" aria-live="polite" />
+            <details class="small muted" style="margin-top:8px"><summary>Merge tags you can use</summary>
+              <p style="margin:6px 0 0"><code>{'{{subscriber.first_name|there}}'}</code> · <code>{'{{subscriber.email}}'}</code> · <code>{'{{publication.name}}'}</code> · <code>{'{{referral_url}}'}</code> · <code>{'{{date}}'}</code> · <code>{'{{custom.<key>}}'}</code> · links: <code>{'{{unsubscribe_url}}'}</code> (required — added automatically when missing), <code>{'{{preferences_url}}'}</code>, <code>{'{{web_url}}'}</code>. Links are click-tracked when sent. Scripts, iframes, forms and event handlers are removed.</p>
+            </details>
+          </div>
+          <div class="ct-col">
+            <div class="row between" style="margin-bottom:6px"><strong>Preview</strong><span class="small muted" id="ct-size">—</span></div>
+            <iframe id="ct-preview" class="ct-preview" sandbox="allow-same-origin" title="Email preview" />
+          </div>
+        </div>
+        <div class="row" style="gap:8px;margin-top:14px">
+          <Btn kind="primary">{t ? 'Save template' : 'Create template'}</Btn>
+          {t && <a class="btn btn-secondary" href={`/app/posts/templates/${t.id}/preview`} target="_blank">Open email preview</a>}
+          {t && <a class="btn btn-ghost" href={`/app/posts/templates/${t.id}/preview?mode=web`} target="_blank">Web preview</a>}
+          <a class="btn btn-ghost" href="/app/posts/templates">Cancel</a>
+        </div>
+      </form>
+      {raw(`<style>.ct-split{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:6px}@media(max-width:900px){.ct-split{grid-template-columns:1fr}}.ct-code{font-family:Menlo,Consolas,monospace;font-size:12.5px;line-height:1.5;min-height:520px;white-space:pre;tab-size:2}.ct-preview{width:100%;height:600px;border:1px solid var(--border,#e5e7eb);border-radius:10px;background:#fff}.ct-checks{list-style:none;padding:0;margin:8px 0 0;display:flex;flex-direction:column;gap:3px}.ct-checks li::before{content:attr(data-i);display:inline-block;width:1.4em}</style>
+<script>(function(){var ta=document.getElementById('ct-html'),fr=document.getElementById('ct-preview'),ck=document.getElementById('ct-checks'),sz=document.getElementById('ct-size'),t;
+function check(){var h=ta.value,out=[];var add=function(ok,msg){out.push('<li data-i="'+(ok===true?'✓':ok===false?'✗':'•')+'" style="color:'+(ok===false?'#b45309':'inherit')+'">'+msg+'</li>')};
+add(/{{\\s*unsubscribe_url\\s*}}/i.test(h)?true:null,/{{\\s*unsubscribe_url\\s*}}/i.test(h)?'Unsubscribe link found':'No {{unsubscribe_url}} link — a compliant footer will be added automatically');
+add(/<script|\\son[a-z]+\\s*=|javascript:/i.test(h)?false:true,/<script|\\son[a-z]+\\s*=|javascript:/i.test(h)?'Scripts / event handlers found — they will be removed':'No scripts');
+add(/<html[\\s>]/i.test(h)?true:null,/<html[\\s>]/i.test(h)?'Full HTML document':'Fragment — it will be wrapped in a document');
+add(/{{\\s*subscriber\\./i.test(h)?true:null,/{{\\s*subscriber\\./i.test(h)?'Personalized with merge tags':'Tip: personalize with {{subscriber.first_name|there}}');
+var kb=Math.round(new Blob([h]).size/102.4)/10;sz.textContent=kb+' KB'+(kb>100?' — Gmail clips emails over 102 KB':'');ck.innerHTML=out.join('');}
+function preview(){clearTimeout(t);t=setTimeout(function(){fetch('/app/posts/templates/coded/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({html:ta.value})}).then(function(r){return r.json()}).then(function(j){fr.srcdoc=j.html||''}).catch(function(){});},350);check();}
+ta.addEventListener('input',preview);document.getElementById('ct-file').addEventListener('change',function(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(){ta.value=String(r.result||'');preview();};r.readAsText(f);});
+ta.addEventListener('keydown',function(e){if(e.key==='Tab'){e.preventDefault();var s=ta.selectionStart;ta.setRangeText('  ',s,ta.selectionEnd,'end');}});
+preview();})();</script>`)}
+    </DashLayout>
+  );
+}
+
+app.get('/templates/coded/new', (c) => c.html(<CodedPage c={c} />));
+
+app.post('/templates/coded/preview', async (c) => {
+  const pub = c.get('pub');
+  const b = await c.req.json<any>().catch(() => ({}));
+  const { doc } = codedContent(str(b.html, 400_000));
+  const built = await buildEmail(c.env, pub, { title: '', subtitle: '', doc, style: '{}', hideHeader: true }, null, { access: true, preview: false });
+  return c.json({ html: built.html, bytes: built.bytes });
+});
+
+app.post('/templates/coded', async (c) => {
+  const pub = c.get('pub');
+  const f = await form(c.req);
+  const src = str(f.html, 400_000);
+  if (!src.trim()) return back(c, '/app/posts/templates/coded/new', 'Paste or upload your HTML first', 'err');
+  const { doc, addedUnsubscribe } = codedContent(src);
+  const tid = id();
+  await insert(c.env, 'templates', { id: tid, pub_id: pub.id, name: str(f.name, 120) || 'Coded template', kind: 'post', description: str(f.description, 500), content: JSON.stringify(doc), style: '{}', category: 'Coded', created_by: c.get('user').id, created_at: now(), updated_at: now() });
+  await audit(c, 'template.coded_create', tid);
+  return back(c, `/app/posts/templates/${tid}/code`, addedUnsubscribe ? 'Template created — an unsubscribe footer was added because the HTML had no {{unsubscribe_url}} link' : 'Template created');
+});
+
+app.get('/templates/:id/code', async (c) => {
+  const t = await loadTpl(c, c.req.param('id'), true);
+  if (!t) return back(c, '/app/posts/templates', 'Library templates are read-only — duplicate one to customize it', 'err');
+  return c.html(<CodedPage c={c} t={t} />);
+});
+
+app.post('/templates/:id/code', async (c) => {
+  const pub = c.get('pub');
+  const t = await loadTpl(c, c.req.param('id'), true);
+  if (!t) return c.notFound();
+  const f = await form(c.req);
+  const { doc, addedUnsubscribe } = codedContent(str(f.html, 400_000));
+  await run(c.env, 'UPDATE templates SET name = ?, description = ?, content = ?, updated_at = ? WHERE id = ? AND pub_id = ?', str(f.name, 120) || t.name, str(f.description, 500), JSON.stringify(doc), now(), t.id, pub.id);
+  return back(c, `/app/posts/templates/${t.id}/code`, addedUnsubscribe ? 'Saved — an unsubscribe footer was added because the HTML had no {{unsubscribe_url}} link' : 'Template saved');
 });
 
 app.get('/templates/:id/preview', async (c) => {
@@ -231,7 +329,7 @@ app.post('/templates/:id/duplicate', async (c) => {
   if (!t) return c.notFound();
   const tid = id();
   await insert(c.env, 'templates', { id: tid, pub_id: c.get('pub').id, name: `${t.name}${t.pub_id ? ' (copy)' : ''}`, kind: t.kind, description: t.description, content: t.content, style: t.style, category: t.category || '', created_by: c.get('user').id, created_at: now(), updated_at: now() });
-  return back(c, `/app/posts/templates/${tid}/edit`, 'Template duplicated');
+  return back(c, `/app/posts/templates/${tid}/${isCodedDoc(parseDoc(t.content)) ? 'code' : 'edit'}`, 'Template duplicated');
 });
 
 app.post('/templates/:id/default', async (c) => {

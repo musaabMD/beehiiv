@@ -182,6 +182,9 @@
     ad: { label: 'Ad / sponsor slot', icon: '$', group: 'Grow', keys: 'ad sponsor sponsorship advertisement', data: () => ({ label: 'Together with', headline: '', body: '', url: '', image: '', cta: 'Learn more' }) },
     product: { label: 'Product', icon: '🛍', group: 'Grow', keys: 'product shop digital download sell', data: () => ({ product_id: '' }) },
     event: { label: 'Event', icon: '📅', group: 'Grow', keys: 'event webinar ticket', data: () => ({ event_id: '' }) },
+    recommended_products: { label: 'Recommended products (personalized)', icon: '🎯', group: 'Grow', keys: 'recommended products personalized shop upsell cross-sell also bought picks for you', data: () => ({ title: 'Picked for you', limit: 3, cta: 'View', layout: 'grid' }) },
+    snippet: { label: 'Saved snippet', icon: '⧉', group: 'Layout', keys: 'snippet reusable saved block synced signature footer sponsor banner', pseudo: true },
+    html_document: { label: 'Coded email (full HTML)', icon: '</>', group: 'Layout', keys: 'html coded custom template raw document email code', data: () => ({ html: '' }) },
     ai: { label: 'Write with AI', icon: '✨', group: 'AI', keys: 'ai write generate gpt assistant draft', feature: 'ai', pseudo: true },
     aiimage: { label: 'Generate image with AI', icon: '🎨', group: 'AI', keys: 'ai image generate picture art', feature: 'ai', pseudo: true },
   };
@@ -698,6 +701,19 @@
     }
 
     async pseudo(key, it) {
+      if (key === 'snippet') {
+        const blocks = await snippetPicker(this);
+        if (!blocks || !blocks.length) return;
+        const list = it ? it.list : this.root;
+        let idx = it ? list.items.indexOf(it) + 1 : list.items.length;
+        if (it && it.block.type === 'paragraph' && !textOf(it.view.toJSON().data.html).trim()) { idx--; list.remove(it, true); }
+        let last = null;
+        for (const b of blocks) last = list.insert(b, idx++);
+        if (!list.items[idx]) list.insert(P(), idx);
+        if (last) last.el.classList.add('ohe-sel');
+        this.changed();
+        return;
+      }
       if (key === 'gif') {
         const g = await gifPicker(this);
         if (!g) return;
@@ -1741,12 +1757,121 @@
     focus(end) { const l = this.lists[0]; l.items[end ? l.items.length - 1 : 0]?.view.focus?.(end); }
   }
 
+  // ───────── synced snippet / recommended products / coded email ─────────
+  const snippetsUrl = (ed) => ed.opts.snippetsUrl || '/app/posts/snippets';
+  class SnippetView extends CardView {
+    render() {
+      super.render();
+      const d = this.d;
+      const bar = h('div', { class: 'ohe-snip-bar', contenteditable: 'false' },
+        h('span', { class: 'ohe-snip-tag' }, '⧉ Synced snippet'), h('strong', { text: d.name || 'Snippet' }),
+        h('span', { class: 'ohe-hint' }, 'Edits to the snippet update every post that uses it'),
+        h('a', { class: 'ohe-mini-btn', href: `${snippetsUrl(this.ed)}/${encodeURIComponent(d.snippet_id || '')}/edit`, target: '_blank', rel: 'noopener' }, 'Edit snippet ↗'),
+        h('button', { type: 'button', class: 'ohe-mini-btn', title: 'Replace with an editable copy of its blocks', onclick: () => this.detach() }, 'Detach (make a copy)'));
+      this.body.prepend(bar);
+    }
+    placeholder() { return '<div class="ohe-ph">⧉ This snippet is empty or was deleted</div>'; }
+    async detach() {
+      try {
+        const r = await getJSON(`${snippetsUrl(this.ed)}/${encodeURIComponent(this.d.snippet_id)}/json`);
+        const list = this.item.list;
+        let idx = list.items.indexOf(this.item);
+        list.remove(this.item, true);
+        for (const b of r.doc.blocks) list.insert({ ...b, id: uid() }, idx++);
+        this.ed.changed();
+        OHToast('Detached — these blocks are now a copy you can edit here');
+      } catch (e) { OHToast('Could not load the snippet'); }
+    }
+  }
+  class RecProductsView extends CardView {
+    fields() { return [{ k: 'title', label: 'Title', type: 'text', ph: 'Picked for you' }, { k: 'limit', label: 'Show', type: 'number', min: 1, max: 6 }, { k: 'cta', label: 'Link text', type: 'text', ph: 'View' }, { k: 'layout', label: 'Layout', type: 'select', options: [['grid', 'Grid'], ['list', 'List']] }]; }
+    extra() { this.body.append(h('p', { class: 'ohe-hint', contenteditable: 'false', style: { margin: '6px 0 0' } }, '🎯 Personalized per reader at send time: products they haven’t bought, ranked by what similar readers bought, their interests (tags) and popularity — bestsellers when there’s no signal. Links carry UTM attribution.')); }
+    placeholder() { return '<div class="ohe-ph">🎯 Recommended products — add products in Monetize → Shop</div>'; }
+  }
+  class HtmlDocView extends View {
+    render() {
+      const d = this.d;
+      this.ta = h('textarea', { class: 'ohe-code-ta ohe-doc-ta', spellcheck: 'false', placeholder: '<!DOCTYPE html>… paste a full email HTML document. Merge tags work; {{unsubscribe_url}} is added if missing.', 'aria-label': 'Email HTML' });
+      this.ta.value = d.html || '';
+      this.frame = h('iframe', { class: 'ohe-doc-frame', sandbox: 'allow-same-origin', title: 'Coded email preview' });
+      this.toggle = h('button', { type: 'button', class: 'ohe-mini-btn', onclick: () => { this.showCode = !this.showCode; this.mode(); } }, 'Edit HTML');
+      const up = h('button', { type: 'button', class: 'ohe-mini-btn', onclick: () => pickFile('.html,.htm,text/html', (f) => { const r = new FileReader(); r.onload = () => { this.ta.value = String(r.result || ''); this.sync(); this.changed(); this.paint(); }; r.readAsText(f); }) }, 'Upload .html');
+      this.info = h('span', { class: 'ohe-hint' });
+      this.ta.addEventListener('input', () => { this.sync(); this.changed(); this.paintSoon(); });
+      this.ta.addEventListener('keydown', (e) => { if (e.key === 'Tab') { e.preventDefault(); this.ta.setRangeText('  ', this.ta.selectionStart, this.ta.selectionEnd, 'end'); } e.stopPropagation(); });
+      this.body.append(h('div', { class: 'ohe-doc', contenteditable: 'false' }, h('div', { class: 'ohe-code-bar' }, h('span', { class: 'ohe-hint' }, '</> Coded email · sent exactly as written'), this.info, h('span', { style: { flex: '1' } }), up, this.toggle), this.ta, this.frame));
+      this.paintSoon = debounce(() => this.paint(), 300);
+      this.showCode = !d.html;
+      this.mode();
+      this.paint();
+    }
+    mode() { this.ta.classList.toggle('hide', !this.showCode); this.toggle.textContent = this.showCode ? 'Preview' : 'Edit HTML'; if (this.showCode) setTimeout(() => this.ta.focus()); }
+    paint() {
+      const v = this.ta.value || '';
+      this.frame.srcdoc = v || '<p style="font:14px sans-serif;color:#888;padding:20px">Paste your HTML to see it here.</p>';
+      const kb = Math.round(new Blob([v]).size / 1024);
+      const unsub = /\{\{\s*unsubscribe_url\s*\}\}/i.test(v);
+      this.info.textContent = `${kb} KB · ${unsub ? 'unsubscribe link ✓' : 'unsubscribe footer will be added'}${/<script|\son[a-z]+\s*=/i.test(v) ? ' · scripts will be removed' : ''}`;
+    }
+    sync() { this.d.html = this.ta.value; }
+    focus() { this.showCode = true; this.mode(); }
+  }
+
+  /** Insert-snippet picker: choose a snippet and how to insert it (synced reference or editable copy). */
+  async function snippetPicker(ed) {
+    let items = [];
+    try { items = (await getJSON(`${snippetsUrl(ed)}.json`)).items || []; } catch {}
+    if (!items.length) { OHToast('No snippets yet — save blocks with ⋮⋮ → “Save as snippet”, or create one in Posts → Snippets', 5000); return null; }
+    const list = h('div', { class: 'ohe-snip-list', role: 'radiogroup' }, ...items.map((s, i) => h('label', { class: 'ohe-snip-i' }, h('input', { type: 'radio', name: 'snippet', value: s.id, checked: i === 0 ? true : null }), h('span', {}, h('strong', { text: s.name }), h('small', { text: s.description || s.summary })))));
+    const how = h('div', { class: 'ohe-snip-how' },
+      h('label', {}, h('input', { type: 'radio', name: 'how', value: 'synced', checked: true }), h('span', {}, h('strong', { text: 'Synced' }), h('small', { text: 'Stays linked — editing the snippet updates this post too' }))),
+      h('label', {}, h('input', { type: 'radio', name: 'how', value: 'copy' }), h('span', {}, h('strong', { text: 'Copy' }), h('small', { text: 'Inserts editable blocks — later snippet edits won’t affect this post' }))));
+    const f = await dialogBox('Insert a snippet', h('div', { class: 'ohe-form' }, list, how, h('p', { class: 'ohe-hint' }, h('a', { href: snippetsUrl(ed), target: '_blank' }, 'Manage snippets ↗'))), 'Insert');
+    if (!f) return null;
+    const sid = f.querySelector('[name=snippet]:checked')?.value;
+    const mode = f.querySelector('[name=how]:checked')?.value || 'synced';
+    const s = items.find((x) => x.id === sid);
+    if (!s) return null;
+    if (mode === 'synced') return [{ id: uid(), type: 'snippet', data: { snippet_id: s.id, name: s.name } }];
+    const r = await getJSON(`${snippetsUrl(ed)}/${encodeURIComponent(s.id)}/json`);
+    return (r.doc.blocks || []).map((b) => ({ ...b, id: uid() }));
+  }
+
+  /** Save a block (and optionally the blocks after it) as a named snippet; optionally swap them for a synced reference. */
+  async function saveAsSnippet(ed, it) {
+    const list = it.list;
+    const idx = list.items.indexOf(it);
+    const after = list.items.length - idx - 1;
+    const name = h('input', { class: 'input', name: 'name', placeholder: 'e.g. Signature, Sponsor banner, Footer CTA', required: true });
+    const count = h('input', { class: 'input', type: 'number', name: 'count', min: 1, max: after + 1, value: 1, style: { width: '90px' } });
+    const replace = h('input', { type: 'checkbox', name: 'replace', checked: true });
+    const body = h('div', { class: 'ohe-form' },
+      h('label', { class: 'field' }, h('span', { class: 'field-l', text: 'Snippet name' }), name),
+      h('label', { class: 'field' }, h('span', { class: 'field-l', text: 'Blocks to include' }), h('span', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, count, h('small', { class: 'ohe-hint', text: after ? `this block + up to ${after} below it` : 'this block' }))),
+      h('label', { class: 'check' }, replace, h('span', { text: ' Replace them here with the synced snippet' })));
+    const f = await dialogBox('Save as snippet', body, 'Save snippet');
+    if (!f) return;
+    const n = Math.max(1, Math.min(after + 1, Number(count.value) || 1));
+    const its = list.items.slice(idx, idx + n);
+    const blocks = its.map((x) => x.view.toJSON());
+    try {
+      const r = await postJSON(`${snippetsUrl(ed)}.json`, { name: name.value.trim() || 'Untitled snippet', blocks });
+      if (replace.checked) {
+        its.forEach((x) => list.remove(x, true));
+        list.insert({ id: uid(), type: 'snippet', data: { snippet_id: r.id, name: r.name } }, idx);
+        ed.changed();
+      }
+      OHToast(`Saved snippet “${r.name}”`);
+    } catch (e) { OHToast(e.message || 'Could not save the snippet', 5000); }
+  }
+
   const VIEWS = {
     paragraph: ParagraphView, heading: HeadingView, list: ListView, checklist: ChecklistView, quote: QuoteView, code: CodeView, html: HtmlView,
     image: ImageView, gallery: GalleryView, video: FileView, audio: FileView, attachment: FileView, embed: EmbedView, table: TableView,
     columns: ColumnsView, section: SectionView, dynamic: DynamicView, button: ButtonView, divider: DividerView, spacer: SpacerView, toc: TocView,
     paywall: PaywallView, subscribe: SubscribeView, poll: PollView, referral: ReferralView, recommendations: RecsView, ad: AdView, ad_auto: AdAutoView,
     podcast: PodcastView, product: ProductView, event: EventView,
+    snippet: SnippetView, recommended_products: RecProductsView, html_document: HtmlDocView,
   };
 
   // ───────── settings bar (generic field editor for block data) ─────────
@@ -1812,6 +1937,7 @@
       { label: 'Duplicate', value: 'dup', sub: isMac ? '⌘D' : 'Ctrl+D' }, { label: 'Move up', value: 'up' }, { label: 'Move down', value: 'down' },
       ...(ed.opts.onComment ? [{ label: 'Comment', value: 'comment' }] : []),
       { label: 'Wrap in section', value: 'wrap' },
+      ...(ed.opts.snippets !== false && !(ed.opts.exclude || []).includes('snippet') && !['snippet', 'paywall', 'html_document'].includes(t) ? [{ label: '⧉ Save as snippet…', value: 'snippet' }] : []),
       { sep: true }, { label: 'Delete', value: 'del', danger: true },
     ];
     const v = await menuBox(anchor, items);
@@ -1820,6 +1946,7 @@
     else if (v === 'ai') ed.aiEdit(anchor, it);
     else if (v.startsWith('show:')) { it.view.sync(); const ch = v.slice(5); if (ch) it.block.data.show_in = ch; else delete it.block.data.show_in; paintChannel(it); ed.changed(); }
     else if (v.startsWith('align:')) { it.view.sync(); it.block.data.align = v.slice(6) === 'left' ? undefined : v.slice(6); it.view.el.style.textAlign = it.block.data.align || ''; ed.changed(); }
+    else if (v === 'snippet') saveAsSnippet(ed, it);
     else if (v === 'dup') ed.duplicate(it);
     else if (v === 'up') ed.move(it, -1);
     else if (v === 'down') ed.move(it, 1);

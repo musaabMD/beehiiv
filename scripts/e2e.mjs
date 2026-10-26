@@ -265,6 +265,115 @@ sql(`UPDATE workspaces SET plan_status = 'active', plan_grace_until = NULL WHERE
 sql(`UPDATE sends SET status = 'cancelled' WHERE id = '${send4}'`);
 sql(`DELETE FROM subscribers WHERE id LIKE 'big%${rnd}' OR id LIKE 'bnc%${rnd}'`);
 
+console.log('13. Templates, snippets, coded emails, subject helper, product recommendations');
+{
+  const libCount = sql(`SELECT COUNT(*) AS n FROM templates WHERE pub_id IS NULL AND kind IN ('post','welcome','automation')`)[0].n;
+  ok(libCount >= 43, 'template library has 43+ designs', libCount);
+  r = await req('/app/posts/templates');
+  ok((await r.text()).includes(`data-template-count="${libCount}"`), 'templates page shows the library count');
+  r = await req('/app/posts/new');
+  ok(/data-template-count="\d+"/.test(await r.text()), 'new-post picker shows the template count');
+  const NEW_TPLS = ['tpl_lib_product_launch', 'tpl_lib_case_study', 'tpl_lib_holiday', 'tpl_lib_photo_roundup', 'tpl_lib_minimal_letter', 'tpl_lib_magazine', 'tpl_lib_recipe', 'tpl_lib_event_recap', 'tpl_lib_investor_update', 'tpl_lib_local_news', 'tpl_lib_job_board', 'tpl_lib_ama', 'tpl_lib_shop_picks', 'tpl_lib_coded_starter'];
+  let rendered = 0;
+  for (const tid of NEW_TPLS) {
+    const p = await api(key, 'POST', '/posts', { title: `Tpl ${tid} ${rnd}`, template_id: tid });
+    const e = await api(key, 'GET', `/posts/${p.body?.data?.id}/html?format=email`);
+    const w = await api(key, 'GET', `/posts/${p.body?.data?.id}/html?format=web`);
+    if (e.status === 200 && w.status === 200 && e.body.data.html.length > 1500 && !e.body.data.gmail_clipped && !/Unsupported block/.test(e.body.data.html + w.body.data.html)) rendered++;
+    else console.log('    template failed to render:', tid, e.status, w.status);
+  }
+  ok(rendered === NEW_TPLS.length, `all ${NEW_TPLS.length} new library templates render (email + web)`, rendered);
+
+  // synced snippets: a post references the snippet; editing the snippet changes the post's rendered email
+  r = await req('/app/posts/snippets.json', { json: { name: `Signature ${rnd}`, blocks: [{ type: 'paragraph', data: { html: 'Cheers, <b>Team Sig v1</b>' } }] } });
+  const snip = await r.json();
+  ok(r.status === 200 && !!snip.id, 'snippet saved from editor blocks', JSON.stringify(snip));
+  const sp = await api(key, 'POST', '/posts', { title: `Snippet post ${rnd}`, blocks: [{ type: 'paragraph', data: { html: 'Hello there' } }, { type: 'snippet', data: { snippet_id: snip.id, name: 'Signature' } }] });
+  const spId = sp.body?.data?.id;
+  let se = await api(key, 'GET', `/posts/${spId}/html?format=email`);
+  ok(se.body?.data?.html.includes('Team Sig v1'), 'synced snippet renders inside the post email');
+  await req(`/app/posts/snippets/${snip.id}`, { form: { name: `Signature ${rnd}`, description: 'Sign-off', content: JSON.stringify({ blocks: [{ type: 'paragraph', data: { html: 'Cheers, <b>Team Sig v2</b>' } }] }) } });
+  se = await api(key, 'GET', `/posts/${spId}/html?format=email`);
+  const sw = await api(key, 'GET', `/posts/${spId}/html?format=web`);
+  ok(se.body?.data?.html.includes('Team Sig v2') && !se.body.data.html.includes('Team Sig v1') && sw.body?.data?.html.includes('Team Sig v2'), 'editing the snippet updates every post that syncs it (email + web)');
+  r = await req(`/app/posts/snippets/${snip.id}/json`);
+  const copy = await r.json();
+  ok(copy.doc?.blocks?.length === 1 && copy.doc.blocks[0].type === 'paragraph', 'snippet can be inserted as an editable copy');
+  r = await req('/app/posts/snippets');
+  ok((await r.text()).includes('Synced in 1'), 'Posts → Snippets lists the snippet with its usage');
+  const rs = await api(key, 'GET', '/snippets');
+  ok(rs.status === 200 && rs.body.data.some((s) => s.id === snip.id), 'REST API lists snippets');
+
+  // custom-coded template: sanitized, unsubscribe link added, sent as written with tracked links
+  const codedHtml = `<!DOCTYPE html><html><head><title>Coded ${rnd}</title></head><body><h1 onclick="alert(1)">Hi {{subscriber.first_name|there}}</h1><script>alert(1)</script><p><a href="javascript:alert(1)">bad</a> <a href="https://example.com/landing">Landing</a></p></body></html>`;
+  r = await req('/app/posts/templates/coded', { form: { name: `Coded ${rnd}`, description: 'e2e', html: codedHtml } });
+  const ct = sql(`SELECT id, content FROM templates WHERE pub_id = '${pubId}' AND name = 'Coded ${rnd}'`)[0];
+  ok(ct && !/<script|onclick|javascript:/i.test(ct.content) && ct.content.includes('{{unsubscribe_url}}'), 'coded template is sanitized and gets an unsubscribe link');
+  r = await req(`/app/posts/templates/${ct?.id}/preview`);
+  const ctp = await r.text();
+  ok(ctp.includes(`<title>Coded ${rnd}</title>`) && !ctp.includes('oh-wrap'), 'coded template preview is the HTML as written (no layout wrapper)');
+  const cp = await api(key, 'POST', '/posts', { title: `Coded post ${rnd}`, template_id: ct?.id });
+  const cpId = cp.body?.data?.id;
+  const cw = await api(key, 'GET', `/posts/${cpId}/html?format=web`);
+  ok(/<iframe[^>]+sandbox="allow-same-origin allow-popups/.test(cw.body?.data?.html || ''), 'coded post renders in a sandboxed frame on the web');
+  const recip = `coded.${rnd}@gmail.com`;
+  const cs = await api(key, 'POST', '/subscriptions', { email: recip, name: 'Casey Coder', send_welcome: false });
+  sql(`UPDATE subscribers SET status = 'active' WHERE email = '${recip}'`);
+  let cres = await api(key, 'POST', `/posts/${cpId}/send`, {});
+  ok(cres.status === 202, 'coded post send started', JSON.stringify(cres.body).slice(0, 160));
+  for (let i = 0; i < 8; i++) { await cron(); await sleep(1200); if (sql(`SELECT COUNT(*) AS n FROM outbox WHERE to_email = '${recip}' AND subject LIKE '%Coded post ${rnd}%'`)[0].n) break; }
+  const co = sql(`SELECT html FROM outbox WHERE to_email = '${recip}' AND subject LIKE '%Coded post ${rnd}%' LIMIT 1`)[0];
+  ok(co && co.html.includes('Hi Casey') && co.html.includes('/t/c/') && /\/u\/[^"]+/.test(co.html) && !co.html.includes('%%OH_') && !co.html.includes('{{unsubscribe_url}}'), 'coded email sent as written: merge tags, tracked links, real unsubscribe link', (co?.html || '').slice(0, 300));
+
+  // subject line helper
+  r = await req('/app/posts/subject-helper/score', { json: { subject: 'FREE MONEY!!! ACT NOW', preview_text: '' } });
+  const bad = await r.json();
+  r = await req('/app/posts/subject-helper/score', { json: { subject: '{{subscriber.first_name|there}}, 3 ideas for a calmer week?', preview_text: 'Five minutes, three ideas and one tool we keep coming back to.' } });
+  const good = await r.json();
+  ok(bad.score < 50 && bad.checks.some((x) => x.id === 'spam' && x.status !== 'good') && bad.checks.some((x) => x.id === 'caps' && x.status === 'bad'), 'subject check flags spam words, caps and !!!', JSON.stringify(bad).slice(0, 200));
+  ok(good.score >= 85 && good.checks.find((x) => x.id === 'personal')?.status === 'good', 'subject check rewards a personalized question with preview text', good.score);
+  r = await req('/app/posts/subject-helper/suggest', { json: { subject: 'Our weekly update', title: 'Weekly update', text: 'News about the product.' } });
+  const sug = await r.json();
+  ok(r.status === 200 && sug.suggestions?.length >= 3 && sug.suggestions.every((x) => typeof x.score === 'number'), 'subject alternatives returned (AI or rule-based fallback)', JSON.stringify(sug).slice(0, 200));
+  r = await req('/app/posts/subject-helper/top');
+  const top = await r.json();
+  ok(r.status === 200 && Array.isArray(top.top) && top.top.length >= 1 && typeof top.top[0].open_rate === 'number', 'top past subjects by open rate', JSON.stringify(top).slice(0, 200));
+  r = await req(`/app/posts/${spId}/edit`);
+  ok((await r.text()).includes('/static/subject-helper.js'), 'post editor loads the subject helper');
+
+  // personalized product recommendations
+  const T0 = Date.now();
+  const prods = [['pa', 'Starter guide', '["basics"]'], ['pb', 'Advanced playbook', '["growth"]'], ['pc', 'Template pack', '["design"]'], ['pd', 'VIP masterclass', '["vip"]']];
+  for (const [k, name, tags] of prods) sql(`INSERT INTO products (id, pub_id, name, slug, description, kind, price_cents, currency, tags, status, created_at) VALUES ('${k}${rnd}', '${pubId}', '${name} ${rnd}', '${k}-${rnd}', 'About ${name}', 'download', 1900, 'usd', '${tags}', 'active', ${T0})`);
+  const ord = (n, email, p) => `('o${n}${rnd}', '${pubId}', 'product', '${p}${rnd}', NULL, '${email}', 1900, 'usd', 'paid', ${T0}, ${T0})`;
+  const buyer = `buyer.${rnd}@gmail.com`, fan = `fan.${rnd}@gmail.com`;
+  await api(key, 'POST', '/subscriptions', { email: buyer, name: 'Bea Buyer', send_welcome: false });
+  await api(key, 'POST', '/subscriptions', { email: fan, name: 'Vic Fan', tags: ['vip'], send_welcome: false });
+  sql(`UPDATE subscribers SET status = 'active' WHERE email IN ('${buyer}', '${fan}')`);
+  // others bought A+B and A+C; our buyer bought A → B and C are "also bought"; the VIP fan matches D by interest
+  sql(`INSERT INTO orders (id, pub_id, kind, ref_id, subscriber_id, email, amount_cents, currency, status, created_at, paid_at) VALUES ${[ord(1, 'x1@gmail.com', 'pa'), ord(2, 'x1@gmail.com', 'pb'), ord(3, 'x2@gmail.com', 'pa'), ord(4, 'x2@gmail.com', 'pc'), ord(5, 'x3@gmail.com', 'pa'), ord(6, 'x3@gmail.com', 'pb'), ord(7, buyer, 'pa')].join(',')}`);
+  const buyerId = sql(`SELECT id FROM subscribers WHERE email = '${buyer}'`)[0].id;
+  const fanId = sql(`SELECT id FROM subscribers WHERE email = '${fan}'`)[0].id;
+  const rb = await api(key, 'GET', `/products/recommendations?subscriber_id=${buyerId}&limit=3`);
+  const rf = await api(key, 'GET', `/products/recommendations?subscriber_id=${fanId}&limit=3`);
+  ok(rb.status === 200 && rb.body.data[0]?.id === `pb${rnd}` && rb.body.data[0].reason === 'also_bought' && !rb.body.data.some((x) => x.id === `pa${rnd}`), 'buyer gets co-purchased products first, never what they already bought', JSON.stringify(rb.body).slice(0, 300));
+  ok(rf.status === 200 && rf.body.data[0]?.id === `pd${rnd}` && rf.body.data[0].reason === 'interest', 'reader with a matching interest tag gets that product first', JSON.stringify(rf.body).slice(0, 300));
+  const anon = await api(key, 'GET', '/products/recommendations?limit=2');
+  ok(anon.body.data[0]?.id === `pa${rnd}` && anon.body.data[0].reason === 'popular', 'no signal falls back to bestsellers');
+  const rp = await api(key, 'POST', '/posts', { title: `Picks ${rnd}`, blocks: [{ type: 'paragraph', data: { html: 'Hi {{subscriber.first_name|there}}' } }, { type: 'recommended_products', data: { title: 'Picked for you', limit: 2 } }] });
+  const rpId = rp.body?.data?.id;
+  const rres = await api(key, 'POST', `/posts/${rpId}/send`, {});
+  ok(rres.status === 202, 'post with recommended products sends');
+  for (let i = 0; i < 8; i++) { await cron(); await sleep(1200); if (sql(`SELECT COUNT(*) AS n FROM outbox WHERE subject LIKE '%Picks ${rnd}%' AND to_email IN ('${buyer}', '${fan}')`)[0].n >= 2) break; }
+  const ob = sql(`SELECT html FROM outbox WHERE subject LIKE '%Picks ${rnd}%' AND to_email = '${buyer}'`)[0]?.html || '';
+  const of = sql(`SELECT html FROM outbox WHERE subject LIKE '%Picks ${rnd}%' AND to_email = '${fan}'`)[0]?.html || '';
+  ok(ob.includes(`>Advanced playbook ${rnd}</a>`) && !ob.includes(`>Starter guide ${rnd}</a>`) && ob.includes(`Readers who bought Starter guide ${rnd} also got this`) && of.includes(`>VIP masterclass ${rnd}</a>`), 'each subscriber gets their own picks in the sent email');
+  const tracked = (of.match(/href="([^"]*\/t\/c\/[^"]+)"/g) || []).map((x) => x.slice(6, -1).replace(/&amp;/g, '&'));
+  let hit = null;
+  for (const u of tracked) { const rr = await fetch(u.replace(/^https?:\/\/[^/]+/, BASE), { redirect: 'manual', headers: { 'user-agent': UA } }); const loc = rr.headers.get('location') || ''; if (loc.includes('/shop/') && loc.includes('utm_content=recommended_products')) { hit = loc; break; } }
+  ok(!!hit && hit.includes(`utm_campaign=`), 'recommendation click is tracked and lands on the product page with attribution', String(hit));
+}
+
 console.log('12. Errors');
 const errs = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
 ok(errs.length === 0, 'no server errors logged', JSON.stringify(errs).slice(0, 800));

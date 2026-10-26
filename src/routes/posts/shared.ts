@@ -168,3 +168,93 @@ export async function authorChoices(env: Env, pub: Publication) {
 }
 
 export { styleFor };
+
+// ───────── subject line helper (mirrored client-side in public/static/subject-helper.js) ─────────
+export const SPAM_WORDS = ['free', 'act now', 'buy now', 'click here', 'limited time', 'urgent', 'winner', 'guarantee', 'guaranteed', 'risk-free', 'risk free', 'no cost', 'cash', '100%', 'earn money', 'make money', 'double your', 'cheap', 'order now', 'once in a lifetime', 'congratulations', 'you won', 'prize', 'credit card', 'no obligation', 'miracle', 'lowest price', 'best price', 'call now', 'apply now', 'exclusive deal', 'save big', 'incredible deal', 'last chance', 'dear friend', 'not spam', 'viagra', 'casino', '$$$', 'cash bonus', 'get paid'];
+
+export interface SubjectCheck { id: string; label: string; status: 'good' | 'warn' | 'bad'; detail: string }
+export interface SubjectScore { score: number; grade: 'great' | 'good' | 'fair' | 'poor'; chars: number; words: number; emojis: number; spam: string[]; checks: SubjectCheck[] }
+
+const EMOJI_RE = /\p{Extended_Pictographic}/gu;
+const reEsc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const CAPS_OK = ['FAQ', 'USA', 'CEO', 'API', 'NYC', 'SEO', 'PDF', 'CTO', 'CFO', 'NFT', 'ETF', 'IPO', 'GDP', 'NBA', 'NFL'];
+
+export function scoreSubject(subjectRaw: string, previewRaw = ''): SubjectScore {
+  const subject = String(subjectRaw || '').trim();
+  const visible = subject.replace(/\{\{\s*([a-z0-9_.]+)\s*(?:\|\s*([^}]*?))?\s*\}\}/gi, (_, k: string, fb: string) => fb || (k.includes('name') ? 'Alex' : 'X'));
+  const chars = [...visible].length;
+  const words = visible ? visible.split(/\s+/).filter(Boolean).length : 0;
+  const emojis = (visible.match(EMOJI_RE) || []).length;
+  const lower = visible.toLowerCase();
+  const spam = SPAM_WORDS.filter((w) => new RegExp(`(^|[^a-z0-9])${reEsc(w)}($|[^a-z0-9])`, 'i').test(lower));
+  const capsWords = (visible.match(/\b[A-Z]{3,}\b/g) || []).filter((w) => !CAPS_OK.includes(w));
+  const letters = visible.replace(/[^A-Za-z]/g, '');
+  const allCaps = letters.length >= 6 && letters === letters.toUpperCase();
+  const bangs = (visible.match(/!/g) || []).length;
+  const preview = String(previewRaw || '').trim();
+  const personalized = /\{\{\s*subscriber\./i.test(subject);
+  const question = /\?/.test(visible);
+  const number = /\d/.test(visible);
+  const checks: SubjectCheck[] = [];
+  if (!chars) return { score: 0, grade: 'poor', chars, words, emojis, spam, checks: [{ id: 'length', label: 'Length', status: 'bad', detail: 'Write a subject line' }] };
+  let score = 100;
+  if (chars >= 30 && chars <= 50) checks.push({ id: 'length', label: 'Length', status: 'good', detail: `${chars} characters — in the 30–50 sweet spot` });
+  else if (chars >= 20 && chars <= 60) { score -= 8; checks.push({ id: 'length', label: 'Length', status: 'warn', detail: `${chars} characters — aim for 30–50 so phones show all of it` }); }
+  else { score -= 20; checks.push({ id: 'length', label: 'Length', status: 'bad', detail: `${chars} characters — ${chars < 20 ? 'too short to say much' : 'mobile inboxes cut off after ~60'}` }); }
+  if (words >= 4 && words <= 9) checks.push({ id: 'words', label: 'Words', status: 'good', detail: `${words} words — easy to scan` });
+  else { score -= 6; checks.push({ id: 'words', label: 'Words', status: 'warn', detail: `${words} word${words === 1 ? '' : 's'} — 4 to 9 words performs best` }); }
+  if (!preview) { score -= 10; checks.push({ id: 'preview', label: 'Preview text', status: 'warn', detail: 'Not set — inboxes will show the first line of the email instead' }); }
+  else if (preview.toLowerCase() === subject.toLowerCase()) { score -= 8; checks.push({ id: 'preview', label: 'Preview text', status: 'warn', detail: 'Repeats the subject — use it for a second hook' }); }
+  else if ([...preview].length < 35) { score -= 3; checks.push({ id: 'preview', label: 'Preview text', status: 'warn', detail: `Set (${[...preview].length} chars) — 40–110 characters fills the preview` }); }
+  else checks.push({ id: 'preview', label: 'Preview text', status: 'good', detail: `Set (${[...preview].length} characters)` });
+  if (spam.length) { score -= Math.min(30, 12 * spam.length); checks.push({ id: 'spam', label: 'Spam triggers', status: spam.length > 1 ? 'bad' : 'warn', detail: `Avoid ${spam.map((w) => `“${w}”`).join(', ')}` }); }
+  else checks.push({ id: 'spam', label: 'Spam triggers', status: 'good', detail: 'No common spam-trigger words' });
+  const multiPunct = bangs >= 2 || /[!?]{2,}/.test(visible);
+  if (allCaps || capsWords.length >= 2 || multiPunct) { score -= 15; checks.push({ id: 'caps', label: 'Caps & !!!', status: 'bad', detail: allCaps ? 'ALL CAPS reads as shouting and hurts deliverability' : multiPunct ? 'Several “!” or “?!” — one at most' : `Words in caps: ${capsWords.slice(0, 3).join(', ')}` }); }
+  else if (capsWords.length === 1 || bangs === 1) { score -= 3; checks.push({ id: 'caps', label: 'Caps & !!!', status: 'warn', detail: capsWords.length ? `“${capsWords[0]}” in caps — fine once` : 'One “!” — fine, don’t add more' }); }
+  else checks.push({ id: 'caps', label: 'Caps & !!!', status: 'good', detail: 'No ALL CAPS or !!!' });
+  if (emojis <= 2) checks.push({ id: 'emoji', label: 'Emoji', status: 'good', detail: emojis ? `${emojis} emoji — adds personality` : 'None — one emoji can help you stand out' });
+  else { score -= 10; checks.push({ id: 'emoji', label: 'Emoji', status: 'bad', detail: `${emojis} emoji — keep it to one or two` }); }
+  if (personalized) { score += 5; checks.push({ id: 'personal', label: 'Personalization', status: 'good', detail: 'Uses a merge tag — personal subjects tend to get more opens' }); }
+  else checks.push({ id: 'personal', label: 'Personalization', status: 'warn', detail: 'Try {{subscriber.first_name|there}} for a personal touch' });
+  if (question || number) { score += 4; checks.push({ id: 'hook', label: 'Question / number', status: 'good', detail: `${[question && 'Asks a question', number && 'uses a number'].filter(Boolean).join(' and ')} — both spark curiosity` }); }
+  else checks.push({ id: 'hook', label: 'Question / number', status: 'warn', detail: 'A question or a specific number often lifts opens' });
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  return { score, grade: score >= 85 ? 'great' : score >= 70 ? 'good' : score >= 50 ? 'fair' : 'poor', chars, words, emojis, spam, checks };
+}
+
+/** Rule-based alternatives when Workers AI isn't available. */
+export function heuristicSubjects(subjectRaw: string, title = ''): string[] {
+  let base = String(subjectRaw || title || '').trim().replace(/!{2,}/g, '!').replace(/\?{2,}/g, '?');
+  const letters = base.replace(/[^A-Za-z]/g, '');
+  if (letters.length >= 6 && letters === letters.toUpperCase()) base = base.charAt(0) + base.slice(1).toLowerCase();
+  for (const w of SPAM_WORDS) base = base.replace(new RegExp(`(^|[^a-z0-9])${reEsc(w)}(?=$|[^a-z0-9])`, 'ig'), '$1').replace(/\s{2,}/g, ' ').trim();
+  base = base.replace(/^[^A-Za-z0-9{]+/, '').trim();
+  if (!base) return [];
+  // already personalized: work on the text after the merge tag so we never stack two greetings
+  const hasTag = /\{\{\s*subscriber\./i.test(base);
+  const core = (hasTag ? base.replace(/^\s*\{\{[^}]+\}\}\s*[,:—–-]?\s*/, '') : base).replace(/[.!]+$/, '') || base;
+  const lc = /^[A-Z][a-z]/.test(core) ? core.charAt(0).toLowerCase() + core.slice(1) : core;
+  const cap = core.charAt(0).toUpperCase() + core.slice(1);
+  const short = core.length > 48 && !/\{\{/.test(core) ? core.slice(0, 46).replace(/\s+\S*$/, '') + '…' : core;
+  const out = [
+    `{{subscriber.first_name|Friend}}, ${lc}`,
+    /\?$/.test(core) ? `Quick question: ${lc}` : `Why ${lc} matters`,
+    /\d/.test(core) ? `${cap} (5-minute read)` : `3 things to know about ${lc}`,
+    `${cap} 👀`,
+    `Quick read: ${lc}`,
+  ];
+  const orig = String(subjectRaw || '').toLowerCase();
+  return [...new Set(out.map((s) => s.slice(0, 120)))].filter((s) => s.toLowerCase() !== orig);
+}
+
+/** The publication's best past subject lines by unique open rate (sent posts with ≥ minRecipients). */
+export async function topSubjects(env: Env, pubId: string, limit = 8, minRecipients = 1) {
+  const rows = await all<{ id: string; title: string; subject: string; published_at: number | null; recipients: number; opens: number }>(env, `SELECT p.id, p.title, COALESCE(NULLIF(p.email_subject, ''), p.title) AS subject, p.published_at,
+      (SELECT COUNT(DISTINCT d.subscriber_id) FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = p.id AND s.kind NOT IN ('test','try') AND d.status IN ('sent','complained')) AS recipients,
+      (SELECT COUNT(DISTINCT d.subscriber_id) FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = p.id AND s.kind NOT IN ('test','try') AND d.opened_at IS NOT NULL) AS opens
+    FROM posts p WHERE p.pub_id = ? AND p.status IN ('published','archived') AND p.platform != 'web' ORDER BY COALESCE(p.published_at, p.updated_at) DESC LIMIT 200`, pubId);
+  const sent = rows.filter((r) => r.recipients >= minRecipients).map((r) => ({ ...r, open_rate: r.recipients ? r.opens / r.recipients : 0 }));
+  const avg = sent.length ? sent.reduce((n, r) => n + r.open_rate, 0) / sent.length : null;
+  return { average_open_rate: avg, sent: sent.length, top: sent.sort((a, b) => b.open_rate - a.open_rate || b.recipients - a.recipients).slice(0, limit) };
+}
