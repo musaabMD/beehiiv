@@ -326,6 +326,10 @@
     return !t ? 'all at once' : t.mode === 'sto' ? 'send-time optimization (each subscriber’s usual open hour, within 24h)' : `${t.local_time} in each subscriber’s time zone`;
   }
   $('#pe-timing-at')?.addEventListener('focus', () => { const r = $('input[name="pe-timing"][value=timezone]'); if (r) r.checked = true; });
+  $('#pe-timing')?.addEventListener('change', () => {
+    const li = $$('#pe-checklist li').find((x) => x.textContent.includes('Delivery:'));
+    if (li) li.textContent = `✓ Delivery: ${timingLabel()}`;
+  });
   function updateSendBtn() {
     const when = $('input[name="pe-when"]:checked')?.value;
     const m = serializeMeta();

@@ -82,11 +82,14 @@ Dashboard shared endpoints:
 | inbound.ts | DSN / ARF / mailto-unsubscribe parsing and the shared bounce + complaint application used by the Worker `email()` handler (Email Routing), `queue()` handler (Email Sending events) and `/hooks/bounce`, `/hooks/fbl` |
 | render.ts | editor doc → web HTML / table-based email HTML; merge tags; dynamic content; paywall; TOC; footnotes; `emailLayout` |
 | sanitize.ts | allowlist sanitizer that balances tags |
-| sender.ts | `startSend`, batches, A/B subject tests, cohort tests, warmup caps, deferred retries (26h), `publishPost`, `sendTest`, `buildEmail` |
+| sender.ts | `startSend`, batches, A/B + multivariate tests (subject, preview text, sender name, `posts.alt_content` body; `normalizeAb`), timed sends, cohort tests, warmup caps, deferred retries (26h), `publishPost`, `sendTest`, `buildEmail` |
 | subscribers.ts | `subscribe` (validation, double opt-in, referrals, lists, tags), `unsubscribe`, tags, fields, lists, referral rewards, engagement, signed unsubscribe tokens |
 | segments.ts | rule engine → SQL (`compile`, `countMatching`, `listMatching`, `subscriberMatches`, `recalcSegment`), `FIELDS` |
 | catalog.ts | `ruleCatalog(env, pubId)` for the rule builder |
-| automations.ts | engine: triggers, `enroll`, `processRun`, steps, polling triggers, `publishDraft` |
+| automations.ts | engine: triggers (several entry points per automation, OR'ed: `triggerList`/`packTriggers`), `enroll`, `processRun`, steps, polling triggers, `publishDraft` |
+| automation-templates.ts | 45-template automation library (categories, real email copy, flow `outline`); templates whose trigger type isn't registered (e.g. `cart_abandoned`) are hidden |
+| automation-webhooks.ts | incoming-webhook entry point: `POST /hooks/automations/<secret>` (JSON or form; email/name/field paths) → subscribe + enroll |
+| sendtime.ts | send-time optimization (each subscriber's usual open hour) and delivery by time zone (`subscribers.timezone` from `request.cf.timezone`); sender.ts parks recipients as `scheduled` deliveries |
 | events.ts | `emit()` bus (activity log + listeners), `WEBHOOK_EVENTS` |
 | webhooks.ts | signed webhook delivery with retries; payload versions (`WEBHOOK_VERSIONS`, per-version upgrade transforms, `buildPayload`); every attempt stored in `webhook_delivery_attempts`; `attemptDelivery` for manual retry |
 | jobs.ts | `enqueue`, `registerJob`, `registerPeriodic`, `runJobs`, `kick`, `logError` |
