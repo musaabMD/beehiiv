@@ -45,7 +45,8 @@ function sql(q) {
     }
   }
 }
-const cron = () => fetch(BASE + '/__scheduled').catch(() => null);
+// wrangler dev exposes the scheduled handler at /cdn-cgi/local/scheduled; /__scheduled is the older route
+const cron = () => fetch(BASE + '/cdn-cgi/local/scheduled').then((r) => (r.status === 404 ? fetch(BASE + '/__scheduled') : r)).catch(() => null);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 console.log(`E2E against ${BASE}`);
@@ -842,5 +843,124 @@ console.log('12. Errors');
 const errs = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
 ok(errs.length === 0, 'no server errors logged', JSON.stringify(errs).slice(0, 800));
 
+__restore();
+{ // automation templates, entry points, webhooks, multivariate tests, send timing
+console.log('13. Automation templates, multiple entry points, incoming webhooks, multivariate tests, send timing');
+cookies = userCookies;
+const tplList = await api(key, 'GET', '/automation_templates');
+ok(tplList.status === 200 && tplList.body.data.length >= 43 && new Set(tplList.body.data.map((t) => t.category)).size >= 10, `automation template library (${tplList.body?.data?.length} templates, categories + outlines)`);
+r = await req('/app/automations');
+let ah13 = await r.text();
+ok(r.status === 200 && (ah13.match(/class="af-gal-card"/g) || []).length >= 44 && ah13.includes('data-preview="welcome_5day"') && ah13.includes('data-gal-cat="E-commerce"'), 'New automation picker shows categories, cards and flow previews');
+r = await req('/app/automations/new', { form: { name: '', template: 'welcome_5day' } });
+const fromTpl = (r.headers.get('location') || '').split('/').pop();
+const tplRow = sql(`SELECT name, draft_trigger, draft_steps, status FROM automations WHERE id = '${fromTpl}'`)[0];
+ok(tplRow && tplRow.status === 'draft' && JSON.parse(tplRow.draft_steps).filter((s) => s.type === 'send_email').length === 5 && JSON.parse(tplRow.draft_trigger).type === 'welcome', 'template creates a draft automation with real emails', JSON.stringify(tplRow || {}).slice(0, 160));
+r = await req(`/app/automations/${fromTpl}`); ok(r.status === 200 && (await r.text()).includes('/hooks/automations/awh_'), 'builder shows the secret webhook URL');
+
+// several entry points (OR) + incoming webhook
+const multi = await api(key, 'POST', '/automations', { name: `Multi ${rnd}`, triggers: [{ type: 'tag_added', config: { tag: 'e2e-a' } }, { type: 'tag_added', config: { tag: 'e2e-b' } }, { type: 'webhook', config: { tags: ['from-hook'], field_map: 'company = data.company' } }], steps: [{ type: 'send_email', config: { subject: `Multi hello ${rnd}`, markdown: 'Hi from a multi-entry automation' } }], activate: true });
+const mid = multi.body?.data?.id;
+ok(multi.status === 201 && multi.body.data.status === 'active' && multi.body.data.triggers.length === 3, 'REST create with 3 entry points (triggers: [])', JSON.stringify(multi.body).slice(0, 200));
+const tagSub = await api(key, 'POST', '/subscriptions', { email: `multi.${rnd}@gmail.com`, send_welcome: false });
+await api(key, 'POST', `/subscriptions/${tagSub.body.data.id}/tags`, { tags: ['e2e-b'] });
+await sleep(500);
+ok(sql(`SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id = '${mid}' AND subscriber_id = '${tagSub.body.data.id}'`)[0].n === 1, 'second entry point (tag e2e-b) enrolls');
+const legacy = await api(key, 'POST', '/automations', { name: `Legacy ${rnd}`, trigger: { type: 'tag_added', config: { tag: 'x' } }, steps: [] });
+ok(legacy.status === 201 && legacy.body.data.draft.trigger.type === 'tag_added', 'single `trigger` still accepted');
+const hook = await api(key, 'GET', `/automations/${mid}/webhook`);
+const hookPath = new URL(hook.body.data.url).pathname;
+ok(hook.body.data.enabled && hookPath.startsWith('/hooks/automations/awh_'), 'webhook URL via API');
+const hookEmail = `hook.${rnd}@gmail.com`;
+let hr = await fetch(BASE + hookPath, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ event: 'invitee.created', data: { email: hookEmail, name: 'Hook Person', company: 'Acme' }, timezone: 'Europe/Paris' }) });
+let hj = await hr.json();
+const hsub = sql(`SELECT id, status, custom, timezone FROM subscribers WHERE email = '${hookEmail}'`)[0];
+ok(hr.status === 202 && hj.enrolled === true && hsub && hsub.status === 'active' && JSON.parse(hsub.custom).company === 'Acme' && hsub.timezone === 'Europe/Paris', 'POST to webhook creates subscriber (field mapping, time zone) and enrolls', JSON.stringify(hj));
+ok(sql(`SELECT COUNT(*) AS n FROM subscriber_tags WHERE subscriber_id = '${hsub?.id}' AND tag = 'from-hook'`)[0].n === 1, 'webhook tags applied');
+hr = await fetch(BASE + hookPath, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ form_response: { answers: [{ type: 'email', email: `tf.${rnd}@gmail.com` }] } }) });
+ok(hr.status === 202 && sql(`SELECT COUNT(*) AS n FROM subscribers WHERE email = 'tf.${rnd}@gmail.com'`)[0].n === 1, 'Typeform-style nested email is detected');
+hr = await fetch(BASE + hookPath, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hello: 'world' }) });
+ok(hr.status === 422, 'no email → 422');
+hr = await fetch(BASE + '/hooks/automations/awh_doesnotexist000', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+ok(hr.status === 404, 'unknown webhook → 404');
+const legacyHook = (await api(key, 'GET', `/automations/${legacy.body.data.id}/webhook`)).body.data.url;
+hr = await fetch(BASE + new URL(legacyHook).pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: hookEmail }) });
+ok(hr.status === 409, 'automation without a webhook entry point → 409');
+let limited = false;
+for (let i = 0; i < 125 && !limited; i++) { const x = await fetch(BASE + hookPath, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); if (x.status === 429) limited = true; }
+ok(limited, 'webhook is rate limited (429)');
+sql(`DELETE FROM rate_limits WHERE key LIKE 'awh%'`);
+// draft/live: editing entry points goes to the draft until published
+let ed = await api(key, 'PATCH', `/automations/${mid}`, { triggers: [{ type: 'tag_added', config: { tag: 'e2e-c' } }] });
+ok(ed.body.data.has_draft && ed.body.data.triggers.length === 3, 'entry point edits go to the draft (live keeps 3)');
+ed = await api(key, 'POST', `/automations/${mid}/publish`, {});
+ok(ed.body.data.triggers.length === 1 && ed.body.data.trigger.config.tag === 'e2e-c', 'publishing the draft makes the new entry points live');
+
+// multivariate test: subject × sender name × preview × content body
+const mvSubs = 40;
+fakeSubs(mvSubs, 'mv');
+sql(`UPDATE subscribers SET timezone = 'Asia/Tokyo' WHERE id LIKE 'mv%${rnd}'`);
+const mvPost = await newPost('Multivariate');
+sres = await api(key, 'POST', `/posts/${mvPost}/send`, { ab_test: { variants: [{ subject: `MV A ${rnd}` }, { subject: `MV B ${rnd}`, from_name: 'Variant Sender', preview_text: 'Preview B', content: 'b' }], sample_pct: 50, wait_minutes: 5, metric: 'opens' }, alt_markdown: `Variant body XYZ${rnd}` });
+const mvSend = sres.body?.data?.send_id;
+ok(sres.status === 202 && sql(`SELECT status FROM sends WHERE id = '${mvSend}'`)[0].status === 'testing', 'multivariate send starts in test phase', JSON.stringify(sres.body).slice(0, 200));
+for (let i = 0; i < 6; i++) { await cron(); await sleep(1200); if (sql(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'send.ab_winner' AND payload LIKE '%${mvSend}%'`)[0].n) break; }
+const vRows = sql(`SELECT variant, COUNT(*) AS n FROM deliveries WHERE send_id = '${mvSend}' GROUP BY variant`);
+ok(vRows.length === 2 && vRows.every((v) => v.n > 0), 'sample split across variants A and B', JSON.stringify(vRows));
+const bMail = sql(`SELECT from_email, html FROM outbox WHERE subject = 'MV B ${rnd}' LIMIT 1`)[0];
+const aMail = sql(`SELECT from_email, html FROM outbox WHERE subject = 'MV A ${rnd}' LIMIT 1`)[0];
+ok(bMail && bMail.from_email.startsWith('Variant Sender') && bMail.html.includes(`XYZ${rnd}`) && bMail.html.includes('Preview B'), 'variant B uses its sender name, preview text and content body', (bMail?.from_email || ''));
+ok(aMail && !aMail.html.includes(`XYZ${rnd}`), 'variant A keeps the main content');
+sql(`UPDATE deliveries SET opened_at = ${Date.now()} WHERE send_id = '${mvSend}' AND variant = 'B'`);
+sql(`UPDATE jobs SET run_at = 0 WHERE kind = 'send.ab_winner' AND status = 'pending' AND payload LIKE '%${mvSend}%'`);
+for (let i = 0; i < 8; i++) { await cron(); await sleep(1200); if (sql(`SELECT status FROM sends WHERE id = '${mvSend}'`)[0].status === 'sent') break; }
+const mvAfter = sql(`SELECT status, options FROM sends WHERE id = '${mvSend}'`)[0];
+ok(mvAfter.status === 'sent' && JSON.parse(mvAfter.options).winner === 'B' && sql(`SELECT COUNT(*) AS n FROM deliveries WHERE send_id = '${mvSend}'`)[0].n >= mvSubs, 'winner (B) chosen by opens and sent to the rest', mvAfter.status);
+r = await req(`/app/posts/${mvPost}`); let mvh = await r.text();
+ok(mvh.includes('data-ab-results') && mvh.includes('Multivariate test results') && mvh.includes('Variant Sender'), 'post analytics reports per-variant results');
+
+// delivery by time zone: UTC readers at the chosen local time now, Tokyo readers later
+const nowD = new Date(); const hhmm = `${String(nowD.getUTCHours()).padStart(2, '0')}:${String(nowD.getUTCMinutes()).padStart(2, '0')}`;
+sql(`UPDATE subscribers SET timezone = 'UTC' WHERE id IN (SELECT id FROM subscribers WHERE id LIKE 'mv%${rnd}' ORDER BY id LIMIT 10)`);
+const tzPost = await newPost('Timezones');
+sres = await api(key, 'POST', `/posts/${tzPost}/send`, { send_timing: { mode: 'timezone', local_time: hhmm } });
+const tzSend = sres.body?.data?.send_id;
+for (let i = 0; i < 6; i++) { await cron(); await sleep(1200); if (sql(`SELECT COUNT(*) AS n FROM deliveries WHERE send_id = '${tzSend}' AND status = 'sent'`)[0].n >= 10) break; }
+const tzRows = sql(`SELECT s.timezone, d.status, d.next_attempt_at FROM deliveries d JOIN subscribers s ON s.id = d.subscriber_id WHERE d.send_id = '${tzSend}'`);
+const tokyo = tzRows.filter((x) => x.timezone === 'Asia/Tokyo');
+const tokyoLocal = tokyo[0] && new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(tokyo[0].next_attempt_at));
+ok(tzRows.filter((x) => x.timezone === 'UTC').every((x) => x.status === 'sent') && tokyo.length >= 30 && tokyo.every((x) => x.status === 'scheduled') && tokyoLocal === hhmm, `delivery by time zone: UTC readers sent now, Tokyo readers scheduled for ${tokyoLocal} Tokyo time`, JSON.stringify(tzRows.slice(0, 3)));
+ok(sql(`SELECT status FROM sends WHERE id = '${tzSend}'`)[0].status === 'sending', 'timed send stays open until the last time zone');
+r = await req(`/app/posts/${tzPost}`); ok((await r.text()).includes('data-send-timing'), 'post analytics shows timed-delivery progress');
+// safety still applies: a paused timed send delivers nothing more
+const schedBefore = sql(`SELECT COUNT(*) AS n FROM deliveries WHERE send_id = '${tzSend}' AND status = 'scheduled'`)[0].n;
+sql(`UPDATE sends SET status = 'paused' WHERE id = '${tzSend}'`);
+sql(`UPDATE deliveries SET next_attempt_at = 0 WHERE send_id = '${tzSend}' AND status = 'scheduled'`);
+sql(`INSERT INTO jobs (id, kind, payload, run_at, status, attempts, created_at) SELECT 'j${rnd}', 'send.batch', '{"send_id":"${tzSend}"}', 0, 'pending', 0, 0`);
+await cron(); await sleep(1200);
+ok(sql(`SELECT COUNT(*) AS n FROM deliveries WHERE send_id = '${tzSend}' AND status = 'scheduled'`)[0].n === schedBefore && schedBefore >= tokyo.length, 'paused timed send keeps its scheduled deliveries');
+sql(`UPDATE sends SET status = 'cancelled' WHERE id = '${tzSend}'`);
+
+// send-time optimization: a reader who always opens at 05:xx UTC gets it at 05:xx
+const stoSub = sql(`SELECT id FROM subscribers WHERE id LIKE 'mv%${rnd}' ORDER BY id DESC LIMIT 1`)[0].id;
+const anyDel = sql(`SELECT id, send_id FROM deliveries WHERE subscriber_id = '${stoSub}' LIMIT 1`)[0];
+const h5 = Date.UTC(2026, 9, 1, 5, 10);
+for (let i = 0; i < 3; i++) sql(`INSERT INTO opens (id, delivery_id, send_id, pub_id, is_bot, created_at) VALUES ('op${i}${rnd}', '${anyDel.id}', '${anyDel.send_id}', '${pubId}', 0, ${h5 + i * 86400000})`);
+const stoPost = await newPost('STO');
+sres = await api(key, 'POST', `/posts/${stoPost}/send`, { send_timing: { mode: 'sto' } });
+const stoSend = sres.body?.data?.send_id;
+for (let i = 0; i < 6; i++) { await cron(); await sleep(1200); if (sql(`SELECT COUNT(*) AS n FROM deliveries WHERE send_id = '${stoSend}'`)[0].n >= mvSubs) break; }
+const stoRow = sql(`SELECT status, next_attempt_at, sent_at FROM deliveries WHERE send_id = '${stoSend}' AND subscriber_id = '${stoSub}'`)[0];
+const stoAt = stoRow && (stoRow.next_attempt_at || stoRow.sent_at);
+ok(stoRow && new Date(stoAt).getUTCHours() === 5 && stoAt - Date.now() < 86400000 + 60000, 'send-time optimization: planned at the reader\'s usual open hour (05 UTC, within 24h)', JSON.stringify(stoRow));
+sql(`UPDATE sends SET status = 'cancelled' WHERE id = '${stoSend}'`);
+const mcpT = await fetch(`${BASE}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_automation_templates', arguments: { category: 'E-commerce' } } }) });
+const mtj = await mcpT.json();
+ok(mcpT.status === 200 && !mtj.result?.isError && JSON.stringify(mtj.result).includes('post_purchase'), 'MCP list_automation_templates');
+sql(`DELETE FROM subscribers WHERE id LIKE 'mv%${rnd}'`);
+const errs13 = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
+ok(errs13.length === 0, 'no server errors logged (section 13)', JSON.stringify(errs13).slice(0, 800));
+
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

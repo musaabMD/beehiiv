@@ -4,7 +4,7 @@
 // - A/B subject tests: sample phase → winner by opens/clicks → remainder
 // - warmup caps per sending domain, blocklist pause, deferred retries for 26h, tracking pixel + click wrapping
 import type { Env, Publication, Post, Subscriber } from '../types';
-import { one, all, run, insert, val } from './db';
+import { one, all, run, insert, val, stmt, batch } from './db';
 import { emit } from './events';
 import { registerJob, registerPeriodic, enqueue, logError } from './jobs';
 import { renderDoc, emailLayout, parseDoc, styleFor, applyMerge, mergeVars, type Doc, type StyleTokens } from './render';
@@ -16,6 +16,7 @@ import { id, now, sha256, parseJSON, mailboxProvider, domainOf, HOUR, DAY, MIN, 
 import { assertCanSend, SendBlockedError, showsBranding, emailBrandingHtml, getWorkspace, ownerOf } from './plans';
 import { needsApproval, requestApproval, checkCampaign, rampRemaining, workspaceSuspended } from './safety';
 import { replyToFor } from './sharedsender';
+import { normalizeTiming, planTimes, type SendTiming } from './sendtime';
 
 export interface SendOptions {
   segment_ids?: string[];
@@ -23,13 +24,75 @@ export interface SendOptions {
   list_id?: string | null;
   audience?: 'all' | 'free' | 'premium';
   tier_ids?: string[];
-  ab?: { subjects: string[]; sample_pct: number; wait_minutes: number; metric: 'opens' | 'clicks' } | null;
+  ab?: AbTest | null;
+  /** send-time optimization / delivery by time zone (lib/sendtime) */
+  timing?: SendTiming | null;
   cohorts?: Array<{ name: string; pct: number }> | null;
   phase?: 'test' | 'main';
   winner?: string | null;
   only_subscriber_ids?: string[];
+  /** when the A/B winner was picked (deliveries before it are the test sample) */
+  ab_decided_at?: number;
   /** override subject line for this send (e.g. resend to non-openers) */
   subject?: string | null;
+}
+
+/**
+ * A/B + multivariate test (posts.ab_test). `subjects[i]` is variant i's subject (letters A–E); `variants[i]` optionally
+ * changes the preview text, the sender name and/or the content body ('b' = posts.alt_content, "Variant B content").
+ * Up to 4 variants when any dimension other than the subject is tested (5 subject-only variants for API compatibility).
+ */
+export interface AbVariant { subject?: string; preview_text?: string; from_name?: string; content?: 'a' | 'b' }
+export interface AbTest { subjects: string[]; variants?: AbVariant[]; sample_pct: number; wait_minutes: number; metric: 'opens' | 'clicks'; winner?: string | null }
+
+const clampN = (v: unknown, lo: number, hi: number, d: number) => { const n = Math.round(Number(v)); return isFinite(n) && v !== '' && v !== null && v !== undefined ? Math.min(hi, Math.max(lo, n)) : d; };
+
+/** Validate an A/B / multivariate config from the editor, REST or MCP. null = no (valid) test. */
+export function normalizeAb(input: any): AbTest | null {
+  if (!input || typeof input !== 'object') return null;
+  const rawVariants: any[] | null = Array.isArray(input.variants) ? input.variants.slice(0, 4) : null;
+  let variants: AbVariant[] | undefined;
+  let subjects: string[];
+  if (rawVariants && rawVariants.length) {
+    variants = rawVariants.map((v, i) => ({
+      subject: String(v?.subject ?? input.subjects?.[i] ?? '').trim().slice(0, 200),
+      preview_text: String(v?.preview_text ?? '').trim().slice(0, 200) || undefined,
+      from_name: String(v?.from_name ?? '').trim().slice(0, 80) || undefined,
+      content: v?.content === 'b' ? 'b' : 'a',
+    }));
+    subjects = variants.map((v) => v.subject || '');
+    // only subjects differ → plain subject test (compact storage)
+    if (variants.every((v) => !v.preview_text && !v.from_name && v.content === 'a')) { subjects = subjects.filter(Boolean); variants = undefined; }
+  } else {
+    subjects = (Array.isArray(input.subjects) ? input.subjects : []).map((s: any) => String(s ?? '').trim().slice(0, 200)).filter(Boolean).slice(0, 5);
+  }
+  if (subjects.length < 2) return null;
+  const sig = (i: number) => JSON.stringify([subjects[i] || '', variants?.[i]?.preview_text || '', variants?.[i]?.from_name || '', variants?.[i]?.content || 'a']);
+  if (new Set(subjects.map((_, i) => sig(i))).size < 2) return null; // every variant identical
+  return {
+    subjects, ...(variants ? { variants } : {}),
+    sample_pct: clampN(input.sample_pct, 2, 50, 20), wait_minutes: clampN(input.wait_minutes, 5, 1440, 60),
+    metric: input.metric === 'clicks' ? 'clicks' : 'opens', ...(input.winner ? { winner: String(input.winner).slice(0, 1) } : {}),
+  };
+}
+
+/** Content + sender for one variant letter (A/B/C/D). Without a variant (or no test) → the main content. */
+export function variantParts(o: SendOptions, letter: string | null, base: { content: Content; alt: Content | null; from: { email: string; name: string } }) {
+  const idx = letter ? letter.charCodeAt(0) - 65 : -1;
+  const v = idx >= 0 ? o.ab?.variants?.[idx] : undefined;
+  let content = v?.content === 'b' && base.alt ? base.alt : base.content;
+  if (v?.preview_text) content = { ...content, preview_text: v.preview_text };
+  const from = v?.from_name ? { ...base.from, name: v.from_name } : base.from;
+  const subject = idx >= 0 ? o.ab?.subjects?.[idx] : undefined;
+  return { content, from, subject };
+}
+
+/** Variant B content (posts.alt_content) as a Content, or null. */
+export function altContent(post: Post, main: Content): Content | null {
+  const raw = (post as any).alt_content as string | null | undefined;
+  if (!raw) return null;
+  const doc = parseDoc(raw);
+  return doc.blocks?.length ? { ...main, doc } : null;
 }
 
 const BATCH = 50;
@@ -147,9 +210,17 @@ export async function startSend(env: Env, pub: Publication, post: Post, override
   const o: SendOptions = {
     segment_ids: parseJSON(post.segment_ids, []), exclude_segment_ids: parseJSON(post.exclude_segment_ids, []), list_id: post.list_id,
     audience: (post.audience as any) || 'all', tier_ids: parseJSON(post.tier_ids, []),
-    ab: parseJSON(post.ab_test, null), cohorts: parseJSON<any>(post.cohort_test, null)?.cohorts || null, ...overrides,
+    ab: normalizeAb(parseJSON(post.ab_test, null)), cohorts: parseJSON<any>(post.cohort_test, null)?.cohorts || null,
+    timing: normalizeTiming(parseJSON((post as any).send_timing, null)), ...overrides,
   };
-  if (o.ab && (!o.ab.subjects || o.ab.subjects.filter(Boolean).length < 2)) o.ab = null;
+  if (o.ab) {
+    // variants that only change preview/sender/content keep the post's subject
+    const base = o.subject || post.email_subject || post.title;
+    o.ab = { ...o.ab, subjects: o.ab.subjects.map((s) => s || base), winner: null };
+    if (o.ab.variants?.some((v) => v.content === 'b') && !altContent(post, { title: '', doc: { blocks: [] } })) o.ab.variants = o.ab.variants.map((v) => ({ ...v, content: 'a' }));
+    if (o.ab.subjects.length < 2) o.ab = null;
+  }
+  if (o.timing) o.timing = { ...o.timing, planned: false };
   // refresh dynamic segment caches used for targeting/dynamic content
   const segIds = new Set<string>([...(o.segment_ids || []), ...(o.exclude_segment_ids || [])]);
   JSON.stringify(parseDoc(post.content)).replace(/"segment_ids":\[([^\]]*)\]/g, (_m, ids: string) => { ids.replace(/"([^"]+)"/g, (_x, sid: string) => (segIds.add(sid), '')); return ''; });
@@ -181,6 +252,10 @@ registerJob('send.batch', async (env, p) => {
   // account suspended (pending review) → pause what's in flight
   const suspended = await workspaceSuspended(env, pub.workspace_id);
   if (suspended) { await run(env, `UPDATE sends SET status = 'paused', status_reason = ? WHERE id = ? AND status IN ('sending','testing')`, suspended, send.id); return; }
+  // Timed sends (send-time optimization / time zones): first park every recipient as a 'scheduled' delivery — nothing
+  // leaves yet, so no warm-up/ramp allowance is used. The A/B test phase always goes out immediately.
+  const timed = !!o.timing && o.phase !== 'test';
+  if (timed && !o.timing!.planned) { await planTimed(env, pub, send, o); return; }
   const from = await senderFor(env, pub, 'newsletter', post.sender_id);
   const warm = await warmupAllowance(env, from.email);
   if (!warm.ok) {
@@ -197,6 +272,9 @@ registerJob('send.batch', async (env, p) => {
   const cfg = settings(pub);
   const rate = Math.max(BATCH, Number(cfg.send_rate_per_minute) || Number((env as any).SEND_RATE_PER_MINUTE) || DEFAULT_RATE);
   const limit = Math.min(BATCH, warm.remaining === Infinity ? BATCH : warm.remaining, ramp.remaining);
+  const main = await postContent(env, post);
+  const base = { content: main, alt: altContent(post, main), from };
+  if (timed) { await deliverDue(env, pub, post, send, o, base, limit, rate); return; }
 
   let recipients: Subscriber[];
   if (o.only_subscriber_ids) {
@@ -206,43 +284,23 @@ registerJob('send.batch', async (env, p) => {
     recipients = await all<Subscriber>(env, `SELECT s.* FROM subscribers s WHERE s.pub_id = ? AND s.status = 'active' AND (${c.sql}) ${send.cursor ? 'AND s.id > ?' : ''} AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.send_id = ? AND d.subscriber_id = s.id) ORDER BY s.id LIMIT ?`, pub.id, ...c.params, ...(send.cursor ? [send.cursor] : []), send.id, limit * 3);
   }
 
-  const content = await postContent(env, post);
   let processed = 0;
   let last = send.cursor as string | null;
-  const queue: Array<{ sub: Subscriber; subject: string; variant: string | null; cohort: string | null }> = [];
+  const queue: Array<{ sub: Subscriber; subject: string; variant: string | null; cohort: string | null; letter: string | null }> = [];
   for (const sub of recipients) {
     last = sub.id;
     // A/B: test phase only takes the sample; main phase takes the rest
-    let variant: string | null = null;
-    let subject = o.subject || post.email_subject || post.title;
-    if (o.ab) {
-      const b = await bucket(send.id + sub.id);
-      const inSample = b < o.ab.sample_pct;
-      if (o.phase === 'test' && !inSample) continue;
-      if (o.phase === 'main' && inSample) continue;
-      if (o.phase === 'test') {
-        const idx = Math.floor((b / o.ab.sample_pct) * o.ab.subjects.length) % o.ab.subjects.length;
-        variant = String.fromCharCode(65 + idx);
-        subject = o.ab.subjects[idx];
-      } else {
-        variant = o.winner || 'A';
-        subject = o.ab.subjects[variant.charCodeAt(0) - 65] || subject;
-      }
-    }
-    let cohort: string | null = null;
-    if (o.cohorts?.length) {
-      const b = await bucket('cohort:' + send.id + sub.id);
-      let acc = 0;
-      for (const ch of o.cohorts) { acc += ch.pct; if (b < acc) { cohort = ch.name; break; } }
-      cohort = cohort || o.cohorts[o.cohorts.length - 1].name;
-      variant = variant ? `${variant}/${cohort}` : cohort;
-    }
-    queue.push({ sub, subject, variant, cohort });
+    const pick = await assignVariant(send.id, sub.id, o, o.subject || post.email_subject || post.title);
+    if (!pick) continue;
+    queue.push({ sub, ...pick });
     processed++;
     if (processed >= limit) break;
   }
   for (let i = 0; i < queue.length; i += PARALLEL) {
-    const res = await Promise.allSettled(queue.slice(i, i + PARALLEL).map((q) => deliver(env, pub, send.id, q.sub, q.subject, content, from, { variant: q.variant, cohort: q.cohort, post })));
+    const res = await Promise.allSettled(queue.slice(i, i + PARALLEL).map((q) => {
+      const v = variantParts(o, q.letter, base);
+      return deliver(env, pub, send.id, q.sub, q.subject, v.content, v.from, { variant: q.variant, cohort: q.cohort, post });
+    }));
     for (const r of res) if (r.status === 'rejected') await logError(env, 'send.deliver', r.reason, pub.id);
   }
   const exhausted = processed < limit && (recipients.length < limit * 3 || o.only_subscriber_ids);
@@ -261,6 +319,98 @@ registerJob('send.batch', async (env, p) => {
   await finishSend(env, pub, post, send.id);
 });
 
+/**
+ * Which variant (A/B letter) and cohort a recipient gets in this phase, or null when they belong to the other phase
+ * (test phase = the sample, split across the variants; main phase = everyone else, who get the winner).
+ */
+async function assignVariant(sendId: string, subId: string, o: SendOptions, defaultSubject: string): Promise<{ subject: string; variant: string | null; cohort: string | null; letter: string | null } | null> {
+  let variant: string | null = null;
+  let letter: string | null = null;
+  let subject = defaultSubject;
+  if (o.ab) {
+    const b = await bucket(sendId + subId);
+    const inSample = b < o.ab.sample_pct;
+    if (o.phase === 'test' && !inSample) return null;
+    if (o.phase === 'main' && inSample) return null;
+    if (o.phase === 'test') letter = String.fromCharCode(65 + (Math.floor((b / o.ab.sample_pct) * o.ab.subjects.length) % o.ab.subjects.length));
+    else letter = o.winner || 'A';
+    variant = letter;
+    subject = o.ab.subjects[letter.charCodeAt(0) - 65] || subject;
+  }
+  let cohort: string | null = null;
+  if (o.cohorts?.length) {
+    const b = await bucket('cohort:' + sendId + subId);
+    let acc = 0;
+    for (const ch of o.cohorts) { acc += ch.pct; if (b < acc) { cohort = ch.name; break; } }
+    cohort = cohort || o.cohorts[o.cohorts.length - 1].name;
+    variant = variant ? `${variant}/${cohort}` : cohort;
+  }
+  return { subject, variant, cohort, letter };
+}
+
+/** Timed send, phase 1: give every remaining recipient a planned time (a delivery row with status 'scheduled'). */
+async function planTimed(env: Env, pub: Publication, send: any, o: SendOptions) {
+  const PLAN = 300;
+  let recipients: Subscriber[];
+  if (o.only_subscriber_ids) {
+    recipients = await all<Subscriber>(env, `SELECT s.* FROM subscribers s WHERE s.pub_id = ? AND s.id IN (${o.only_subscriber_ids.map(() => '?').join(',')}) AND s.status = 'active' ${send.cursor ? 'AND s.id > ?' : ''} AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.send_id = ? AND d.subscriber_id = s.id) ORDER BY s.id LIMIT ?`, pub.id, ...o.only_subscriber_ids, ...(send.cursor ? [send.cursor] : []), send.id, PLAN);
+  } else {
+    const c = await compile(env, pub.id, await audienceGroup(env, pub.id, o));
+    recipients = await all<Subscriber>(env, `SELECT s.* FROM subscribers s WHERE s.pub_id = ? AND s.status = 'active' AND (${c.sql}) ${send.cursor ? 'AND s.id > ?' : ''} AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.send_id = ? AND d.subscriber_id = s.id) ORDER BY s.id LIMIT ?`, pub.id, ...c.params, ...(send.cursor ? [send.cursor] : []), send.id, PLAN);
+  }
+  // every recipient of one send is planned inside the same 24h window, starting when the timed phase began
+  const from = Number(o.timing?.from) || now();
+  const picks: Array<{ sub: Subscriber; variant: string | null }> = [];
+  for (const sub of recipients) {
+    const pick = await assignVariant(send.id, sub.id, o, '');
+    if (pick) picks.push({ sub, variant: pick.variant });
+  }
+  const times = await planTimes(env, pub, picks.map((x) => x.sub), o.timing!, from);
+  const t = now();
+  const stmts = picks.map(({ sub, variant }) => stmt(env, `INSERT INTO deliveries (id, send_id, pub_id, subscriber_id, email, variant, status, attempts, next_attempt_at, provider, created_at) VALUES (?, ?, ?, ?, ?, ?, 'scheduled', 0, ?, ?, ?)`,
+    id(20), send.id, pub.id, sub.id, sub.email, variant, Math.min(Math.max(times.get(sub.id) ?? from, from), from + DAY), mailboxProvider(sub.email), t));
+  for (let i = 0; i < stmts.length; i += 50) await batch(env, stmts.slice(i, i + 50));
+  if (recipients.length === PLAN) {
+    await run(env, 'UPDATE sends SET cursor = ?, options = ? WHERE id = ?', recipients[recipients.length - 1].id, JSON.stringify({ ...o, timing: { ...o.timing, from } }), send.id);
+    await enqueue(env, 'send.batch', { send_id: send.id });
+    return;
+  }
+  o.timing = { ...o.timing!, from, planned: true };
+  const first = await one<{ t: number | null }>(env, `SELECT MIN(next_attempt_at) AS t FROM deliveries WHERE send_id = ? AND status = 'scheduled'`, send.id);
+  await run(env, 'UPDATE sends SET options = ?, cursor = NULL WHERE id = ?', JSON.stringify(o), send.id);
+  await enqueue(env, 'send.batch', { send_id: send.id }, Math.max(now(), first?.t || now()));
+}
+
+/** Timed send, phase 2: deliver the scheduled deliveries that are due — through the same warm-up / ramp / safety gates as any batch. */
+async function deliverDue(env: Env, pub: Publication, post: Post, send: any, o: SendOptions, base: { content: Content; alt: Content | null; from: { email: string; name: string } }, limit: number, rate: number) {
+  const due = await all<any>(env, `SELECT id, subscriber_id, variant FROM deliveries WHERE send_id = ? AND status = 'scheduled' AND next_attempt_at <= ? ORDER BY next_attempt_at LIMIT ?`, send.id, now(), limit);
+  const subs = due.length ? await all<Subscriber>(env, `SELECT * FROM subscribers WHERE id IN (${due.map(() => '?').join(',')})`, ...due.map((d) => d.subscriber_id)) : [];
+  const byId = new Map(subs.map((s) => [s.id, s]));
+  const defaultSubject = o.subject || post.email_subject || post.title;
+  const work: Array<() => Promise<unknown>> = [];
+  for (const d of due) {
+    // claim it, so overlapping batch jobs never send the same email twice
+    const claimed = await run(env, `UPDATE deliveries SET status = 'queued' WHERE id = ? AND status = 'scheduled'`, d.id);
+    if (!claimed.meta.changes) continue;
+    const sub = byId.get(d.subscriber_id);
+    if (!sub || sub.status !== 'active') { await run(env, `UPDATE deliveries SET status = 'skipped', error = 'subscriber no longer active' WHERE id = ?`, d.id); continue; }
+    const letter = o.ab && d.variant && /^[A-E](\/|$)/.test(d.variant) ? d.variant[0] : null;
+    const cohort = d.variant ? (d.variant.includes('/') ? d.variant.split('/')[1] : letter ? null : d.variant) : null;
+    const v = variantParts(o, letter, base);
+    work.push(() => sendExisting(env, pub, send.id, d.id, sub, v.subject || defaultSubject, v.content, v.from, { cohort, post }));
+  }
+  for (let i = 0; i < work.length; i += PARALLEL) {
+    const res = await Promise.allSettled(work.slice(i, i + PARALLEL).map((f) => f()));
+    for (const r of res) if (r.status === 'rejected') await logError(env, 'send.deliver', r.reason, pub.id);
+  }
+  await run(env, 'UPDATE sends SET sent = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'sent\',\'deferred\')), failed = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'failed\',\'bounced\',\'suppressed\')) WHERE id = ?', send.id, send.id, send.id);
+  if (await checkCampaign(env, send)) return;
+  const rest = await one<{ n: number; t: number | null }>(env, `SELECT COUNT(*) AS n, MIN(next_attempt_at) AS t FROM deliveries WHERE send_id = ? AND status = 'scheduled'`, send.id);
+  if (!rest?.n) { await finishSend(env, pub, post, send.id); return; }
+  const pace = now() + Math.floor((60_000 * BATCH) / rate);
+  await enqueue(env, 'send.batch', { send_id: send.id }, due.length >= limit ? pace : Math.max(pace, rest.t || pace));
+}
+
 registerJob('send.ab_winner', async (env, p) => {
   const send = await one<any>(env, 'SELECT * FROM sends WHERE id = ?', p.send_id);
   if (!send || send.status !== 'testing') return;
@@ -272,6 +422,7 @@ registerJob('send.ab_winner', async (env, p) => {
     if (rate > bestRate) { bestRate = rate; best = r.v; }
   }
   o.winner = best;
+  o.ab_decided_at = now(); // analytics: deliveries up to here are the test sample
   o.phase = 'main';
   await run(env, `UPDATE sends SET status = 'sending', options = ?, cursor = NULL WHERE id = ?`, JSON.stringify(o), send.id);
   if (send.post_id) {
@@ -293,6 +444,11 @@ async function finishSend(env: Env, pub: Publication, post: Post, sendId: string
 export async function deliver(env: Env, pub: Publication, sendId: string, sub: Subscriber, subject: string, content: Content, from: { email: string; name: string }, o: { variant?: string | null; cohort?: string | null; post?: Post | null; kind?: 'marketing' | 'transactional'; forceReal?: boolean } = {}) {
   const did = id(20);
   await insert(env, 'deliveries', { id: did, send_id: sendId, pub_id: pub.id, subscriber_id: sub.id, email: sub.email, variant: o.variant ?? null, status: 'queued', attempts: 0, provider: mailboxProvider(sub.email), created_at: now() });
+  return sendExisting(env, pub, sendId, did, sub, subject, content, from, o);
+}
+
+/** Render + send for a delivery row that already exists (fresh deliveries, and timed sends' 'scheduled' rows). */
+export async function sendExisting(env: Env, pub: Publication, sendId: string, did: string, sub: Subscriber, subject: string, content: Content, from: { email: string; name: string }, o: { cohort?: string | null; post?: Post | null; kind?: 'marketing' | 'transactional'; forceReal?: boolean } = {}) {
   const built = await buildEmail(env, pub, content, sub, { deliveryId: did, post: o.post, cohort: o.cohort });
   const subj = applyMerge(subject, mergeVars(pub, sub, siteUrl(env, pub)), false);
   const res = await sendMail(env, { to: sub.email, subject: subj, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, kind: o.kind || 'marketing', unsubscribeUrl: built.unsubscribeUrl, campaignId: sendId, forceReal: o.forceReal });
@@ -349,10 +505,15 @@ registerPeriodic('deliveries.retry', 5 * MIN, async (env) => {
       continue;
     }
     if (!post) { await run(env, `UPDATE deliveries SET status = 'failed', error = 'content missing' WHERE id = ?`, d.id); continue; }
-    const content = await postContent(env, post);
-    const built = await buildEmail(env, pub, content, sub, { deliveryId: d.id, post });
-    const from = await senderFor(env, pub, 'newsletter', post.sender_id);
-    const res = await sendMail(env, { to: sub.email, subject: d.send_subject, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
+    const main = await postContent(env, post);
+    // A/B / multivariate: retry with the same variant (subject, preview text, sender name, content) the recipient was given
+    const so: SendOptions = parseJSON((await one<{ options: string }>(env, 'SELECT options FROM sends WHERE id = ?', d.send_id))?.options, {});
+    const letter = so.ab && d.variant && /^[A-E](\/|$)/.test(d.variant) ? d.variant[0] : null;
+    const v = variantParts(so, letter, { content: main, alt: altContent(post, main), from: await senderFor(env, pub, 'newsletter', post.sender_id) });
+    const built = await buildEmail(env, pub, v.content, sub, { deliveryId: d.id, post });
+    const from = v.from;
+    const subject = v.subject ? applyMerge(v.subject, mergeVars(pub, sub, siteUrl(env, pub)), false) : d.send_subject;
+    const res = await sendMail(env, { to: sub.email, subject, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
     await applyResult(env, pub, d.id, sub, res);
   }
 });

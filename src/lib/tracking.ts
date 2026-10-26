@@ -3,7 +3,7 @@ import type { Ctx, Env } from '../types';
 import { one, run, insert } from './db';
 import { emit } from './events';
 import { isBotClick, isAncientUA, isDatacenter, classifyCrawler, clientIP } from './guard';
-import { recomputeEngagement } from './subscribers';
+import { recomputeEngagement, validTimezone } from './subscribers';
 import { id, now, parseUA, sha256 } from './util';
 
 export async function recordOpen(env: Env, deliveryId: string, req: Request) {
@@ -17,6 +17,8 @@ export async function recordOpen(env: Env, deliveryId: string, req: Request) {
   if (bot) return;
   const first = !d.opened_at;
   await run(env, 'UPDATE deliveries SET opened_at = COALESCE(opened_at, ?), open_count = open_count + 1 WHERE id = ?', now(), d.id);
+  // Delivery by time zone: remember where the reader is (image proxies open from their own data centers — skip those).
+  if (d.subscriber_id && !proxy) await captureTimezone(env, d.subscriber_id, req, false);
   if (first && d.subscriber_id) {
     await run(env, 'UPDATE subscribers SET open_count = open_count + 1, last_open_at = ? WHERE id = ?', now(), d.subscriber_id);
     await emit(env, { pubId: d.pub_id, type: 'email.opened', subscriberId: d.subscriber_id, refId: d.post_id || d.automation_id, data: { post_id: d.post_id, automation_id: d.automation_id, send_id: d.send_id } });
@@ -48,10 +50,18 @@ export async function recordClick(env: Env, deliveryId: string, url: string, req
   // a click implies an open (images may be blocked)
   await run(env, 'UPDATE deliveries SET clicked_at = COALESCE(clicked_at, ?), click_count = click_count + 1, opened_at = COALESCE(opened_at, ?) WHERE id = ?', now(), now(), d.id);
   if (d.subscriber_id) {
+    await captureTimezone(env, d.subscriber_id, req, true);
     await run(env, `UPDATE subscribers SET click_count = click_count + ?, last_click_at = ?, last_open_at = COALESCE(last_open_at, ?) WHERE id = ?`, first ? 1 : 0, now(), now(), d.subscriber_id);
     await emit(env, { pubId: d.pub_id, type: 'email.clicked', subscriberId: d.subscriber_id, refId: d.post_id || d.automation_id, data: { post_id: d.post_id, automation_id: d.automation_id, url } });
     if (first) await recomputeEngagement(env, d.subscriber_id);
   }
+}
+
+/** Store request.cf.timezone on the subscriber (clicks are the most reliable signal and may update it; opens only fill it in). */
+async function captureTimezone(env: Env, subscriberId: string, req: Request, overwrite: boolean) {
+  const tz = (req as any).cf?.timezone;
+  if (!validTimezone(tz)) return;
+  try { await run(env, `UPDATE subscribers SET timezone = ? WHERE id = ? AND ${overwrite ? '(timezone IS NULL OR timezone != ?)' : 'timezone IS NULL'}`, tz, subscriberId, ...(overwrite ? [tz] : [])); } catch {}
 }
 
 const SOCIAL = /facebook|instagram|t\.co|twitter|x\.com|linkedin|tiktok|reddit|threads|bsky|youtube|pinterest|mastodon/i;

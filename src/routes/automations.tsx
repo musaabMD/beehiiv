@@ -4,7 +4,9 @@ import { Hono } from 'hono';
 import type { AppEnv, Ctx, Module, Publication, Subscriber } from '../types';
 import { one, all, run, insert, val } from '../lib/db';
 import { requirePerm, can, audit } from '../lib/auth';
-import { enroll, publishDraft, getAt, TRIGGERS, STEP_TYPES, type Step, type Path } from '../lib/automations';
+import { enroll, publishDraft, getAt, walk, triggerList, TRIGGERS, STEP_TYPES, type Step, type Path } from '../lib/automations';
+import { ensureWebhookToken, rotateWebhookToken, handleInbound, DEFAULT_EMAIL_PATHS } from '../lib/automation-webhooks';
+import { rateLimit, clientIP } from '../lib/guard';
 import { registerJob, enqueue, kick } from '../lib/jobs';
 import { ruleCatalog } from '../lib/catalog';
 import { listMatching, segmentGroup } from '../lib/segments';
@@ -15,7 +17,7 @@ import { FIELDS } from '../lib/segments';
 import { DashLayout } from '../ui/layout';
 import { Card, Btn, LinkBtn, ActionForm, Field, Input, Textarea, Toggle, Table, Empty, Status, Stat, Stats, Tabs, Modal, OpenBtn, Json, back, Bars, Badge } from '../ui/components';
 import { id, now, parseJSON, form, str, int, bool, ago, fmtDateTime, num, pct } from '../lib/util';
-import { TEMPLATES, templateByKey } from './automations/templates';
+import { availableTemplates, templateByKey, templateTrigger, outline, CATEGORIES } from '../lib/automation-templates';
 import { GalleryAssets, TemplateCard } from './posts/templates';
 import { stepSummary, triggerSummary, flatten, stepLabel, normalizeSteps, normalizeTrigger, BRANCH_TYPES } from './automations/shared';
 
@@ -72,7 +74,7 @@ dash.get('/', async (c) => {
   const showArchived = c.req.query('archived') === '1';
   const visible = rows.filter((r) => showArchived || r.status !== 'archived');
   return c.html(
-    <DashLayout c={c} title="Automations" section="automations" actions={<OpenBtn target="#new-automation">+ New automation</OpenBtn>}>
+    <DashLayout c={c} title="Automations" section="automations" styles={['/static/automations.css']} scripts={['/static/automations.js']} actions={<OpenBtn target="#new-automation">+ New automation</OpenBtn>}>
       <Stats>
         <Stat label="Active automations" value={num(tot.active)} />
         <Stat label="Subscribers in a journey" value={num(tot.inprog)} />
@@ -110,28 +112,72 @@ dash.get('/', async (c) => {
           <Empty icon="⚡" title="Automate your newsletter" body="Send welcome series, deliver lead magnets, nurture readers toward paid plans and win back inactive subscribers — all on autopilot." action={<OpenBtn target="#new-automation">Create your first automation</OpenBtn>} />
         </Card>
       )}
-      <Modal id="new-automation" title="New automation" wide>
-        <form method="post" action="/app/automations/new" class="stack">
-          <Field label="Name"><Input name="name" placeholder="e.g. Welcome series" /></Field>
-          <div class="field-l">Start from</div>
-          <div class="af-templates">
-            <label class="af-tpl"><input type="radio" name="template" value="" checked /><span><strong>Blank automation</strong><small>Pick a trigger and build your own flow.</small></span></label>
-            {TEMPLATES.map((t) => <label class="af-tpl"><input type="radio" name="template" value={t.key} /><span><strong>{t.name}</strong><small>{t.description}</small></span></label>)}
-          </div>
-          <div class="form-actions"><a class="btn btn-ghost" href="/app/automations/welcome">Design a welcome email from a template →</a><Btn>Create automation</Btn></div>
-        </form>
-      </Modal>
+      <TemplateGallery />
     </DashLayout>,
   );
 });
+
+/** “New automation”: blank, or one of the 45 templates (category filter, search, flow preview). */
+function TemplateGallery() {
+  const tpls = availableTemplates();
+  const cats = CATEGORIES.filter((k) => tpls.some((t) => t.category === k));
+  const kindIcon: Record<string, string> = { send_email: '✉️', delay: '⏱️', wait_until: '⏳', condition: '🔀', ab_split: '🎲', add_tag: '🏷️', remove_tag: '🏷️', update_field: '✏️', grant_premium: '⭐', notify: '🔔', unsubscribe: '🚫', branch: '↳' };
+  const countEmails = (list: Step[]): number => list.reduce((n, s) => n + (s.type === 'send_email' ? 1 : 0) + countEmails(s.yes || []) + countEmails(s.no || []), 0);
+  return (
+    <Modal id="new-automation" title="New automation" wide>
+      <form method="post" action="/app/automations/new" class="af-gallery" id="af-gallery">
+        <div class="af-gal-top">
+          <Field label="Name"><Input name="name" placeholder="Defaults to the template name" /></Field>
+          <label class="field"><span class="field-l">Find a template</span><input class="input" type="search" placeholder={`Search ${tpls.length} templates…`} data-gal-search /></label>
+        </div>
+        <div class="af-gal-cats" role="toolbar" aria-label="Template categories">
+          <button type="button" class="on" data-gal-cat="">All ({tpls.length})</button>
+          {cats.map((k) => <button type="button" data-gal-cat={k}>{k} ({tpls.filter((t) => t.category === k).length})</button>)}
+        </div>
+        <div class="af-gal-body">
+          <div class="af-gal-list" role="radiogroup" aria-label="Templates">
+            <label class="af-gal-card" data-cat="" data-q="blank empty scratch"><input type="radio" name="template" value="" checked /><span class="af-gal-ic">＋</span><span><strong>Blank automation</strong><small>Pick entry points and build your own flow.</small></span></label>
+            {tpls.map((t) => (
+              <label class="af-gal-card" data-cat={t.category} data-q={`${t.name} ${t.description} ${t.category}`.toLowerCase()}>
+                <input type="radio" name="template" value={t.key} /><span class="af-gal-ic">{t.icon}</span>
+                <span><strong>{t.name}</strong><small>{t.description}</small><em class="af-gal-cat">{t.category}</em></span>
+              </label>
+            ))}
+          </div>
+          <aside class="af-gal-preview" aria-live="polite">
+            <div data-preview="" class="af-gal-pv"><h4>Blank automation</h4><p class="small muted">Start from scratch: choose one or more entry points, then add emails, delays, branches and actions.</p></div>
+            {tpls.map((t) => {
+              const steps = t.steps();
+              const n = countEmails(steps);
+              return (
+                <div data-preview={t.key} class="af-gal-pv" hidden>
+                  <h4>{t.icon} {t.name}</h4>
+                  <p class="small muted">{t.description}</p>
+                  <div class="af-gal-entry"><div class="af-kicker">Entry point{t.triggers.length > 1 ? 's' : ''}</div>{t.triggers.map((x, i) => <div>{i ? <span class="badge b-gray">OR</span> : null} ⚡ {triggerSummary(x)}</div>)}</div>
+                  <ol class="af-gal-flow">
+                    {outline(steps).map((o) => <li class={`t-${o.type}`} style={`margin-left:${o.depth * 16}px`}><span aria-hidden="true">{kindIcon[o.type] || '•'}</span> {o.text}</li>)}
+                  </ol>
+                  <p class="small muted">{n} email{n === 1 ? '' : 's'} with ready-to-edit copy · everything can be changed after you create it.</p>
+                </div>
+              );
+            })}
+          </aside>
+        </div>
+        <div class="form-actions"><a class="btn btn-ghost" href="/app/automations/welcome">Design a welcome email from a template →</a><Btn>Create automation</Btn></div>
+      </form>
+    </Modal>
+  );
+}
 
 dash.post('/new', async (c) => {
   const f = await form(c.req);
   const tpl = templateByKey(str(f.template));
   const aid = id();
   const name = str(f.name, 120) || tpl?.name || 'Untitled automation';
-  const trigger = tpl ? tpl.trigger : { type: 'welcome', config: {} };
+  const trigger = tpl ? templateTrigger(tpl) : { type: 'welcome', config: {} };
   const steps = tpl ? tpl.steps() : [];
+  // “Notify team” steps in templates go to whoever created the automation
+  walk(steps, (st) => { if (st.type === 'notify' && !st.config?.email) st.config = { ...st.config, email: c.get('user').email }; });
   await insert(c.env, 'automations', {
     id: aid, pub_id: c.get('pub').id, name, description: tpl?.description || '', status: 'draft', trigger: '{}', steps: '[]',
     draft_trigger: JSON.stringify(trigger), draft_steps: JSON.stringify(steps), allow_reentry: 0, created_by: c.get('user').id, created_at: now(), updated_at: now(),
@@ -305,11 +351,14 @@ dash.get('/:id', async (c) => {
   ]);
   const canPublish = can(c.get('role'), 'publish');
   const draftPending = hasDraft(a) && !!a.published_at;
+  const hookToken = await ensureWebhookToken(c.env, a.id);
   const meta = {
     id: a.id, status: a.status, canPublish, allowReentry: !!a.allow_reentry,
     triggers: TRIGGERS, stepTypes: STEP_TYPES, sources: FIELDS.source.options,
     senders, forms: forms.map((f) => [f.id, f.name]), automations: autos.map((x) => [x.id, x.name]),
     apiUrl: `${c.env.APP_URL.replace(/\/$/, '')}/api/v2/automations/${a.id}/enroll`, userEmail: c.get('user').email,
+    webhookUrl: `${c.env.APP_URL.replace(/\/$/, '')}/hooks/automations/${hookToken}`, webhookLive: triggerList(liveOf(a).trigger).some((t) => t.type === 'webhook'),
+    emailPaths: DEFAULT_EMAIL_PATHS,
   };
   return c.html(
     <DashLayout
@@ -387,7 +436,7 @@ dash.put('/:id/draft', async (c) => {
   if (!a) return c.json({ error: 'not_found' }, 404);
   const body = await c.req.json<any>().catch(() => null);
   if (!body) return c.json({ error: 'invalid_json' }, 400);
-  const trigger = normalizeTrigger(body.trigger);
+  const trigger = normalizeTrigger(Array.isArray(body.triggers) ? body.triggers : body.trigger);
   const steps = normalizeSteps(body.steps);
   const tj = JSON.stringify(trigger), sj = JSON.stringify(steps);
   // identical to live → no pending draft
@@ -395,6 +444,15 @@ dash.put('/:id/draft', async (c) => {
   await run(c.env, 'UPDATE automations SET draft_trigger = ?, draft_steps = ?, updated_at = ? WHERE id = ?', same ? null : tj, same ? null : sj, now(), a.id);
   if (typeof body.allow_reentry === 'boolean') await run(c.env, 'UPDATE automations SET allow_reentry = ? WHERE id = ?', body.allow_reentry ? 1 : 0, a.id);
   return c.json({ ok: true, has_draft: !same, steps, trigger });
+});
+
+/** New secret URL for the incoming-webhook entry point (the old one stops working immediately). */
+dash.post('/:id/webhook/rotate', requirePerm('publish'), async (c) => {
+  const a = await load(c);
+  if (!a) return c.json({ error: 'not_found' }, 404);
+  const t = await rotateWebhookToken(c.env, a.id);
+  await audit(c, 'automation.webhook_rotate', a.id);
+  return c.json({ ok: true, url: `${c.env.APP_URL.replace(/\/$/, '')}/hooks/automations/${t}` });
 });
 
 /** Preview / test-send an email step from the builder (simulated subscriber). */
@@ -688,6 +746,26 @@ dash.get('/:id/analytics', async (c) => {
       </Card>
     </DashLayout>,
   );
+});
+
+// ───────────────────────── incoming webhook entry point (public) ─────────────────────────
+// POST /hooks/automations/<secret> with JSON or a form body containing an email → subscriber created/updated + enrolled.
+root.post('/hooks/automations/:token', async (c) => {
+  const tok = c.req.param('token');
+  const ip = clientIP(c.req.raw);
+  if (!(await rateLimit(c.env, `awh:${tok.slice(0, 40)}`, 120, 60)) || !(await rateLimit(c.env, `awh-ip:${ip}`, 300, 60))) {
+    return c.json({ ok: false, error: 'rate_limited', message: 'Too many requests — slow down (120/minute per automation).' }, 429, { 'retry-after': '60' });
+  }
+  const ct = c.req.header('content-type') || '';
+  let body: any = null;
+  try {
+    if (ct.includes('json') || !ct) body = JSON.parse((await c.req.text()).slice(0, 256_000) || 'null');
+    else if (ct.includes('form')) body = Object.fromEntries([...(await c.req.formData()).entries()].map(([k, v]) => [k, typeof v === 'string' ? v : '']));
+  } catch { return c.json({ ok: false, error: 'invalid_json' }, 400); }
+  // the caller is usually a server (Zapier, Calendly…), so its location says nothing about the subscriber's time zone
+  const res = await handleInbound(c.env, tok, body, { timezone: null, country: null, ip: null });
+  if (res.status === 202) kick(c.env, c.executionCtx);
+  return c.json(res.body, res.status as any);
 });
 
 export default { dash, site, root } satisfies Module;

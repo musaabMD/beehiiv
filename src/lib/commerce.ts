@@ -3,6 +3,7 @@
 // customers + orders + line items, subscribe buyers ONLY when the platform says they accepted marketing, tag buyers by
 // product, track open checkouts for cart abandonment, and enroll subscribers in "external purchase" / "cart abandoned"
 // automations. See docs/COMMERCE.md.
+import { triggerList } from './automations';
 import type { Env, Publication, Subscriber } from '../types';
 import { one, all, run, insert } from './db';
 import { emit } from './events';
@@ -250,8 +251,7 @@ async function onExternalPaid(env: Env, pub: Publication, store: Store, orderId:
  *  catch-all "purchase" trigger without a specific product. Trigger matching lives here, not in the engine. */
 async function enrollPurchase(env: Env, pubId: string, subId: string, d: { platform: string; total_cents: number; product_names: string[]; product_ids: any[]; [k: string]: unknown }) {
   const autos = await all<{ id: string; trigger: string }>(env, `SELECT id, trigger FROM automations WHERE pub_id = ? AND status = 'active'`, pubId);
-  for (const a of autos) {
-    const trig = parseJSON<any>(a.trigger, {});
+  for (const a of autos) for (const trig of triggerList(parseJSON<any>(a.trigger, {}))) {
     const c = trig.config || {};
     if (trig.type === 'external_purchase') {
       if (c.platform && c.platform !== d.platform) continue;
@@ -378,9 +378,9 @@ export async function cartTick(env: Env, at = now()) {
       await emit(env, { pubId: c.pub_id, type: 'cart.abandoned', subscriberId: c.subscriber_id, refId: c.id, data: cartEventData(c) });
     }
   }
-  const autos = await all<{ id: string; pub_id: string; trigger: string }>(env, `SELECT id, pub_id, trigger FROM automations WHERE status = 'active' AND json_extract(trigger, '$.type') = 'cart_abandoned'`);
-  for (const a of autos) {
-    const trig = parseJSON<any>(a.trigger, {});
+  // Any entry point of an automation can be the cart trigger (automations can have several).
+  const autos = await all<{ id: string; pub_id: string; trigger: string }>(env, `SELECT id, pub_id, trigger FROM automations WHERE status = 'active' AND instr(trigger, 'cart_abandoned') > 0`);
+  for (const a of autos) for (const trig of triggerList(parseJSON<any>(a.trigger, {})).filter((t) => t.type === 'cart_abandoned')) {
     const c = trig.config || {};
     const delay = Number(c.delay_hours) > 0 ? Number(c.delay_hours) : 1;
     const min = Math.round((Number(c.min_value) || 0) * 100);

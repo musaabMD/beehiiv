@@ -21,6 +21,8 @@ export interface SubscribeInput {
   custom?: Record<string, unknown>;
   listIds?: string[];
   country?: string | null;
+  /** IANA time zone (Cloudflare request.cf.timezone) for delivery by time zone */
+  timezone?: string | null;
   ip?: string | null;
   /** skip double opt-in (imports, API with send_welcome=false, already-verified readers) */
   skipConfirm?: boolean;
@@ -33,6 +35,12 @@ export interface SubscribeInput {
 }
 
 export interface SubscribeResult { ok: boolean; subscriber?: Subscriber; created?: boolean; pending?: boolean; error?: string; suggestion?: string | null }
+
+/** A usable IANA time zone name (as sent by Cloudflare in request.cf.timezone). */
+export function validTimezone(tz: unknown): tz is string {
+  if (typeof tz !== 'string' || !tz || tz.length > 64) return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
+}
 
 export async function getSubscriber(env: Env, pubId: string, idOrEmail: string): Promise<Subscriber | null> {
   return one<Subscriber>(env, 'SELECT * FROM subscribers WHERE pub_id = ? AND (id = ? OR email = ?)', pubId, idOrEmail, idOrEmail.toLowerCase());
@@ -50,6 +58,7 @@ export async function subscribe(env: Env, pub: Publication, input: SubscribeInpu
     const params: unknown[] = [];
     if (input.name && !existing.name) { patch.push('name = ?'); params.push(input.name.slice(0, 120)); }
     if (input.custom) { patch.push('custom = ?'); params.push(JSON.stringify({ ...parseJSON(existing.custom, {}), ...input.custom })); }
+    if (validTimezone(input.timezone) && !(existing as any).timezone) { patch.push('timezone = ?'); params.push(input.timezone); }
     let reactivated = false;
     if ((existing.status === 'unsubscribed' && input.reactivate) || (existing.status === 'pending' && input.skipConfirm)) {
       patch.push(`status = 'active'`, 'unsubscribed_at = NULL', 'confirmed_at = COALESCE(confirmed_at, ?)');
@@ -80,7 +89,7 @@ export async function subscribe(env: Env, pub: Publication, input: SubscribeInpu
     utm_term: input.utm?.term ?? null, utm_content: input.utm?.content ?? null,
     referrer_url: input.referrer?.slice(0, 500) ?? null, landing_path: input.landingPath?.slice(0, 300) ?? null,
     referral_code: id(10), referred_by: referredBy, custom: JSON.stringify(input.custom || {}),
-    country: input.country ?? null, ip: input.ip ?? null, confirmed_at: needsConfirm ? null : t, created_at: t, updated_at: t,
+    country: input.country ?? null, ip: input.ip ?? null, ...(validTimezone(input.timezone) ? { timezone: input.timezone } : {}), confirmed_at: needsConfirm ? null : t, created_at: t, updated_at: t,
   };
   try {
     await insert(env, 'subscribers', row);

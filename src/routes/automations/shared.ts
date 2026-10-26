@@ -1,5 +1,5 @@
 // Helpers shared by the automations dashboard views.
-import { STEP_TYPES, TRIGGERS, type Step } from '../../lib/automations';
+import { STEP_TYPES, TRIGGERS, triggerList, packTriggers, type Step } from '../../lib/automations';
 import { id, stripTags, truncate } from '../../lib/util';
 
 export const BRANCH_TYPES = new Set(['condition', 'ab_split']);
@@ -32,6 +32,12 @@ export function stepSummary(s: Step, names: Record<string, string> = {}): string
 }
 
 export function triggerSummary(t: any, names: Record<string, string> = {}): string {
+  const list = triggerList(t);
+  if (list.length > 1) return list.map((x) => oneTriggerSummary(x, names)).join('  OR  ');
+  return oneTriggerSummary(list[0] || t, names);
+}
+
+function oneTriggerSummary(t: any, names: Record<string, string> = {}): string {
   const def = TRIGGERS[t?.type];
   if (!def) return 'No trigger';
   const c = t.config || {};
@@ -85,11 +91,19 @@ export function normalizeSteps(input: unknown, seen = new Set<string>(), depth =
   return out;
 }
 
-export function normalizeTrigger(t: any): any {
-  if (!t || typeof t !== 'object' || !TRIGGERS[t.type]) return { type: 'welcome', config: {} };
+function normalizeOne(t: any): any | null {
+  if (!t || typeof t !== 'object' || !TRIGGERS[t.type]) return null;
   const out: any = { type: t.type, config: t.config && typeof t.config === 'object' ? t.config : {} };
   if (t.filter && Array.isArray(t.filter.rules) && t.filter.rules.length) out.filter = t.filter;
   return out;
+}
+
+/** One trigger, or several entry points (`{triggers: [...]}` / an array) → stored trigger JSON (see lib packTriggers). */
+export function normalizeTrigger(t: any): any {
+  const raw = Array.isArray(t) ? t : t && Array.isArray(t.triggers) ? t.triggers : [t];
+  const list = raw.slice(0, 10).map(normalizeOne).filter(Boolean);
+  if (!list.length) return { type: 'welcome', config: {} };
+  return packTriggers(list);
 }
 
 export function emailText(doc: any): string {

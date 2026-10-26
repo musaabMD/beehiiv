@@ -47,6 +47,25 @@
     if (typeof m.subtitle === 'string' && document.activeElement !== subtitle) { subtitle.value = m.subtitle; autosize(subtitle); }
   });
 
+  // ───────── content variants: Main (A) / Variant B (for content A/B tests) ─────────
+  let editorB = null, altDirty = false;
+  const vswitch = $('#pe-vswitch');
+  function showVariant(v) {
+    if (!vswitch) return;
+    if (v === 'b' && !editorB) {
+      // first open: start Variant B as a copy of the main content
+      const start = data.altDoc && (data.altDoc.blocks || []).length ? data.altDoc : JSON.parse(JSON.stringify(editor.getDoc()));
+      editorB = OHEditor.mount($('#pe-editor-b'), { doc: start, catalog: data.catalog, postId: null, features: { collab: false, paywall: true, dynamic: true, polls: true, ai: true }, onChange: () => { altDirty = true; markDirty(); } });
+      if (!data.altDoc) { altDirty = true; markDirty(); }
+    }
+    $('#pe-editor').hidden = v === 'b';
+    $('#pe-editor-b').hidden = v !== 'b';
+    $$('#pe-vswitch [data-v]').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+    window.OHEditor.active = v === 'b' ? editorB : editor;
+  }
+  $$('#pe-vswitch [data-v]').forEach((b) => b.addEventListener('click', () => showVariant(b.dataset.v)));
+  meta?.querySelector('[name=ab_enabled]')?.addEventListener('change', (e) => { if (vswitch) { vswitch.hidden = !e.target.checked; if (!e.target.checked) showVariant('a'); } });
+
   // ───────── autosave ─────────
   let dirty = false, saving = false, metaDirty = true, failCount = 0;
   const setStatus = (t, cls = '') => { saveEl.textContent = t; saveEl.className = 'pe-save ' + cls; };
@@ -73,9 +92,12 @@
     setStatus('Saving…', 'saving');
     const body = { title: title.value, subtitle: subtitle.value, content: editor.getDoc(), snapshot: !!opts.snapshot };
     if (metaDirty || opts.snapshot) body.meta = serializeMeta();
+    const sentAlt = altDirty && editorB;
+    if (sentAlt) { body.alt_content = editorB.getDoc(); altDirty = false; }
     try {
       const r = await json(base, body, 'PUT');
       metaDirty = false;
+      if (sentAlt) data.altDoc = body.alt_content;
       failCount = 0;
       setStatus('Saved', 'ok');
       if (r.slug && meta.slug && document.activeElement !== meta.slug && meta.slug.value !== r.slug) { meta.slug.value = r.slug; updateSerp(); }
@@ -84,6 +106,7 @@
       return r;
     } catch (e) {
       dirty = true;
+      if (sentAlt) altDirty = true;
       if (e.status === 403 || e.status === 413) { setStatus(e.message, 'err'); toast(e.message, 5000); }
       else { failCount++; setStatus(navigator.onLine ? 'Save failed — retrying…' : 'Offline — will retry', 'err'); setTimeout(() => save(), Math.min(30000, 2000 * 2 ** failCount)); }
     } finally { saving = false; }
@@ -265,14 +288,20 @@
     const items = [];
     items.push([!!title.value.trim(), title.value.trim() ? `Title: “${title.value.trim()}”` : 'Add a title', true]);
     if (emailing) {
-      const ab = m.ab_enabled && (m.ab_subjects || []).filter(Boolean).length >= 2;
-      items.push([true, ab ? `A/B test: ${(m.ab_subjects || []).filter(Boolean).length} subject lines, ${m.ab_sample}% sample, winner by ${m.ab_metric === 'clicks' ? 'clicks' : 'opens'} after ${m.ab_wait} min` : `Subject: “${m.email_subject || title.value}”`]);
+      const vs = [0, 1, 2, 3].map((i) => ({ s: (m.ab_subjects || [])[i] || '', p: (m.ab_previews || [])[i] || '', f: (m.ab_from_names || [])[i] || '', c: (m.ab_contents || [])[i] || 'a' })).filter((v, i) => i < 2 || v.s || v.p || v.f || v.c === 'b');
+      const multi = vs.some((v) => v.p || v.f || v.c === 'b');
+      const nv = multi ? vs.length : vs.filter((v) => v.s).length;
+      const ab = m.ab_enabled && nv >= 2;
+      const dims = [vs.some((v) => v.s) && 'subject', vs.some((v) => v.p) && 'preview text', vs.some((v) => v.f) && 'sender name', vs.some((v) => v.c === 'b') && 'content'].filter(Boolean);
+      items.push([true, ab ? `${multi ? 'Multivariate' : 'A/B'} test: ${nv} variants (${dims.join(', ')}), ${m.ab_sample}% sample, winner by ${m.ab_metric === 'clicks' ? 'clicks' : 'opens'} after ${m.ab_wait} min` : `Subject: “${m.email_subject || title.value}”`]);
+      if (ab && vs.some((v) => v.c === 'b') && !(editorB || (data.altDoc?.blocks || []).length)) items.push([false, 'A variant uses “Variant B content”, but it is empty — open the Variant B switch above the editor', true]);
       items.push([!!m.preview_text, m.preview_text ? `Preview text: “${m.preview_text}”` : 'No preview text — inboxes will show the first line of the email', false, true]);
       const s = meta.querySelector('[name=sender_id]');
       items.push([true, `From: ${s.selectedOptions[0]?.textContent.replace(' (default)', '')}`]);
       await countRecipients.now();
       items.push([lastCount !== 0, lastCount === null ? 'Recipients: calculating…' : `Recipients: ${lastCount.toLocaleString()} subscriber${lastCount === 1 ? '' : 's'}${m.audience !== 'all' ? ` (${m.audience} only)` : ''}${(m.segment_ids || []).length ? `, ${(m.segment_ids || []).length} segment(s)` : ''}${(m.exclude_segment_ids || []).length ? `, excluding ${(m.exclude_segment_ids || []).length}` : ''}`, lastCount === 0]);
       if (m.cohort_enabled) items.push([true, `Random cohort test enabled`]);
+      items.push([true, `Delivery: ${timingLabel()}`]);
       if (lastBytes) items.push([lastBytes < (data.gmailClip || 104448), `Email size ${(lastBytes / 1024).toFixed(0)} KB${lastBytes >= (data.gmailClip || 104448) ? ' — Gmail will clip it' : ''}`, false, true]);
     }
     items.push([true, m.platform === 'both' ? 'Publishes to email and your website' : m.platform === 'email' ? 'Email only (not on your website)' : 'Website only (no email is sent)']);
@@ -288,6 +317,19 @@
     updateSendBtn();
     sendDlg.showModal();
   }
+  function timingValue() {
+    const mode = $('input[name="pe-timing"]:checked')?.value || '';
+    return mode === 'sto' ? { mode: 'sto' } : mode === 'timezone' ? { mode: 'timezone', local_time: $('#pe-timing-at')?.value || '09:00' } : null;
+  }
+  function timingLabel() {
+    const t = timingValue();
+    return !t ? 'all at once' : t.mode === 'sto' ? 'send-time optimization (each subscriber’s usual open hour, within 24h)' : `${t.local_time} in each subscriber’s time zone`;
+  }
+  $('#pe-timing-at')?.addEventListener('focus', () => { const r = $('input[name="pe-timing"][value=timezone]'); if (r) r.checked = true; });
+  $('#pe-timing')?.addEventListener('change', () => {
+    const li = $$('#pe-checklist li').find((x) => x.textContent.includes('Delivery:'));
+    if (li) li.textContent = `✓ Delivery: ${timingLabel()}`;
+  });
   function updateSendBtn() {
     const when = $('input[name="pe-when"]:checked')?.value;
     const m = serializeMeta();
@@ -303,7 +345,7 @@
     btn.disabled = true;
     try {
       await save({ force: true });
-      const r = await json(`${base}/publish`, { mode: when, scheduled_at: at ? new Date(at).toISOString() : null });
+      const r = await json(`${base}/publish`, { mode: when, scheduled_at: at ? new Date(at).toISOString() : null, timing: timingValue() });
       dirty = false;
       toast(r.message);
       setTimeout(() => (location.href = r.redirect || '/app/posts'), 600);
