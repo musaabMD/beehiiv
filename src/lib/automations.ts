@@ -35,6 +35,8 @@ export const TRIGGERS: Record<string, { label: string; event?: string; fields?: 
   date_field: { label: 'Date in custom field (birthday, renewal…)', fields: ['key', 'offset_days'] },
   inactive: { label: 'Becomes inactive (no opens for N days)', fields: ['days'] },
   api: { label: 'Enrolled via API or manually' },
+  external_purchase: { label: 'Buys in your store (Shopify / WooCommerce / Stripe)', fields: ['platform', 'product_contains', 'min_total'] }, // matched + enrolled by lib/commerce
+  cart_abandoned: { label: 'Abandons a cart (Shopify / WooCommerce)', fields: ['delay_hours', 'min_value'] }, // polled by lib/commerce (default 1h, 0)
 };
 
 export const STEP_TYPES: Record<string, string> = {

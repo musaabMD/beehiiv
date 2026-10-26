@@ -102,6 +102,7 @@ When a post is created from a template, the template's current content is copied
 | Polls & surveys | list, live results/aggregates, individual responses; `POST /polls` (incl. trivia), `PATCH /polls/{id}` (close/reopen), `POST /surveys`, `PATCH /surveys/{id}` |
 | Webhooks | list, create (returns signing secret), update/upgrade version (`PATCH`), delete, `GET /webhooks/versions`, delivery log with every attempt (`?expand=attempts`, `GET /webhooks/{id}/deliveries/{did}`) |
 | Commerce | orders, products |
+| Transactional | `POST /transactional/send`, message log (`GET /transactional/messages`, `/transactional/messages/{id}`), templates (`GET`/`POST /transactional/templates`) — see below |
 | Podcasts | shows, episodes with downloads |
 | Stats | summary (with plain-English sentence), growth series, earnings |
 | Templates | list, get |
@@ -137,9 +138,28 @@ curl -X POST $API/automations/AUTOMATION_ID/resume -H "$AUTH"
 
 `GET /automations/{id}` returns the live `trigger`/`steps`, `has_draft`, and the `draft` version when one exists. Trigger types and step types are listed in the OpenAPI document; unknown types return `400 bad_request`.
 
+## Transactional email
+
+Send receipts, password resets and notifications through the publication's transactional sender (Mailchimp Transactional / Mandrill style). One recipient per call.
+
+```bash
+curl -X POST $API/transactional/send -H "$AUTH" -H 'content-type: application/json' -d '{
+  "to": "reader@example.com",
+  "template_id": "order-receipt",                 # or "subject" + "html" | "markdown" | "text"
+  "merge_vars": {"order": {"id": "1001", "total": "$29.00"}},   # {{order.id}} in subject and body
+  "reply_to": "support@example.com", "tags": ["receipt"],
+  "idempotency_key": "order-1001",                # a repeat returns the original message (200, "duplicate": true)
+  "track": true,                                  # open + click tracking (off by default)
+  "attachments": [{"filename": "receipt.pdf", "content": "<base64>", "type": "application/pdf"}]
+}'
+# → 201 {"data": {"id": "tx_…", "status": "sent", "message_id": "…", …}}
+```
+
+Errors: `400 invalid_recipient | bad_request`, `404 not_found` (template), `402 suspended`, `429 rate_limited` (60/min per key) or `429 daily_cap` (200 per 24 h on Free, 5,000 on paid plans). Transactional mail does not count toward the plan's monthly newsletter emails; newsletter unsubscribes don't block it, transactional bounces/complaints do. Details: [Store sync, transactional email & Inbox](/docs/commerce).
+
 ## Segment rules
 
-`{"op":"and","rules":[{"field":"tag","cmp":"has","value":"vip"},{"field":"last_open_at","cmp":"within_days","value":30}]}` — groups can nest. Fields include email, status, tier, source (incl. `magic_link`), utm_*, created_at, engagement, opens/clicks, tag, custom (`{"key","value"}`), opened_post, clicked_url, automation (started/not_started/completed), segment, list, poll, survey, purchased, event_registered, trial, subscription_status and condition_set.
+`{"op":"and","rules":[{"field":"tag","cmp":"has","value":"vip"},{"field":"last_open_at","cmp":"within_days","value":30}]}` — groups can nest. Fields include email, status, tier, source (incl. `magic_link`), utm_*, created_at, engagement, opens/clicks, tag, custom (`{"key","value"}`), opened_post, clicked_url, automation (started/not_started/completed), segment, list, poll, survey, purchased, event_registered, trial, subscription_status and condition_set, plus store purchases from Shopify / WooCommerce / Stripe: `ext_purchased` (product name, SKU or id; contains / not_contains), `ext_platform`, `ext_total_spent`, `ext_orders_count`, `ext_last_order`, `cart_abandoned`.
 
 ## Webhooks
 

@@ -281,6 +281,7 @@ export async function applyBounce(env: Env, it: BounceInput, source: ReportSourc
     else if (ctx.campaign) await run(env, `UPDATE deliveries SET status = ?, bounce_type = ? WHERE send_id = ? AND email = ?`, st, type, ctx.campaign, email);
     else await run(env, `UPDATE deliveries SET status = ?, bounce_type = ? WHERE id = (SELECT id FROM deliveries WHERE email = ? ORDER BY created_at DESC LIMIT 1)`, st, type, email);
   }
+  if (ctx.kind === 'transactional' && ctx.messageId) await run(env, `UPDATE tx_messages SET status = ?, error = ? WHERE message_id = ?`, type === 'complaint' ? 'complained' : 'bounced', (it.diagnostic || it.status || type).slice(0, 300), ctx.messageId).catch(() => {}); // transactional API log
   await logInbound(env, { source, kind: type === 'complaint' ? 'complaint' : 'bounce', email, pubId: ctx.pubId, mailKind: ctx.kind, bounceType: type, detail: [it.status, it.diagnostic].filter(Boolean).join(' ') });
   return { email, type, kind: ctx.kind, pubId: ctx.pubId };
 }
@@ -406,6 +407,8 @@ export async function handleInboundEmail(env: Env, message: InboundMessage): Pro
   const rcpt = (message.to || '').toLowerCase();
   const raw = typeof message.raw === 'string' ? message.raw : await new Response(message.raw).text();
   const r = parseReport(raw.length > MAX_INBOUND ? raw.slice(0, MAX_INBOUND) : raw, message.from || '');
+  // Reader replies to reply+<slug>.<delivery>@SHARED_FROM_DOMAIN land in the publication's Inbox (lib/inbox).
+  if ((r.type === 'other' || r.type === 'unsubscribe') && rcpt.startsWith('reply+')) return (await import('./inbox')).handleInboundReply(env, message, raw.length > MAX_INBOUND ? raw.slice(0, MAX_INBOUND) : raw, rcpt);
   switch (r.type) {
     case 'dsn': {
       let n = 0;

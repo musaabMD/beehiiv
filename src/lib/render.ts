@@ -590,6 +590,8 @@ export async function renderDoc(doc: Doc, ctx: RenderCtx): Promise<Rendered> {
   let html = await renderBlocks(st, doc.blocks || []);
   html = html.replace('<!--OH_TOC-->', tocHtml(st)).replace(/<!--OH_TOC-->/g, '');
   html += footnotesHtml(st);
+  // {{cart.items}} / {{cart.recovery_url}} … from the subscriber's abandoned cart (lib/commerce)
+  if (!ctx.skipMerge && html.includes('{{cart.')) html = await (await import('./commerce')).renderCartTags(ctx.env, ctx.pub, ctx.subscriber, html);
   const vars = mergeVars(ctx.pub, ctx.subscriber, ctx.siteUrl);
   if (!ctx.skipMerge && (!ctx.preview || ctx.subscriber)) html = applyMerge(html, vars);
   const text = htmlToText(html);

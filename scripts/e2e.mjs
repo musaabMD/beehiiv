@@ -5,6 +5,7 @@
 //        → platform plans (usage page, subscriber cap, email allowance, simulated upgrade, campaign pause, approval)
 //        → marketing (social posting against a local mock Bluesky PDS + Mastodon, calendar, campaigns, ad audiences),
 //          PWA, and SSO (Google + Enterprise OIDC against a local mock provider on MOCK_PORT, default 8816).
+import { createHmac } from 'node:crypto';
 import { execSync } from 'node:child_process';
 
 const BASE = process.env.BASE || 'http://localhost:8787';
@@ -561,6 +562,167 @@ console.log('11m. Marketing: social posting (mock Bluesky + Mastodon), calendar,
   }
 }
 
+{ // commerce sync, cart abandonment, transactional email, inbox
+console.log('11c. Store sync, cart abandonment, transactional API, reply inbox');
+{
+  const tick = async () => { sql(`DELETE FROM rate_limits WHERE key IN ('periodic:commerce.carts','periodic:automations.runs')`); await cron(); await sleep(1500); };
+  const b64h = (secret, body) => createHmac('sha256', secret).update(body).digest('base64');
+  const hook = (token, headers, body) => fetch(`${BASE}/hooks/commerce/${token}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
+  const mcpCall = async (name, args) => (await (await fetch(`${BASE}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name, arguments: args } }) })).json()).result;
+  // ── Shopify ──
+  r = await req('/app/settings/commerce/shopify', { form: { secret: 'shpss_e2e_secret', store_url: `e2e-${rnd}.myshopify.com`, abandon_hours: '1', tag_buyers: 'on' } });
+  const shop = sql(`SELECT * FROM commerce_stores WHERE pub_id = '${pubId}' AND platform = 'shopify'`)[0];
+  ok(!!shop?.hook_token, 'Shopify store connected (webhook URL issued)');
+  r = await req('/app/settings/commerce');
+  ok(r.status === 200 && (await r.text()).includes(`/hooks/commerce/${shop.hook_token}`), 'Store integrations page shows the webhook URL');
+  const shopSend = (topic, payload, wid = 'w' + Math.random().toString(36).slice(2)) => {
+    const body = JSON.stringify(payload);
+    return hook(shop.hook_token, { 'x-shopify-topic': topic, 'x-shopify-hmac-sha256': b64h('shpss_e2e_secret', body), 'x-shopify-webhook-id': wid, 'x-shopify-shop-domain': shop.store_url }, body);
+  };
+  r = await hook(shop.hook_token, { 'x-shopify-topic': 'orders/paid', 'x-shopify-hmac-sha256': 'AAAA' }, '{"id":1}');
+  ok(r.status === 401, 'Shopify webhook with a bad HMAC is rejected (401)');
+  const buyer = `shopper.${rnd}@gmail.com`, cust = `cust.${rnd}@gmail.com`;
+  const lineItems = [{ id: 1, product_id: 632910392, variant_id: 808950810, sku: 'HOOD-1', title: 'Lnkbase Hoodie', quantity: 1, price: '49.00' }, { id: 2, product_id: 632910393, title: 'Sticker pack', quantity: 2, price: '5.00' }];
+  r = await shopSend('customers/create', { id: 6523049676001, email: cust, first_name: 'Cara', last_name: 'Customer', email_marketing_consent: { state: 'not_subscribed', opt_in_level: 'single_opt_in' } });
+  ok(r.status === 200 && sql(`SELECT COUNT(*) AS n FROM commerce_customers WHERE email = '${cust}'`)[0].n === 1 && sql(`SELECT COUNT(*) AS n FROM subscribers WHERE email = '${cust}'`)[0].n === 0, 'customer without marketing consent is stored but not subscribed');
+  const order1 = { id: 5523049676000 + Math.floor(Math.random() * 100000), name: '#1001', order_number: 1001, email: buyer, financial_status: 'paid', total_price: '59.00', currency: 'USD', checkout_token: `ck-${rnd}-x`, processed_at: new Date().toISOString(), buyer_accepts_marketing: true, customer: { id: 6523049676002, email: buyer, first_name: 'Bea', last_name: 'Buyer', email_marketing_consent: { state: 'subscribed' } }, line_items: lineItems };
+  const wid1 = 'wid-' + rnd;
+  r = await shopSend('orders/paid', order1, wid1);
+  const bsub = sql(`SELECT * FROM subscribers WHERE email = '${buyer}'`)[0];
+  ok(r.status === 200 && bsub?.status === 'active' && bsub.source === 'commerce', 'consenting Shopify buyer becomes an active subscriber', JSON.stringify(bsub || {}).slice(0, 120));
+  const btags = sql(`SELECT tag FROM subscriber_tags WHERE subscriber_id = '${bsub?.id}'`).map((x) => x.tag);
+  ok(btags.includes('bought-lnkbase-hoodie') && btags.includes('customer-shopify'), 'buyer tagged by product', btags.join(','));
+  ok(sql(`SELECT COUNT(*) AS n FROM external_order_items i JOIN external_orders o ON o.id = i.order_id WHERE o.email = '${buyer}' AND o.status = 'paid'`)[0].n === 2, 'order and line items stored');
+  r = await shopSend('orders/paid', order1, wid1);
+  ok((await r.json()).duplicate === true && sql(`SELECT COUNT(*) AS n FROM external_orders WHERE email = '${buyer}'`)[0].n === 1, 'redelivered webhook is ignored (idempotent)');
+  await shopSend('orders/create', { ...order1, id: order1.id + 7, name: '#1002', email: cust, financial_status: 'paid', buyer_accepts_marketing: false, customer: { id: 6523049676001, email: cust, first_name: 'Cara', email_marketing_consent: { state: 'not_subscribed' } } });
+  ok(sql(`SELECT COUNT(*) AS n FROM external_orders WHERE email = '${cust}' AND status = 'paid'`)[0].n === 1 && sql(`SELECT COUNT(*) AS n FROM subscribers WHERE email = '${cust}'`)[0].n === 0, 'purchase from a non-consenting customer is recorded without subscribing them');
+  const seg = await mcpCall('create_segment_from_description', { name: 'Hoodie buyers', dry_run: true, rules: { op: 'and', rules: [{ field: 'ext_purchased', cmp: 'contains', value: 'Hoodie' }, { field: 'ext_platform', cmp: 'eq', value: 'shopify' }, { field: 'ext_total_spent', cmp: 'gt', value: 50 }, { field: 'ext_orders_count', cmp: 'eq', value: 1 }] } });
+  ok(seg?.structuredContent?.matches === 1, 'segment "bought Hoodie on Shopify, spent > 50, 1 order" matches the buyer', JSON.stringify(seg).slice(0, 200));
+  r = await req(`/app/audience/s/${bsub.id}`); const sp = await r.text();
+  ok(sp.includes('Store purchases') && sp.includes('Lnkbase Hoodie'), 'subscriber page shows store purchase history');
+  r = await req('/app/analytics/revenue'); ok((await r.text()).includes('Store revenue'), 'Analytics → Revenue includes store revenue');
+  // external purchase automation
+  let au = await api(key, 'POST', '/automations', { name: `Ext buyers ${rnd}`, trigger: { type: 'external_purchase', config: { platform: 'shopify', product_contains: 'hoodie' } }, steps: [{ type: 'add_tag', config: { tags: ['ext-auto'] } }], activate: true });
+  ok(au.status === 201 || au.status === 200, 'automation with the external_purchase trigger created', JSON.stringify(au.body).slice(0, 160));
+  await shopSend('orders/paid', { ...order1, id: order1.id + 9, name: '#1003', checkout_token: null });
+  ok(sql(`SELECT COUNT(*) AS n FROM subscriber_tags WHERE subscriber_id = '${bsub.id}' AND tag = 'ext-auto'`)[0].n === 1, 'external purchase enrolls the buyer in the automation');
+  // cart abandonment
+  await req('/app/settings/commerce/recovery-automation', { form: {} });
+  const rec = sql(`SELECT id FROM automations WHERE pub_id = '${pubId}' AND name = 'Cart recovery'`)[0];
+  ok(!!rec, 'cart recovery automation template created');
+  au = await api(key, 'POST', `/automations/${rec.id}/publish`, { activate: true });
+  ok(au.status === 200, 'cart recovery automation activated', JSON.stringify(au.body).slice(0, 160));
+  const ctoken = `ck-${rnd}-cart`;
+  const checkout = { id: 901414060 + Math.floor(Math.random() * 1000), token: ctoken, cart_token: 'ct-' + rnd, email: buyer, abandoned_checkout_url: `https://e2e-${rnd}.myshopify.com/checkouts/${ctoken}/recover?key=abc`, total_price: '98.00', currency: 'USD', completed_at: null, updated_at: new Date(Date.now() - 2 * 3600_000).toISOString(), customer: { id: 6523049676002, email: buyer, first_name: 'Bea' }, line_items: [{ title: 'Lnkbase Hoodie', product_id: 632910392, quantity: 2, price: '49.00' }] };
+  r = await shopSend('checkouts/update', checkout);
+  ok(r.status === 200 && sql(`SELECT status FROM abandoned_carts WHERE external_id = '${ctoken}'`)[0]?.status === 'open', 'checkout tracked');
+  await tick();
+  ok(sql(`SELECT status FROM abandoned_carts WHERE external_id = '${ctoken}'`)[0].status === 'abandoned', 'checkout past the threshold is marked abandoned');
+  const recMail = sql(`SELECT html FROM outbox WHERE to_email = '${buyer}' AND subject = 'You left something in your cart'`)[0];
+  ok(!!recMail && recMail.html.includes('Lnkbase Hoodie') && recMail.html.includes('$98.00'), 'cart_abandoned automation emails the cart contents', (recMail?.html || 'no email').slice(0, 80));
+  ok(!!recMail && /\/t\/c\//.test(recMail.html) && recMail.html.includes('Complete your order') && !recMail.html.includes('{{cart.'), 'recovery button present (tracked link, tags replaced)');
+  await tick();
+  ok(sql(`SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id = '${rec.id}'`)[0].n === 1, 'one journey per cart (no re-enrollment)');
+  await shopSend('orders/create', { ...order1, id: order1.id + 11, name: '#1004', checkout_token: ctoken, financial_status: 'paid' });
+  ok(sql(`SELECT status FROM abandoned_carts WHERE external_id = '${ctoken}'`)[0].status === 'recovered' && sql(`SELECT status FROM automation_runs WHERE automation_id = '${rec.id}'`)[0].status === 'exited', 'completed order recovers the cart and stops the journey');
+  // WooCommerce
+  await req('/app/settings/commerce/woocommerce', { form: { secret: 'wc-secret-e2e', store_url: 'https://shop.example.org', abandon_hours: '1', tag_buyers: 'on' } });
+  const woo = sql(`SELECT * FROM commerce_stores WHERE pub_id = '${pubId}' AND platform = 'woocommerce'`)[0];
+  const wooSend = (topic, payload) => { const body = JSON.stringify(payload); return hook(woo.hook_token, { 'x-wc-webhook-topic': topic, 'x-wc-webhook-signature': b64h('wc-secret-e2e', body), 'x-wc-webhook-delivery-id': 'd' + Math.random().toString(36).slice(2), 'x-wc-webhook-source': 'https://shop.example.org/' }, body); };
+  r = await hook(woo.hook_token, { 'content-type': 'application/x-www-form-urlencoded' }, 'webhook_id=17');
+  ok(r.status === 200, 'WooCommerce ping accepted');
+  const wbuyer = `woo.${rnd}@gmail.com`;
+  const wOrder = { id: 727, number: '727', order_key: 'wc_order_' + rnd, status: 'pending', currency: 'USD', total: '29.00', date_created: new Date().toISOString().slice(0, 19), date_modified_gmt: new Date(Date.now() - 3 * 3600_000).toISOString().slice(0, 19), date_paid: null, customer_id: 0, billing: { first_name: 'Wanda', last_name: 'Woo', email: wbuyer }, payment_url: 'https://shop.example.org/checkout/order-pay/727/?pay_for_order=true&key=wc_order_x', meta_data: [{ id: 1, key: '_newsletter_opt_in', value: 'yes' }], line_items: [{ id: 315, name: 'Course: Writing', product_id: 93, variation_id: 0, quantity: 1, sku: 'CRS-1', price: 29, total: '29.00' }] };
+  r = await wooSend('order.created', wOrder);
+  ok(r.status === 200 && sql(`SELECT status FROM subscribers WHERE email = '${wbuyer}'`)[0]?.status === 'active' && sql(`SELECT COUNT(*) AS n FROM abandoned_carts WHERE email = '${wbuyer}' AND status = 'open'`)[0].n === 1, 'WooCommerce pending order (opted in) → subscriber + open cart');
+  await wooSend('order.updated', { ...wOrder, status: 'processing', date_paid: new Date().toISOString().slice(0, 19) });
+  ok(sql(`SELECT status FROM external_orders WHERE email = '${wbuyer}'`)[0].status === 'paid' && sql(`SELECT status FROM abandoned_carts WHERE email = '${wbuyer}'`)[0].status === 'recovered', 'WooCommerce payment marks the order paid and the cart recovered');
+  r = await hook(woo.hook_token, { 'x-wc-webhook-topic': 'order.created', 'x-wc-webhook-signature': b64h('wrong', '{}') }, '{}');
+  ok(r.status === 401, 'WooCommerce bad signature rejected');
+  // Stripe (creator's own account)
+  await req('/app/settings/commerce/stripe', { form: { secret: 'whsec_e2e_test', tag_buyers: 'on' } });
+  const stp = sql(`SELECT * FROM commerce_stores WHERE pub_id = '${pubId}' AND platform = 'stripe'`)[0];
+  const sbuyer = `stripe.${rnd}@gmail.com`;
+  const stripeSend = (evt, t = Math.floor(Date.now() / 1000)) => { const body = JSON.stringify(evt); const sig = createHmac('sha256', 'whsec_e2e_test').update(`${t}.${body}`).digest('hex'); return hook(stp.hook_token, { 'stripe-signature': `t=${t},v1=${sig}` }, body); };
+  const evt = { id: 'evt_' + rnd, object: 'event', type: 'checkout.session.completed', data: { object: { id: 'cs_test_' + rnd, object: 'checkout.session', amount_total: 1500, currency: 'usd', customer: 'cus_' + rnd, customer_details: { email: sbuyer, name: 'Sam Stripe' }, payment_intent: 'pi_' + rnd, payment_status: 'paid', mode: 'payment', consent: { promotions: 'opt_in' }, metadata: { product_id: 'ebook-1', product_name: 'Ebook' }, created: Math.floor(Date.now() / 1000) } } };
+  r = await stripeSend(evt, Math.floor(Date.now() / 1000) - 900);
+  ok(r.status === 401, 'Stripe event outside the 5-minute tolerance rejected');
+  r = await stripeSend(evt);
+  ok(r.status === 200 && sql(`SELECT status FROM subscribers WHERE email = '${sbuyer}'`)[0]?.status === 'active', 'Stripe checkout with promotions consent → subscriber');
+  await stripeSend({ id: 'evt_ch_' + rnd, type: 'charge.succeeded', data: { object: { id: 'ch_' + rnd, amount: 1500, amount_captured: 1500, currency: 'usd', paid: true, payment_intent: 'pi_' + rnd, billing_details: { email: sbuyer, name: 'Sam Stripe' }, metadata: {}, created: Math.floor(Date.now() / 1000) } } });
+  ok(sql(`SELECT COUNT(*) AS n FROM external_orders WHERE email = '${sbuyer}'`)[0].n === 1, 'charge.succeeded for the same payment does not double-count');
+
+  // ── Transactional API ──
+  let tx = await api(key, 'POST', '/transactional/send', { to: bsub.email, subject: 'Receipt {{order.id}}', markdown: '# Thanks {{name}}\n\nOrder **{{order.id}}** total {{order.total}}.', merge_vars: { name: 'Bea', order: { id: 'A-1', total: '$59.00' } }, tags: ['receipt'] });
+  ok(tx.status === 201 && ['simulated', 'sent'].includes(tx.body?.data?.status) && tx.body.data.subject === 'Receipt A-1', 'transactional send (markdown + merge vars)', JSON.stringify(tx.body).slice(0, 200));
+  const txo = sql(`SELECT kind, html, headers FROM outbox WHERE to_email = '${bsub.email}' AND subject = 'Receipt A-1'`)[0];
+  ok(txo?.kind === 'transactional' && txo.html.includes('A-1') && txo.html.includes('$59.00') && !txo.headers.includes('List-Unsubscribe'), 'sent as transactional mail with merge vars applied');
+  const tpl = await api(key, 'POST', '/transactional/templates', { name: 'Password reset', slug: 'password-reset', subject: 'Reset your password', body: 'Click <a href="https://example.com/reset?u={{user.id}}">here</a>.', format: 'html' });
+  ok(tpl.status === 201 && tpl.body?.data?.slug === 'password-reset', 'template created via API');
+  const idem = 'reset-' + rnd;
+  tx = await api(key, 'POST', '/transactional/send', { to: bsub.email, template_id: 'password-reset', merge_vars: { user: { id: 42 } }, idempotency_key: idem, track: true });
+  const tx2 = await api(key, 'POST', '/transactional/send', { to: bsub.email, template_id: 'password-reset', merge_vars: { user: { id: 42 } }, idempotency_key: idem, track: true });
+  ok(tx.status === 201 && tx2.status === 200 && tx2.body.data.duplicate === true && tx2.body.data.id === tx.body.data.id && sql(`SELECT COUNT(*) AS n FROM tx_messages WHERE idempotency_key = '${idem}'`)[0].n === 1, 'idempotency_key prevents a second send');
+  const thtml = sql(`SELECT html FROM outbox WHERE message_id = (SELECT message_id FROM tx_messages WHERE id = '${tx.body.data.id}')`)[0]?.html || '';
+  ok(thtml.includes(`/t/x/o/${tx.body.data.id}.gif`) && thtml.includes(`/t/x/c/${tx.body.data.id}/0`), 'tracking pixel and click links added when track=true');
+  sql(`UPDATE tx_messages SET created_at = created_at - 60000 WHERE id = '${tx.body.data.id}'`);
+  await fetch(`${BASE}/t/x/o/${tx.body.data.id}.gif`, { headers: { 'user-agent': UA } });
+  const clk = await fetch(`${BASE}/t/x/c/${tx.body.data.id}/0`, { headers: { 'user-agent': UA }, redirect: 'manual' });
+  const txm = (await api(key, 'GET', `/transactional/messages/${tx.body.data.id}`)).body?.data;
+  ok(clk.status === 302 && clk.headers.get('location') === 'https://example.com/reset?u=42' && txm?.opens >= 1 && txm?.clicks === 1, 'open + click recorded and redirected', JSON.stringify(txm).slice(0, 200));
+  sql(`INSERT INTO suppressions (id, scope, pub_id, email, reason, created_at) VALUES ('sx${rnd}', 'pub', '${pubId}', '${bsub.email}', 'complaint', ${Date.now()})`);
+  tx = await api(key, 'POST', '/transactional/send', { to: bsub.email, subject: 'Still delivered', text: 'hi' });
+  ok(['simulated', 'sent'].includes(tx.body?.data?.status), 'newsletter complaint does not block transactional mail');
+  sql(`DELETE FROM suppressions WHERE id = 'sx${rnd}'`);
+  sql(`INSERT INTO suppressions (id, scope, pub_id, email, reason, created_at) VALUES ('st${rnd}', 'transactional', '', 'blocked.${rnd}@gmail.com', 'manual', ${Date.now()})`);
+  tx = await api(key, 'POST', '/transactional/send', { to: `blocked.${rnd}@gmail.com`, subject: 'Nope', text: 'hi' });
+  ok(tx.body?.data?.status === 'suppressed', 'transactional suppression respected');
+  const srch = await api(key, 'GET', '/transactional/messages?tag=receipt');
+  ok(srch.body?.data?.length === 1 && srch.body.data[0].subject === 'Receipt A-1', 'message log searchable by tag');
+  r = await req('/app/settings/transactional?q=Receipt'); const tp = await r.text();
+  ok(r.status === 200 && tp.includes('Receipt A-1') && tp.includes(bsub.email), 'Settings → Transactional email lists messages');
+  const mt = await mcpCall('send_transactional', { to: bsub.email, subject: 'From MCP', text: 'Hello from MCP' });
+  ok(mt && !mt.isError && ['simulated', 'sent'].includes(mt.structuredContent?.status), 'MCP send_transactional', JSON.stringify(mt).slice(0, 160));
+  const kid = sql(`SELECT id FROM api_keys WHERE pub_id = '${pubId}' AND revoked_at IS NULL LIMIT 1`)[0].id;
+  sql(`INSERT OR REPLACE INTO rate_limits (key, count, reset_at) VALUES ('tx:${kid}', 60, ${Date.now() + 60000})`);
+  tx = await api(key, 'POST', '/transactional/send', { to: bsub.email, subject: 'Too many', text: 'x' });
+  ok(tx.status === 429 && tx.body?.error?.code === 'rate_limited', 'per-key transactional rate limit (429)');
+  sql(`DELETE FROM rate_limits WHERE key = 'tx:${kid}'`);
+
+  // ── Reply inbox ──
+  await req('/app/audience/inbox/settings', { form: { collect_replies: 'on', inbox_forward: 'on' } });
+  ok(JSON.parse(sql(`SELECT settings FROM publications WHERE id = '${pubId}'`)[0].settings).collect_replies === true, 'Collect replies in Inbox turned on');
+  const ip = await newPost('Inbox');
+  const isend = await api(key, 'POST', `/posts/${ip}/send`, {});
+  ok(isend.status === 202, 'newsletter sent with reply collection on', JSON.stringify(isend.body).slice(0, 120));
+  let ib = null;
+  for (let i = 0; i < 15 && !ib; i++) { await cron(); await sleep(1000); ib = sql(`SELECT o.headers, d.id AS did FROM outbox o JOIN deliveries d ON d.message_id = o.message_id WHERE o.to_email = '${buyer}' AND o.subject LIKE '%Inbox ${rnd}%'`)[0]; }
+  const rt = ib ? JSON.parse(ib.headers)['Reply-To'] : '';
+  ok(!!ib && rt === `reply+${slug}.${ib.did.slice(0, 12)}@news.lnkbase.com`, 'newsletter Reply-To is the per-delivery reply address', rt);
+  const eml = [`From: "Bea Buyer" <${buyer}>`, `To: ${rt}`, `Subject: Re: Inbox ${rnd}`, `Message-ID: <reply-${rnd}@mail.gmail.com>`, `Date: ${new Date().toUTCString()}`, 'MIME-Version: 1.0', 'Content-Type: multipart/alternative; boundary="b1"', '', '--b1', 'Content-Type: text/plain; charset=UTF-8', '', 'Loved this issue! One question about pricing.', '', `On Mon, Oct 26, 2026 at 9:00 AM E2E Weekly <${slug}@news.lnkbase.com> wrote:`, '> Hello there', '--b1', 'Content-Type: text/html; charset=UTF-8', '', '<div>Loved this issue! One question about pricing.</div><script>alert(1)</script>', '--b1--', ''].join('\r\n');
+  r = await fetch(`${BASE}/cdn-cgi/handler/email?from=${encodeURIComponent(buyer)}&to=${encodeURIComponent(rt)}`, { method: 'POST', body: eml });
+  const th = sql(`SELECT * FROM inbox_threads WHERE pub_id = '${pubId}' AND email = '${buyer}'`)[0];
+  ok(r.status === 200 && th && th.subscriber_id === bsub.id && th.post_id === ip && th.unread === 1 && th.verified === 1, 'reply stored as an Inbox thread linked to subscriber + post', `${r.status} ${JSON.stringify(th || {}).slice(0, 160)}`);
+  ok(sql(`SELECT COUNT(*) AS n FROM outbox WHERE to_email = '${email}' AND subject = 'Reply: Re: Inbox ${rnd}'`)[0].n === 1, 'copy of the reply emailed to the owner');
+  r = await fetch(`${BASE}/cdn-cgi/handler/email?from=x@evil.example&to=${encodeURIComponent(`reply+${slug}.zzzzzzzzzzzz@news.lnkbase.com`)}`, { method: 'POST', body: eml });
+  ok((await r.text()).includes('rejected'), 'reply to an unknown reply address is rejected');
+  r = await req('/app/audience/inbox'); const inb = await r.text();
+  ok(inb.includes('Bea Buyer') && inb.includes(`Inbox ${rnd}`), 'Audience → Inbox lists the conversation');
+  r = await req(`/app/audience/inbox/${th?.id}`); const tvh = await r.text();
+  ok(tvh.includes('One question about pricing') && !tvh.includes('<script>alert(1)') && sql(`SELECT unread FROM inbox_threads WHERE id = '${th?.id}'`)[0]?.unread === 0, 'thread view shows the message (sanitized) and marks it read');
+  await req(`/app/audience/inbox/${th?.id}/reply`, { form: { body: 'Thanks Bea! Pricing is on the site.' } });
+  const out = sql(`SELECT headers, from_email FROM outbox WHERE to_email = '${buyer}' AND subject = 'Re: Inbox ${rnd}' ORDER BY created_at DESC LIMIT 1`)[0];
+  const oh = out ? JSON.parse(out.headers) : {};
+  ok(oh['In-Reply-To'] === `<reply-${rnd}@mail.gmail.com>` && oh['Reply-To'] === rt && out.from_email.includes(`${slug}@news.lnkbase.com`), 'reply sent from the publication sender, threaded via In-Reply-To', JSON.stringify(oh).slice(0, 200));
+  ok(sql(`SELECT COUNT(*) AS n FROM inbox_messages WHERE thread_id = '${th?.id}'`)[0].n === 2, 'outgoing reply stored in the thread');
+  await req(`/app/audience/inbox/${th?.id}/archive`, { form: {} });
+  ok(sql(`SELECT status FROM inbox_threads WHERE id = '${th?.id}'`)[0]?.status === 'archived', 'thread archived');
+  await req('/app/audience/inbox/settings', { form: {} });
+  sql(`DELETE FROM subscribers WHERE email IN ('${buyer}', '${wbuyer}', '${sbuyer}')`);
+}
+
+}
 console.log('12. Errors');
 const errs = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
 ok(errs.length === 0, 'no server errors logged', JSON.stringify(errs).slice(0, 800));

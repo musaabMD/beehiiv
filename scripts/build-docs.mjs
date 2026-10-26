@@ -7,6 +7,7 @@ const pages = [
   ['api', 'REST API', 'docs/API.md'],
   ['mcp', 'MCP server (AI tools)', 'docs/MCP.md'],
   ['deliverability', 'Deliverability', 'docs/DELIVERABILITY.md'],
+  ['commerce', 'Store sync, transactional email & Inbox', 'docs/COMMERCE.md'],
   ['support', 'Support', 'docs/SUPPORT.md'],
   ['architecture', 'Architecture', 'docs/ARCHITECTURE.md'],
 ];

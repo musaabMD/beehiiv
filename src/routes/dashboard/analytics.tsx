@@ -14,6 +14,7 @@ import { DashLayout } from '../../ui/layout';
 import { Card, Grid, Stats, Stat, Table, LineChart, Bars, Badge, Status, Empty, LinkBtn, Btn, Field, Input, back } from '../../ui/components';
 import { TrendChart, RangeBar, Kpi, FilterChips, parseFilters, normalizeChipQuery, CompareChart, csv, qsWith, fmtPct, fmtNum, fmtUsd, DASH_STYLE } from './parts';
 import { fmtDate, ago, id, now, parseJSON, str, form, esc } from '../../lib/util';
+import { StoreRevenueCard } from '../integrations-commerce';
 
 const head = <style>{raw(DASH_STYLE)}</style>;
 
@@ -392,6 +393,7 @@ export function registerAnalytics(dash: App) {
     return c.html(
       <Page c={c} title="Revenue" sub="revenue">
         <RangeBar c={c} range={r} />
+        <StoreRevenueCard c={c} from={r.from} to={r.to} />
         <div class="stats kpis6">
           <Kpi label="Revenue" cur={k.revenue} prev={kP.revenue} fmt={fmtUsd} />
           <Kpi label="MRR" cur={k.mrr} fmt={fmtUsd} sub={<span class="muted">ARR {fmtUsd(k.arr)}</span>} />

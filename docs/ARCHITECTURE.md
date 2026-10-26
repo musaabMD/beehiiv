@@ -55,6 +55,9 @@ Public site (`/s/:slug/...`):
 
 Root:
 - **platform** (`routes/platform.tsx`): `/checkout/plan/:id` (simulated plan checkout); dash `/app/admin/*` (superadmin Platform admin)
+- **integrations-commerce** (`routes/integrations-commerce.tsx`): `POST /hooks/commerce/:token` (store webhooks); dash `/app/settings/commerce`
+- **transactional** (`routes/settings/transactional.tsx`): `/t/x/o/:id.gif`, `/t/x/c/:id/:n` (transactional tracking); dash `/app/settings/transactional`
+- **inbox** (`routes/audience/inbox.tsx`): dash `/app/audience/inbox`
 - **core** (`routes/core.tsx`): `/health`, `/media/*`, `/t/o/:token` (open pixel), `/t/c/:token` (click), `/u/:tok` (unsubscribe incl. RFC 8058 one-click POST), `/pref/:tok`, `/checkout/simulate/:id`, `/hooks/stripe`, `/hooks/bounce`, `/hooks/fbl`
 - **landing**: `/` (sales page), `/docs`, `/docs/*`
 - **auth**: `/login`, `/signup`, `/logout`, `/forgot`, `/reset/:token`, `/magic/:token`, `/device`, `/device/:code`, `/invite/:token`, `/transfer/:token`, `/verify/:token`
@@ -98,6 +101,10 @@ Dashboard shared endpoints:
 | plans.ts | hosted-service plans: `listPlans(env)`, `DEFAULT_PLANS`, `LIMITS`, workspace usage, `planStatus`, `checkSend`/`assertCanSend` (`SendBlockedError`), branding, 80% usage warning |
 | platformbilling.ts | platform plan billing: `changePlan` (upgrade now / downgrade at period end), Stripe Checkout subscriptions or simulated checkout, `handlePlatformStripeEvent`, failed-payment grace, lifecycle job |
 | safety.ts | multi-tenant sending safety: campaign auto-pause (bounces/complaints), account suspension, first-large-campaign approval, new-account ramp |
+| commerce.ts | store sync: Shopify / WooCommerce / Stripe webhook verification + parsing, customers (consent-respecting), external orders, buyer tags, `external_purchase` + `cart_abandoned` enrollment, cart abandonment tick, `{{cart.*}}` merge tags (docs/COMMERCE.md) |
+| commerce-rules.ts | segment fields over store purchases (`ext_*`, `cart_abandoned`), used by segments.ts |
+| transactional.ts | transactional email API: `sendTx` (templates, merge vars, idempotency, tracking, caps), message log, templates |
+| inbox.ts | reply Inbox: per-delivery Reply-To (`reply+<slug>.<delivery>@SHARED_FROM_DOMAIN`), inbound reply storage, threaded replies |
 | sharedsender.ts | `<slug>@SHARED_FROM_DOMAIN` From address for publications without a verified domain; Reply-To fallback to the owner |
 
 ## Editor document

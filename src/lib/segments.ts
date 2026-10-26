@@ -3,6 +3,7 @@
 import type { Env } from '../types';
 import { one, all, run, val } from './db';
 import { now, DAY, parseJSON } from './util';
+import { COMMERCE_FIELDS, commerceRule } from './commerce-rules';
 
 export interface Rule { field: string; cmp: string; value?: any }
 export interface RuleGroup { op: 'and' | 'or'; rules: Array<Rule | RuleGroup> }
@@ -45,6 +46,7 @@ export const FIELDS: Record<string, { label: string; kind: string; cmps: string[
   event_registered: { label: 'Registered for event', kind: 'event', cmps: ['yes', 'no'] },
   community_member: { label: 'Community member', kind: 'bool', cmps: ['is_true', 'is_false'] },
   condition_set: { label: 'Matches condition set', kind: 'condition_set', cmps: ['matches', 'not_matches'] },
+  ...COMMERCE_FIELDS, // external store purchases + abandoned carts (lib/commerce-rules)
 };
 
 const COLS: Record<string, string> = {
@@ -97,6 +99,8 @@ async function compileRule(env: Env, pubId: string, r: Rule, depth: number): Pro
       case 'after': return { sql: `${col} > ?`, params: [Date.parse(v)] };
     }
   }
+  const ext = commerceRule(r, t);
+  if (ext) return ext;
   switch (r.field) {
     case 'tag':
       return { sql: `${r.cmp === 'not_has' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM subscriber_tags t WHERE t.subscriber_id = s.id AND t.tag = ?)`, params: [String(v).toLowerCase()] };
