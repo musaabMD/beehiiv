@@ -50,9 +50,9 @@ const FAQ: Array<[string, string]> = [
   ['Can I leave whenever I want?', 'Yes. Export your subscribers, posts and segments any time. Plans are month to month.'],
 ];
 
-export function homePage(c: PageCtx) {
+export function homePage(c: PageCtx, plans: Plan[] = PLANS) {
   const counts = featureCounts();
-  const at4k = planFor(4000);
+  const at4k = planFor(4000, plans);
   const rows = PLATFORMS.filter((p) => ['beehiiv', 'mailchimp', 'ghost', 'mailerlite', 'substack', 'kit'].includes(p.slug)).map((p) => ({ name: p.name, plan: p.prices[1]?.plan || '', usd: p.prices[1]?.usd ?? null, slug: p.slug }));
   return `${HOME_CSS}
 <section class="hero"><div class="wrap hero-c">
@@ -86,17 +86,17 @@ export function homePage(c: PageCtx) {
 </div></section>
 <style>@media(max-width:860px){section .wrap[style*="grid-template-columns:1fr 1fr"]{grid-template-columns:1fr!important}}</style>
 
-<section id="pricing"><div class="wrap"><div style="text-align:center;margin-bottom:28px"><div class="eyebrow">Pricing</div><h2>Pay for your list size. Every feature on every plan.</h2></div>${planCards(c)}</div></section>
+<section id="pricing"><div class="wrap"><div style="text-align:center;margin-bottom:28px"><div class="eyebrow">Pricing</div><h2>Pay for your list size. Every feature on every plan.</h2></div>${planCards(c, plans)}</div></section>
 
 <section><div class="wrap narrow"><h2 style="text-align:center">Questions</h2><div style="margin-top:22px">${FAQ.map(([q, a]) => `<details><summary>${esc(q)}</summary><p>${esc(a)}</p></details>`).join('')}</div></div></section>
 
 <section class="cta"><div class="wrap"><h2>Start your newsletter today</h2><p class="muted" style="margin:0 auto 24px;max-width:520px">Free up to 500 subscribers. No card needed.</p><div class="ctas" style="justify-content:center"><a class="btn btn-primary" href="/signup">Start free</a><a class="btn btn-ghost" href="/compare#guides">Move from another platform</a></div></div></section>`;
 }
 
-export function pricingPage(c: PageCtx) {
+export function pricingPage(c: PageCtx, plans: Plan[] = PLANS) {
   return `${HOME_CSS}
 <section class="hero"><div class="wrap hero-c"><div class="eyebrow">Pricing</div><h1>Simple pricing by list size</h1><p class="lead">Every feature on every plan, 0% of your revenue, month to month. Start free and upgrade when your list grows.</p></div></section>
-<section style="padding-top:0"><div class="wrap">${planCards(c)}</div></section>
+<section style="padding-top:0"><div class="wrap">${planCards(c, plans)}</div></section>
 <section><div class="wrap narrow"><h2>What every plan includes</h2><ul class="ticks" style="margin-top:14px">${['The editor, automations, segments, website and custom domain', 'Paid subscriptions, digital products, events and sponsorships, with 0% platform fees', 'Podcasts, community, polls and surveys', 'Deliverability protection, bot-filtered analytics and the live delivery page', 'REST API, webhooks and an MCP server for AI agents', 'Import from any platform, export any time'].map(tick).join('')}</ul>
 <h2 style="margin-top:40px">Questions</h2><div style="margin-top:16px">${FAQ.map(([q, a]) => `<details><summary>${esc(q)}</summary><p>${esc(a)}</p></details>`).join('')}</div></div></section>
 <section class="cta"><div class="wrap"><h2>Start free</h2><div class="ctas" style="justify-content:center"><a class="btn btn-primary" href="/signup">Create your newsletter</a><a class="btn btn-ghost" href="/compare">Compare platforms</a></div></div></section>`;

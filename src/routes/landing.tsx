@@ -8,7 +8,7 @@ import { markdownToHtml } from '../lib/markdown';
 import { searchDocs, TOOLS } from '../lib/mcp';
 import { esc } from '../lib/util';
 import { homePage, pricingPage } from './landing/home';
-import { BRAND } from './landing/brand';
+import { BRAND, livePlans } from './landing/brand';
 import { groupedRoutes, API_BASE } from './api/openapi';
 import { shell } from './landing/marketing';
 import { featuresIndex, featurePage, openPage, changelogPage, type PageCtx } from './landing/pages';
@@ -22,11 +22,11 @@ const root = new Hono<AppEnv>();
 
 root.get('/', async (c) => {
   const p = await ctxFor(c);
-  return c.html(page(p, undefined, `${BRAND}: newsletters without the big-platform bill`, `Write, send, grow and earn from your newsletter. Free up to 500 subscribers, every feature on every plan, 0% of your revenue. A Lnkbase product.`, homePage(p)));
+  return c.html(page(p, undefined, `${BRAND}: newsletters without the big-platform bill`, `Write, send, grow and earn from your newsletter. Free up to 500 subscribers, every feature on every plan, 0% of your revenue. A Lnkbase product.`, homePage(p, await livePlans(c.env))));
 });
 root.get('/pricing', async (c) => {
   const p = await ctxFor(c);
-  return c.html(page(p, 'pricing', `Pricing · ${BRAND}`, 'Simple pricing by list size: Free up to 500 subscribers, then Starter, Pro and Scale. Every feature on every plan, 0% of your revenue.', pricingPage(p)));
+  return c.html(page(p, 'pricing', `Pricing · ${BRAND}`, 'Simple pricing by list size: Free up to 500 subscribers, then Starter, Pro and Scale. Every feature on every plan, 0% of your revenue.', pricingPage(p, await livePlans(c.env))));
 });
 
 // ── Marketing pages ──

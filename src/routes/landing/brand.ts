@@ -20,6 +20,21 @@ export const PLANS: Plan[] = [
 ];
 
 /** Cheapest plan that fits a list sending one issue a week (~4.3 emails per subscriber a month). null = custom. */
-export function planFor(subscribers: number): Plan | null {
-  return PLANS.find((p) => p.subscribers >= subscribers && p.emails >= Math.ceil(subscribers * 4.3)) || null;
+export function planFor(subscribers: number, plans: Plan[] = PLANS): Plan | null {
+  return plans.find((p) => p.subscribers >= subscribers && p.emails >= Math.ceil(subscribers * 4.3)) || null;
+}
+
+/** Live plans from the platform_plans table (edited in Admin → Plans), shaped for the marketing pages.
+ *  Falls back to PLANS when the table is empty or unreachable. */
+export async function livePlans(env: any): Promise<Plan[]> {
+  try {
+    const { listPlans } = await import('../../lib/plans');
+    const rows = await listPlans(env);
+    const blurbs = new Map(PLANS.map((p) => [p.id, p]));
+    const out = rows.filter((r) => r.max_subscribers != null && r.monthly_emails != null).map((r) => ({
+      id: r.id, name: r.name, monthly: Math.round(r.monthly_cents / 100), subscribers: r.max_subscribers!, emails: r.monthly_emails!,
+      blurb: blurbs.get(r.id)?.blurb || r.description || '', highlight: blurbs.get(r.id)?.highlight,
+    }));
+    return out.length ? out : PLANS;
+  } catch { return PLANS; }
 }
