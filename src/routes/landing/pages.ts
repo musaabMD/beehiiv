@@ -8,11 +8,9 @@ import { ic, tick } from './marketing';
 
 export interface PageCtx { purchaseUrl: string; priceLabel: string; contact?: string; loggedIn?: boolean }
 
-const buyCta = (c: PageCtx, title = 'Own your newsletter platform', sub = 'Full source code, every feature, your Cloudflare account.') => {
-  const amount = esc((c.priceLabel.match(/\$\s?\d+/) || ['$30'])[0]);
-  return `<section class="cta"><div class="wrap"><h2>${title}</h2><p class="muted" style="margin:0 auto 24px;max-width:560px">${sub}</p>
-<div class="ctas" style="justify-content:center"><a class="btn btn-primary" href="${esc(c.purchaseUrl)}">Get OpenHive — ${amount} once</a><a class="btn btn-ghost" href="/signup">Try the live demo</a></div></div></section>`;
-};
+const buyCta = (c: PageCtx, title = 'Start your newsletter today', sub = 'Free up to 500 subscribers. Every feature on every plan.') =>
+  `<section class="cta"><div class="wrap"><h2>${title}</h2><p class="muted" style="margin:0 auto 24px;max-width:560px">${sub}</p>
+<div class="ctas" style="justify-content:center"><a class="btn btn-primary" href="/signup">Start free</a><a class="btn btn-ghost" href="/pricing">See pricing</a></div></div></section>`;
 
 // ── Features ──────────────────────────────────────────────────────────────
 
@@ -47,7 +45,7 @@ const STACK: Array<[string, string, 'y' | 'p' | 'n', string]> = [
   ['Email validation', 'ZeroBounce, Kickbox', 'y', 'Built in: syntax, MX, disposable and typo checks'],
   ['Click verification', 'Omnivery', 'y', 'Built in: bot clicks filtered from every report'],
   ['Product analytics', 'PostHog, Mixpanel', 'y', 'Built in'],
-  ['Email rendering tests', 'Litmus, Email on Acid', 'n', 'Not replaced: OpenHive renders Outlook-safe HTML and previews it, but doesn\'t test across real email apps'],
+  ['Email rendering tests', 'Litmus, Email on Acid', 'n', 'Not replaced: we render Outlook-safe HTML and previews it, but doesn\'t test across real email apps'],
 ];
 
 export function featuresIndex(c: PageCtx) {
@@ -61,8 +59,8 @@ export function featuresIndex(c: PageCtx) {
 <section style="padding-top:8px"><div class="wrap"><div class="grid">
   ${FEATURE_AREAS.map((f) => { const its = f.items.map(norm); const y = its.filter((x) => x.s === 'y').length; return `<a class="card" href="/features/${f.slug}"><div class="ic">${ic(f.icon)}</div><h3>${esc(f.title)}</h3><p>${esc(f.tagline)}</p><div class="count">${y} of ${its.length} built</div></a>`; }).join('')}
 </div></div></section>
-<section><div class="wrap"><h2>The software you don't have to stitch together</h2><p class="muted" style="margin-top:0">What a home-made newsletter stack usually pays for, and what OpenHive uses instead.</p>
-<div class="tw" style="margin-top:18px"><table><tr><th>You need</th><th>Usually</th><th>With OpenHive</th></tr>
+<section><div class="wrap"><h2>The software you don't have to stitch together</h2><p class="muted" style="margin-top:0">What a home-made newsletter stack usually pays for, and what Lnkbase Newsletter uses instead.</p>
+<div class="tw" style="margin-top:18px"><table><tr><th>You need</th><th>Usually</th><th>With Lnkbase Newsletter</th></tr>
 ${STACK.map(([a, b, st, d]) => `<tr><td><b>${a}</b></td><td class="muted">${b}</td><td><span style="display:flex;gap:8px">${BADGE[st === 'p' ? 'y' : st]}<span>${esc(d)}</span></span></td></tr>`).join('')}
 </table></div><p class="small muted" style="margin-top:10px">Still on your bills: Cloudflare (hosting, database, storage, email) and Stripe's card fees.</p></div></section>${buyCta(c)}`;
 }
@@ -132,7 +130,7 @@ export function openPage(c: PageCtx, s: OpenStats) {
   return `<section class="hero"><div class="wrap">
   <div class="eyebrow">Deliverability</div>
   <h1>Built to land in the inbox. Here are the numbers.</h1>
-  <p class="lead">Live delivery, bounce, spam and open rates for the email this OpenHive install sends, from its own records. Every OpenHive install has this page with its own numbers.</p>
+  <p class="lead">Live delivery, bounce, spam and open rates for the email Lnkbase Newsletter sends, from our own records.</p>
   ${banner}${notEnough}
   <div class="grid">
     ${stat('Delivery rate', show ? pct(s.deliveryRate) : '—', 'Delivered, out of delivered and hard bounced')}
@@ -155,7 +153,7 @@ ${show ? `<section style="padding-top:8px"><div class="wrap">
 </div></section>` : ''}
 
 <section><div class="wrap">
-  <h2>How OpenHive keeps email out of spam</h2><p class="muted" style="margin-top:0">On by default, for every newsletter on the install.</p>
+  <h2>How we keep email out of spam</h2><p class="muted" style="margin-top:0">On by default, for every newsletter.</p>
   <div class="grid2" style="margin-top:20px">
     <div class="card"><div class="muted small">Bad addresses stopped at signup and import, last 30 days</div><div style="font-size:44px;font-weight:850;letter-spacing:-.03em">${n(rejTotal)}</div>
       <table style="margin-top:8px"><tr><td>Typos (gmial.com)</td><td class="num">${n(rej.typo || 0)}</td></tr><tr><td>Domains that can't receive email</td><td class="num">${n(rej.dead_domain || 0)}</td></tr><tr><td>Throwaway inboxes</td><td class="num">${n(rej.disposable || 0)}</td></tr><tr><td>Invalid addresses</td><td class="num">${n(rej.invalid || 0)}</td></tr><tr><td>Newly suppressed (bounces, complaints, unsubscribes)</td><td class="num">${n(s.suppressed)}</td></tr></table></div>
@@ -172,7 +170,7 @@ ${show ? `<section style="padding-top:8px"><div class="wrap">
 
 <section id="how-we-count" style="padding-top:8px"><div class="wrap narrow">
   <h2>How we count</h2>
-  <p class="muted"><b style="color:var(--text)">Counted:</b> every email this install sent in the last 30 days: newsletter issues, automation emails, welcome and confirmation emails and other account email. <b style="color:var(--text)">Left out:</b> test emails, and emails that were never sent because the address was suppressed.</p>
+  <p class="muted"><b style="color:var(--text)">Counted:</b> every real email we sent in the last 30 days: newsletter issues, automation emails, welcome and confirmation emails and other account email. <b style="color:var(--text)">Left out:</b> test emails, and emails that were never sent because the address was suppressed.</p>
   <p class="muted">The delivery rate is delivered out of delivered and hard bounced. Bounce and complaint rates are out of emails sent. Complaints come from mailbox providers' feedback loops; Gmail doesn't report complaints one by one, so Gmail complaints only show here when they reach the install through a feedback report. Open and click rates are medians across newsletters with 200 or more emails delivered in the period, with bot opens and clicks left out. Numbers show once ${n(MIN_EMAILS)} emails are behind them. Weeks start on Monday, in UTC.</p>
 </div></section>
 ${buyCta(c, 'Run your own newsletter platform', 'With this page included, showing your own numbers.')}`;
@@ -183,7 +181,7 @@ ${buyCta(c, 'Run your own newsletter platform', 'With this page included, showin
 export function changelogPage(c: PageCtx) {
   const fmt = (d: string) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
   return `<section class="hero"><div class="wrap narrow">
-  <div class="eyebrow">Changelog</div><h1>What's new in OpenHive</h1><p class="lead">Newest first.</p>
+  <div class="eyebrow">Changelog</div><h1>What's new in Lnkbase Newsletter</h1><p class="lead">Newest first.</p>
 </div></section>
 <section style="padding-top:0"><div class="wrap narrow"><ol style="list-style:none;padding:0;margin:0">
   ${CHANGELOG.map((e) => `<li id="${e.slug}" style="display:grid;grid-template-columns:120px 1fr;gap:20px;padding:26px 0;border-top:1px solid var(--line)">

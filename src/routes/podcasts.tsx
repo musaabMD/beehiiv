@@ -143,7 +143,7 @@ async function audioRange(env: Env, ep: any, offset: number, length: number): Pr
   if (!r.ok) throw new Error(`Audio fetch failed (HTTP ${r.status})`);
   // Host ignored the Range header: only acceptable for small files.
   const len = Number(r.headers.get('content-length')) || 0;
-  if (len > TRANSCRIBE_SINGLE_MAX) { r.body?.cancel(); throw new Error('The audio host does not support byte ranges; copy the audio into OpenHive to transcribe it.'); }
+  if (len > TRANSCRIBE_SINGLE_MAX) { r.body?.cancel(); throw new Error('The audio host does not support byte ranges; copy the audio into our storage to transcribe it.'); }
   return new Uint8Array(await r.arrayBuffer()).slice(offset, offset + length);
 }
 
@@ -233,12 +233,12 @@ dash.get('/', async (c) => {
           { h: 'Listeners (30d)', r: (s) => num(s.uniq30), class: 'right' },
         ]} />
       ) : (
-        <Card><Empty icon="🎙" title="Host your podcast on OpenHive" body="Upload episodes, get an Apple/Spotify-ready RSS feed, sell private premium feeds, and track IAB-style downloads — with zero platform fees." action={<><LinkBtn href="/app/podcasts/new" kind="primary">Create a show</LinkBtn> <OpenBtn target="#import" kind="secondary">Import existing podcast</OpenBtn></>} /></Card>
+        <Card><Empty icon="🎙" title="Host your podcast here" body="Upload episodes, get an Apple/Spotify-ready RSS feed, sell private premium feeds, and track IAB-style downloads — with zero platform fees." action={<><LinkBtn href="/app/podcasts/new" kind="primary">Create a show</LinkBtn> <OpenBtn target="#import" kind="secondary">Import existing podcast</OpenBtn></>} /></Card>
       )}
       <Modal id="import" title="Import a podcast from another host">
         <form method="post" action="/app/podcasts/import" class="stack">
           <Field label="Current RSS feed URL" hint="Episodes keep their original GUIDs, so listeners' apps won't show duplicates when you move the feed."><Input name="url" type="url" placeholder="https://feeds.example.com/show.xml" required /></Field>
-          <Check name="copy_audio" checked label="Copy audio files into OpenHive storage" hint="Recommended. Otherwise episodes keep streaming from the old host's URLs." />
+          <Check name="copy_audio" checked label="Copy audio files into our storage" hint="Recommended. Otherwise episodes keep streaming from the old host's URLs." />
           <div class="form-actions"><Btn>Import podcast</Btn></div>
         </form>
       </Modal>
@@ -577,7 +577,7 @@ function EpisodeForm(p: { show: any; ep?: any; tz: string }) {
             <div class="stack-sm">
               <input type="file" accept="audio/*" class="input" data-audio-upload />
               <div class="progress hide" data-audio-progress><div class="progress-bar" style="width:0%" /></div>
-              <div class="muted small" data-audio-info>{e.audio_key || e.audio_url ? `Current: ${e.audio_key ? 'hosted on OpenHive' : e.audio_url} · ${fmtDuration(e.duration)} · ${(e.size / 1048576).toFixed(1)} MB` : 'No audio yet'}</div>
+              <div class="muted small" data-audio-info>{e.audio_key || e.audio_url ? `Current: ${e.audio_key ? 'hosted here' : e.audio_url} · ${fmtDuration(e.duration)} · ${(e.size / 1048576).toFixed(1)} MB` : 'No audio yet'}</div>
               {(e.audio_key || e.audio_url) && p.ep ? <audio controls preload="none" src={`/listen/${e.id}.mp3?preview=1`} style="width:100%" /> : null}
               <Input name="audio_url" value={e.audio_url} placeholder="…or an external audio URL" />
             </div>

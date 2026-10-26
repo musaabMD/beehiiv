@@ -22,18 +22,18 @@ export const FEATURE_AREAS: FeatureArea[] = [
   {
     slug: 'deliverability', icon: 'shield', title: 'Deliverability',
     tagline: 'The plumbing that keeps you out of spam, already built.',
-    intro: 'OpenHive sends through Cloudflare Email Sending on your own domain, with every protection on from day one. The live numbers are on the deliverability page.',
+    intro: 'Lnkbase Newsletter sends through Cloudflare Email Sending, from your own domain or ours, with every protection on from day one. The live numbers are on the deliverability page.',
     shot: { src: '/static/shots/deliverability.jpg', alt: 'Deliverability dashboard', caption: 'Analytics → Deliverability: delivery, bounces and complaints by mailbox provider.' },
     docs: { label: 'Deliverability guide', href: '/docs/deliverability' },
     items: [
-      ['A 99.3% delivery rate', 'n', 'A result, not a feature: it depends on your list and content. Your install publishes its real rate at /open.'],
+      ['A 99.3% delivery rate', 'n', 'A result, not a feature: it depends on your list and content. We publish our real rate at /open.'],
       ['A team of deliverability experts', 'n', 'Software can\'t include people. The deliverability guide covers what they\'d set up.'],
       ['Infrastructure to send 3M+ emails per minute', 'p', 'Sends about 1,200 emails a minute per issue by default, 10 at a time. Built for lists up to the hundreds of thousands.'],
       'Every email submission validated (forms, API and imports)',
       'Automated bot detection on signups: honeypots, timing, rate limits, optional Turnstile',
       ['Registering for every mailbox provider\'s feedback program', 'n', 'You register your domain with each provider; the guide lists them and the app receives the reports.'],
       'Feedback-loop and bounce reports received by the app itself (Email Routing and Cloudflare\'s sending events) and turned into suppressions',
-      ['A Feedback-ID on every email, so Gmail reports complaint rates per newsletter', 'p', 'Cloudflare Email Sending sets the Feedback-ID header itself, so Gmail\'s report is per sending account. OpenHive tags every email with its own ID to match complaints to the newsletter.'],
+      ['A Feedback-ID on every email, so Gmail reports complaint rates per newsletter', 'p', 'Cloudflare Email Sending sets the Feedback-ID header itself, so Gmail\'s report is per sending account. We tag every email with its own ID to match complaints to the newsletter.'],
       'Every bounce classified: hard, soft, mailbox full, DNS, policy — retry or never again',
       'Three suppression layers: global, per publication and transactional',
       'Temporary suppressions that expire, and permanent ones that never do',
@@ -54,7 +54,7 @@ export const FEATURE_AREAS: FeatureArea[] = [
     slug: 'editor', icon: 'pen', title: 'Editor',
     tagline: 'Write once. It lands right in the inbox and on the web.',
     intro: 'A block editor where what you see is what readers get. One draft becomes Outlook-proof email HTML and a fast web page.',
-    shot: { src: '/static/shots/editor.jpg', alt: 'The OpenHive post editor', caption: 'Posts → editor, with the slash menu, blocks and live preview.' },
+    shot: { src: '/static/shots/editor.jpg', alt: 'The Lnkbase Newsletter post editor', caption: 'Posts → editor, with the slash menu, blocks and live preview.' },
     items: [
       'A true WYSIWYG editor: no HTML required',
       'Table-based, inline-styled email HTML that holds up in Outlook',
@@ -123,7 +123,7 @@ export const FEATURE_AREAS: FeatureArea[] = [
   {
     slug: 'mcp', icon: 'chat', title: 'MCP server for AI agents',
     tagline: 'Let Claude, ChatGPT and other AI tools work inside your newsletter.',
-    intro: 'An MCP server on every install, authenticated with an API key.',
+    intro: 'An MCP server for every account, authenticated with an API key.',
     docs: { label: 'MCP tools', href: '/docs/mcp-tools' },
     items: [
       'An MCP server for Claude, ChatGPT and other AI tools',
@@ -249,7 +249,7 @@ export const FEATURE_AREAS: FeatureArea[] = [
     intro: 'Live streaming with chat, ticketing and reminders, inside your newsletter platform.',
     shot: { src: '/static/shots/events.jpg', alt: 'Events', caption: 'Events → event studio.' },
     items: [
-      ['Live webinars with up to 10,000 attendees', 'y', 'Streams through Cloudflare Realtime, set up on this install. Not load-tested at 10,000.'],
+      ['Live webinars with up to 10,000 attendees', 'y', 'Streams through Cloudflare Realtime, built in. Not load-tested at 10,000.'],
       'Ticket sales in 10 currencies',
       'Native streaming with video, screen sharing and chat',
       'No Zoom required',
@@ -410,10 +410,10 @@ export const FEATURE_AREAS: FeatureArea[] = [
   {
     slug: 'ads', icon: 'chart', title: 'Ads and sponsorships',
     tagline: 'Sell your own sponsorships and run an ad marketplace.',
-    intro: 'Direct sponsorships with your own formats and prices, plus an ad marketplace for the publications on your install.',
+    intro: 'Direct sponsorships with your own formats and prices, plus an ad marketplace across the newsletters on Lnkbase.',
     shot: { src: '/static/shots/ads.jpg', alt: 'Ad network', caption: 'Monetize → Ad network.' },
     items: [
-      ['The largest native ad network for newsletters', 'n', 'An ad network is a business with advertisers, not code. OpenHive gives you the marketplace; you bring the advertisers.'],
+      ['The largest native ad network for newsletters', 'n', 'An ad network is a business with advertisers, not code. Lnkbase has a marketplace and your own sponsorship page, but no big-brand network yet.'],
       ['Brands like Netflix, HubSpot and Notion', 'n', 'Advertisers are the ones you sign. Brands can book your sponsorships themselves from your site.'],
       'Ads to claim for upcoming posts',
       'Drop an ad into a post with one click',
@@ -454,11 +454,11 @@ export const FEATURE_AREAS: FeatureArea[] = [
   {
     slug: 'recommendations', icon: 'trend', title: 'Recommendations and boosts',
     tagline: 'Grow by recommending each other.',
-    intro: 'Free and paid recommendations between the newsletters on your install, with fraud checks.',
+    intro: 'Free and paid recommendations between the newsletters on Lnkbase, with fraud checks.',
     shot: { src: '/static/shots/recommendations.jpg', alt: 'Boosts', caption: 'Grow → Boosts.' },
     items: [
-      ['A network of 60K+ newsletters', 'n', 'Networks come from users, not code. OpenHive\'s network is the publications on your install.'],
-      ['Recommended by thousands of other newsletters', 'n', 'Same: depends on how many newsletters run on your install.'],
+      ['A network of 60K+ newsletters', 'n', 'Networks come from users, not code. Ours is every newsletter on Lnkbase, and it grows with each one.'],
+      ['Recommended by thousands of other newsletters', 'n', 'Depends on how many newsletters join Lnkbase.'],
       'Free, reciprocal recommendations',
       'Paid recommendations: pay to grow, or get paid to recommend',
       'Discover newsletters to partner with',
@@ -493,7 +493,7 @@ export const FEATURE_AREAS: FeatureArea[] = [
       'Rate limits on login',
       'Protection against timing attacks',
       'Log in on desktop by approving from your phone, for your team and readers',
-      'One login across every publication on the install',
+      'One login across every publication on Lnkbase',
     ],
   },
   {

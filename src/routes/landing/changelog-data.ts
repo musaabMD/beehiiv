@@ -32,9 +32,9 @@ export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-25', slug: 'bounces-in-app', title: 'Bounces and complaints come straight back',
     body: [
-      'OpenHive now receives bounce and spam-complaint reports itself, through Cloudflare Email Routing and Cloudflare\'s sending events, and turns them into suppressions. Settings → Email shows every report it received. Reports only count for addresses this install actually emailed, so nobody can be suppressed by a forged report.',
+      'Lnkbase Newsletter now receives bounce and spam-complaint reports itself, through Cloudflare Email Routing and Cloudflare\'s sending events, and turns them into suppressions. Settings → Email shows every report it received. Reports only count for addresses we actually emailed, so nobody can be suppressed by a forged report.',
       'Bounces and complaints on account email (login links, receipts) now fill the transactional suppression list on their own, and a reader who complained about a newsletter still gets their login link. The default sending domain now warms up like custom domains.',
-      'Fixed: emails set a Feedback-ID header that Cloudflare doesn\'t allow, which could make real sends fail. OpenHive now uses its own tracking header.',
+      'Fixed: emails set a Feedback-ID header that Cloudflare doesn\'t allow, which could make real sends fail. Lnkbase Newsletter now uses its own tracking header.',
     ],
     links: [['Deliverability guide', '/docs/deliverability']],
   },
@@ -91,15 +91,15 @@ export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-25', slug: 'deliverability-page', title: 'A public deliverability page',
     body: [
-      'The new Deliverability page shows this install\'s own numbers for the last 30 days: delivery rate, hard bounces, spam complaints, and the median open and click rate, with a week-by-week track record.',
-      'It also counts the bad addresses stopped at signup and import (typos, dead domains, throwaway inboxes, invalid addresses), and explains exactly how each number is counted. An install that only simulates sending says so at the top.',
+      'The new Deliverability page shows our own numbers for the last 30 days: delivery rate, hard bounces, spam complaints, and the median open and click rate, with a week-by-week track record.',
+      'It also counts the bad addresses stopped at signup and import (typos, dead domains, throwaway inboxes, invalid addresses), and explains exactly how each number is counted. Simulated sends are never counted.',
     ],
     links: [['See the numbers', '/open']],
   },
   {
     date: '2026-10-25', slug: 'compare', title: 'Compare pages and migration guides',
     body: [
-      'Compare shows what a list costs each month on the main newsletter platforms at five list sizes, next to OpenHive\'s one-time price and Cloudflare bill. Each platform has its own page with a feature table and what it does that OpenHive doesn\'t.',
+      'Compare shows what a list costs each month on the main newsletter platforms at five list sizes, next to our own price. Each platform has its own page with a feature table and what it does that Lnkbase Newsletter doesn\'t.',
       'Migration guides walk through exporting your list from each platform and importing it here, so unsubscribed and bounced readers stay out.',
     ],
     links: [['Compare', '/compare']],
@@ -146,7 +146,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     body: ['Webinars can stream through Cloudflare Realtime for large audiences, with a browser-to-browser mode for small ones.'],
   },
   {
-    date: '2026-10-25', slug: 'launch', title: 'OpenHive 1.0',
+    date: '2026-10-25', slug: 'launch', title: 'Version 1.0',
     body: [
       'The first release: the block editor and send flow, deliverability protections, automations, audience and segments, website builder, paid subscriptions, digital products, webinars, podcasts, community, growth tools, ads and sponsorships, analytics, team roles, and the REST API, webhooks and MCP server.',
     ],

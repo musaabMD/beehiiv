@@ -169,7 +169,7 @@ export function PlainLayout(p: { title: string; children?: Child; wide?: boolean
         </head>
         <body class="plain">
           <main class={`plain-box ${p.wide ? 'wide' : ''}`}>
-            <a href="/" class="plain-logo"><img src="/static/favicon.svg" alt="" width="28" height="28" /> OpenHive</a>
+            <a href="/" class="plain-logo"><img src="/static/favicon.svg" alt="" width="28" height="28" /> Lnkbase Newsletter</a>
             {flash && <div class={`flash flash-${flash.kind}`}>{flash.msg}</div>}
             {p.children}
           </main>

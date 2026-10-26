@@ -1,24 +1,24 @@
-// Shared frame for the marketing pages (/features, /compare, /migrate, /open, /changelog):
-// same dark look as the landing page, a header with the product nav and a footer with contact.
+// Shared frame for every marketing page (/, /pricing, /features, /compare, /migrate, /open, /changelog, /try):
+// header with the product nav, footer with links and contact. Brand lives in ./brand.ts.
 import { esc } from '../../lib/util';
 import { ic } from './page';
+import { BRAND, PARENT, FAVICON as BRAND_ICON, wordmark } from './brand';
 
 export { ic };
 
 export interface ShellOpts {
   title: string;
   description: string;
-  active?: 'features' | 'compare' | 'open' | 'changelog';
-  purchaseUrl: string;
-  priceLabel: string;
+  active?: 'features' | 'pricing' | 'compare' | 'open' | 'changelog';
+  purchaseUrl?: string;
+  priceLabel?: string;
   contact?: string;
   loggedIn?: boolean;
   body: string;
   head?: string;
 }
 
-const LOGO = '<svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#1b2130"/><path d="M32 12l17 10v20L32 52 15 42V22z" fill="#f59e0b"/><path d="M32 22l8.5 5v10L32 42l-8.5-5V27z" fill="#1b2130"/></svg>';
-const FAVICON = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#111827"/><path d="M32 12l17 10v20L32 52 15 42V22z" fill="#f59e0b"/><path d="M32 22l8.5 5v10L32 42l-8.5-5V27z" fill="#111827"/></svg>')}`;
+const FAVICON = BRAND_ICON;
 
 export const CSS = `
 :root{--bg:#fafaf9;--bg2:#f5f5f4;--card:#ffffff;--line:#e7e5e4;--text:#1c1917;--muted:#57534e;--accent:#d97706;--accent2:#f59e0b;--green:#059669;--red:#dc2626;--radius:16px}
@@ -69,9 +69,9 @@ footer.foot{border-top:1px solid var(--line);padding:48px 0 32px;color:var(--mut
 `;
 
 export function shell(o: ShellOpts): string {
-  const amount = esc((o.priceLabel.match(/\$\s?\d+/) || ['$30'])[0]);
   const nav: Array<[string, string, string]> = [
     ['features', '/features', 'Features'],
+    ['pricing', '/pricing', 'Pricing'],
     ['compare', '/compare', 'Compare'],
     ['open', '/open', 'Deliverability'],
     ['changelog', '/changelog', 'Changelog'],
@@ -83,20 +83,19 @@ export function shell(o: ShellOpts): string {
 <meta property="og:title" content="${esc(o.title)}"><meta property="og:description" content="${esc(o.description)}"><meta property="og:type" content="website">
 <link rel="icon" href="${FAVICON}"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet"><style>${CSS}</style>${o.head || ''}</head><body>
 <header class="top"><div class="wrap">
-  <a class="brand" href="/">${LOGO}OpenHive</a>
+  <a class="brand" href="/">${wordmark()}</a>
   <nav>${nav.map(([k, h, t]) => `<a href="${h}"${k && k === o.active ? ' class="on"' : ''}>${t}</a>`).join('')}</nav>
-  ${o.loggedIn ? '<a class="btn btn-ghost hide-sm" href="/app">Dashboard</a>' : '<a class="btn btn-ghost hide-sm" href="/login">Log in</a>'}
-  <a class="btn btn-primary" href="${esc(o.purchaseUrl)}">Buy — ${amount}</a>
+  ${o.loggedIn ? '<a class="btn btn-primary" href="/app">Dashboard</a>' : '<a class="btn btn-ghost hide-sm" href="/login">Log in</a><a class="btn btn-primary" href="/signup">Start free</a>'}
 </div></header>
 <main>${o.body}</main>
 <footer class="foot"><div class="wrap">
   <div class="cols">
-    <div><a class="brand" href="/" style="margin-bottom:10px">${LOGO}OpenHive</a><p style="margin:8px 0 0;max-width:320px">The open-source newsletter platform you own. Runs on your own Cloudflare account.</p><p class="small" style="margin-top:12px">Prices on the compare pages use one issue a week. <a href="/compare" style="text-decoration:underline">See the comparisons</a></p></div>
-    <div><h4>Product</h4><a href="/features">Features</a><a href="/compare">Compare</a><a href="/open">Deliverability</a><a href="/changelog">Changelog</a><a href="/#pricing">Pricing</a></div>
-    <div><h4>Developers</h4><a href="/docs">Docs</a><a href="/docs/api">REST API</a><a href="/docs/mcp-tools">MCP tools</a><a href="/docs/deploy">Deploy guide</a></div>
+    <div><a class="brand" href="/" style="margin-bottom:10px">${wordmark()}</a><p style="margin:8px 0 0;max-width:320px">Write, send, grow and earn from your newsletter, for a fraction of what the big platforms charge. A <a href="${PARENT.url}" style="text-decoration:underline">${PARENT.name}</a> product.</p><p class="small" style="margin-top:12px">Prices on the compare pages use one issue a week. <a href="/compare" style="text-decoration:underline">See the comparisons</a></p></div>
+    <div><h4>Product</h4><a href="/features">Features</a><a href="/pricing">Pricing</a><a href="/compare">Compare</a><a href="/open">Deliverability</a><a href="/try">Get a sample issue</a><a href="/changelog">Changelog</a></div>
+    <div><h4>Developers</h4><a href="/docs">Docs</a><a href="/docs/api">REST API</a><a href="/docs/mcp-tools">MCP tools</a><a href="/docs/api-guide">API guide</a></div>
     <div><h4>Contact</h4>${o.contact ? `<a href="mailto:${esc(o.contact)}">${esc(o.contact)}</a>` : ''}<a href="/docs/support">Support</a></div>
   </div>
-  <div class="base">© ${new Date().getFullYear()} OpenHive. Every product name on these pages belongs to its owner and is used only to name the product compared.</div>
+  <div class="base">© ${new Date().getFullYear()} ${PARENT.name}. ${BRAND}. Every product name on these pages belongs to its owner and is used only to name the product compared.</div>
 </div></footer>
 </body></html>`;
 }

@@ -153,7 +153,7 @@ export async function SiteLayout(p: SiteProps) {
                   <a href={base + '/privacy'}>Privacy</a>
                   <a href={base + '/terms'}>Terms</a>
                 </nav>
-                <p class="s-muted s-small">© {new Date().getFullYear()} {pub.name}. Powered by <a href="https://lnkbase.com/beehiiv">OpenHive</a>.</p>
+                <p class="s-muted s-small">© {new Date().getFullYear()} {pub.name}. Powered by <a href="https://hive.lnkbase.com">Lnkbase Newsletter</a>.</p>
               </div>
             </footer>
           )}

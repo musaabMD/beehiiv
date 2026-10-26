@@ -206,7 +206,7 @@ dash.post('/ai', async (c) => {
     if (aiEnabled(c.env)) {
       const res = await aiText(c.env,
         `Question: ${q}\n\nVerified data (JSON):\n${JSON.stringify({ ...summary.data, post: postData })}\n\nPlain-English summary of the data:\n${grounded}`,
-        `You are the analytics assistant inside OpenHive, a newsletter platform, for the publication "${pub.name}". Answer the user's question in plain English using ONLY the verified data provided. Lead with the direct answer, cite concrete numbers, compare to the previous period when available, and end with one practical suggestion. Keep it under 150 words. Never invent numbers.`, 700);
+        `You are the analytics assistant inside Lnkbase Newsletter, a newsletter platform, for the publication "${pub.name}". Answer the user's question in plain English using ONLY the verified data provided. Lead with the direct answer, cite concrete numbers, compare to the previous period when available, and end with one practical suggestion. Keep it under 150 words. Never invent numbers.`, 700);
       if (res.ok && res.text) return c.json({ text: res.text, actions, data: summary.data });
     }
     return c.json({ text: grounded, actions, data: summary.data });
@@ -220,7 +220,7 @@ dash.post('/ai', async (c) => {
   }
   const writing = WRITE_RE.test(q);
   const recentTitles = (await all<{ title: string }>(c.env, `SELECT title FROM posts WHERE pub_id = ? AND status = 'published' ORDER BY published_at DESC LIMIT 8`, pub.id)).map((x) => x.title).filter(Boolean);
-  const system = `You are the AI assistant built into OpenHive, an open-source newsletter platform (posts editor, audience & segments, automations, website builder, monetization, podcasts, events, community). You are helping the team behind "${pub.name}"${pub.description ? ` — ${stripTags(pub.description).slice(0, 200)}` : ''}. Recent post titles: ${recentTitles.join('; ') || 'none yet'}.
+  const system = `You are the AI assistant built into Lnkbase Newsletter, a hosted newsletter platform (posts editor, audience & segments, automations, website builder, monetization, podcasts, events, community). You are helping the team behind "${pub.name}"${pub.description ? ` — ${stripTags(pub.description).slice(0, 200)}` : ''}. Recent post titles: ${recentTitles.join('; ') || 'none yet'}.
 When asked to write, return only the requested text in clean prose (Markdown-free unless lists are requested). When asked how to do something in OpenHive, give short numbered steps referencing the dashboard sections (Posts, Audience, Automations, Website, Grow, Monetize, Podcasts, Events, Community, Analytics, Settings).`;
   const prompt = [q, selection ? `\n\nSelected text:\n"""${selection}"""` : '', !selection && editor && writing ? `\n\nCurrent draft (for context):\n"""${editor}"""` : ''].join('');
   const res = await aiText(c.env, prompt, system, 1200);

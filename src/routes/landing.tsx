@@ -7,7 +7,8 @@ import { DOCS } from '../lib/docs-content';
 import { markdownToHtml } from '../lib/markdown';
 import { searchDocs, TOOLS } from '../lib/mcp';
 import { esc } from '../lib/util';
-import { landingHtml } from './landing/page';
+import { homePage, pricingPage } from './landing/home';
+import { BRAND } from './landing/brand';
 import { groupedRoutes, API_BASE } from './api/openapi';
 import { shell } from './landing/marketing';
 import { featuresIndex, featurePage, openPage, changelogPage, type PageCtx } from './landing/pages';
@@ -20,9 +21,12 @@ import { platformBySlug } from './landing/compare-data';
 const root = new Hono<AppEnv>();
 
 root.get('/', async (c) => {
-  const user = await currentUser(c).catch(() => null);
-  c.header('cache-control', user ? 'private, no-store' : 'public, max-age=300');
-  return c.html(landingHtml({ purchaseUrl: c.env.PURCHASE_URL, priceLabel: c.env.PRICE_LABEL, loggedIn: !!user, demo: c.req.query('static') !== '1', contact: c.env.CONTACT_EMAIL, appUrl: c.env.APP_URL }));
+  const p = await ctxFor(c);
+  return c.html(page(p, undefined, `${BRAND}: newsletters without the big-platform bill`, `Write, send, grow and earn from your newsletter. Free up to 500 subscribers, every feature on every plan, 0% of your revenue. A Lnkbase product.`, homePage(p)));
+});
+root.get('/pricing', async (c) => {
+  const p = await ctxFor(c);
+  return c.html(page(p, 'pricing', `Pricing · ${BRAND}`, 'Simple pricing by list size: Free up to 500 subscribers, then Starter, Pro and Scale. Every feature on every plan, 0% of your revenue.', pricingPage(p)));
 });
 
 // ── Marketing pages ──
@@ -35,7 +39,7 @@ const page = (p: PageCtx, active: any, title: string, description: string, body:
 
 root.get('/features', async (c) => {
   const p = await ctxFor(c);
-  return c.html(page(p, 'features', 'Features · OpenHive', 'Every OpenHive feature: editor, sending and deliverability, automations, audience, website, paid subscriptions, products, webinars, podcasts, community, growth, ads, analytics, API and MCP.', featuresIndex(p)));
+  return c.html(page(p, 'features', 'Features · Lnkbase Newsletter', 'Every Lnkbase Newsletter feature: editor, sending and deliverability, automations, audience, website, paid subscriptions, products, webinars, podcasts, community, growth, ads, analytics, API and MCP.', featuresIndex(p)));
 });
 root.get('/features/:slug', async (c) => {
   const ALIAS: Record<string, string> = { sending: 'deliverability', audience: 'segments', growth: 'recommendations', developers: 'api' };
@@ -44,7 +48,7 @@ root.get('/features/:slug', async (c) => {
   const f = featureBySlug(slug);
   if (!f) return c.redirect('/features', 302);
   const p = await ctxFor(c);
-  return c.html(page(p, 'features', `${f.title} · OpenHive`, `${f.tagline} ${f.intro}`, featurePage(p, f)));
+  return c.html(page(p, 'features', `${f.title} · Lnkbase Newsletter`, `${f.tagline} ${f.intro}`, featurePage(p, f)));
 });
 root.get('/open', async (c) => {
   const p = await ctxFor(c);
@@ -57,29 +61,29 @@ root.get('/open', async (c) => {
     stats = await openStats(c.env);
     try { c.executionCtx.waitUntil(cache?.put(key, new Response(JSON.stringify(stats), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=600' } })) || Promise.resolve()); } catch {}
   }
-  return c.html(page(p, 'open', 'Deliverability: live delivery, bounce and spam rates · OpenHive', 'Live delivery, bounce, spam complaint and open rates for the email this OpenHive install sends, and how each number is counted.', openPage(p, stats)));
+  return c.html(page(p, 'open', 'Deliverability: live delivery, bounce and spam rates · Lnkbase Newsletter', 'Live delivery, bounce, spam complaint and open rates for the email Lnkbase Newsletter sends, and how each number is counted.', openPage(p, stats)));
 });
 root.get('/compare', async (c) => {
   const p = await ctxFor(c);
-  return c.html(page(p, 'compare', 'OpenHive vs beehiiv, Substack, Mailchimp, Kit and more · Compare', 'What a newsletter costs each month on beehiiv, Substack, Mailchimp, Kit, MailerLite, Buttondown, Ghost, EmailOctopus and MailCheap, next to OpenHive, with migration guides.', compareIndex(p)));
+  return c.html(page(p, 'compare', 'Lnkbase Newsletter vs beehiiv, Substack, Mailchimp, Kit and more · Compare', 'What a newsletter costs each month on beehiiv, Substack, Mailchimp, Kit, MailerLite, Buttondown, Ghost, EmailOctopus and MailCheap, next to Lnkbase Newsletter, with migration guides.', compareIndex(p)));
 });
 root.get('/compare/:slug', async (c) => {
   const pl = platformBySlug(c.req.param('slug'));
   if (!pl) return c.redirect('/compare', 302);
   const p = await ctxFor(c);
-  return c.html(page(p, 'compare', `OpenHive vs ${pl.name} · Compare`, `OpenHive vs ${pl.name}: price at five list sizes, feature by feature, and what ${pl.name} has that OpenHive doesn't.`, comparePlatform(p, pl)));
+  return c.html(page(p, 'compare', `Lnkbase Newsletter vs ${pl.name} · Compare`, `Lnkbase Newsletter vs ${pl.name}: price at five list sizes, feature by feature, and what ${pl.name} has that Lnkbase Newsletter doesn't.`, comparePlatform(p, pl)));
 });
 root.get('/migrate/:slug', async (c) => {
   const pl = platformBySlug(c.req.param('slug'));
   if (!pl) return c.redirect('/compare#guides', 302);
   const p = await ctxFor(c);
-  return c.html(page(p, 'compare', `Migrate from ${pl.name} to OpenHive`, `Export your list from ${pl.name} and import it into OpenHive, with unsubscribed and bounced readers kept out.`, migratePage(p, pl)));
+  return c.html(page(p, 'compare', `Migrate from ${pl.name} to Lnkbase Newsletter`, `Export your list from ${pl.name} and import it into Lnkbase Newsletter, with unsubscribed and bounced readers kept out.`, migratePage(p, pl)));
 });
 mountTryIt(root, ctxFor);
 
 root.get('/changelog', async (c) => {
   const p = await ctxFor(c);
-  return c.html(page(p, 'changelog', 'Changelog · OpenHive', 'What\'s new in OpenHive, newest first.', changelogPage(p)));
+  return c.html(page(p, 'changelog', 'Changelog · Lnkbase Newsletter', 'What\'s new in Lnkbase Newsletter, newest first.', changelogPage(p)));
 });
 
 const NAV_ORDER = ['readme', 'deploy', 'deliverability', 'api', 'mcp', 'support', 'architecture'];
@@ -87,7 +91,7 @@ const NAV_ORDER = ['readme', 'deploy', 'deliverability', 'api', 'mcp', 'support'
 function docsShell(title: string, active: string, body: string, toc: Array<{ id: string; text: string; level: number }> = [], q = '') {
   const pages = NAV_ORDER.map((s) => DOCS.find((d) => d.slug === s)).filter(Boolean) as typeof DOCS;
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(title)} · OpenHive Docs</title><link rel="icon" href="/static/favicon.svg">
+<title>${esc(title)} · Lnkbase Newsletter Docs</title><link rel="icon" href="/static/favicon.svg">
 <style>
 :root{--text:#111827;--muted:#6b7280;--line:#e5e7eb;--accent:#d97706;--bg:#fff;--side:#f9fafb}
 *{box-sizing:border-box}body{margin:0;font:16px/1.7 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--text);background:var(--bg)}
@@ -114,7 +118,7 @@ aside.toc{position:sticky;top:60px;align-self:start;padding:36px 0;font-size:13.
 @media(max-width:1100px){.layout{grid-template-columns:220px minmax(0,1fr)}aside.toc{display:none}}
 @media(max-width:760px){.layout{grid-template-columns:1fr}nav.side{position:static;max-height:none;padding:12px 0;display:flex;gap:4px;overflow-x:auto}nav.side h4{display:none}nav.side a{white-space:nowrap}.hd .r{display:none}.ep small,.params{padding-left:0}}
 </style></head><body>
-<header><div class="hd"><a class="brand" href="/"><img src="/static/favicon.svg" width="24" height="24" alt="">OpenHive <span style="color:var(--muted);font-weight:500">Docs</span></a>
+<header><div class="hd"><a class="brand" href="/"><img src="/static/favicon.svg" width="24" height="24" alt="">Lnkbase Newsletter <span style="color:var(--muted);font-weight:500">Docs</span></a>
 <form class="s" action="/docs" method="get"><input name="q" value="${esc(q)}" placeholder="Search the docs…" aria-label="Search docs"></form>
 <div class="r"><a href="/docs/api">API reference</a><a href="/api/v2/openapi.json">OpenAPI</a><a href="/app">Dashboard</a></div></div></header>
 <div class="layout"><nav class="side"><h4>Guides</h4>${pages.map((p) => `<a href="/docs/${p.slug === 'api' ? 'api-guide' : p.slug}" class="${p.slug === active ? 'on' : ''}">${esc(p.title)}</a>`).join('')}<h4>Reference</h4><a href="/docs/api" class="${active === 'api-ref' ? 'on' : ''}">REST API endpoints</a><a href="/docs/mcp-tools" class="${active === 'mcp-tools' ? 'on' : ''}">MCP tools</a></nav>

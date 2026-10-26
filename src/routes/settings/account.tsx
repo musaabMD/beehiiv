@@ -76,8 +76,9 @@ export function registerAccount(dash: Hono<AppEnv>) {
             </div>
           </Card>
         </Grid>
-        <Card title="OpenHive license">
-          <p>This instance runs the open-source OpenHive code ({esc(c.env.PRICE_LABEL)}). You pay Cloudflare directly for usage (Workers, D1, R2, Email Sending) — there is no per-subscriber pricing.</p>
+        <Card title="Your Lnkbase Newsletter plan">
+          <p>Your plan sets how many subscribers and emails a month you have; every feature is included on every plan, and we take 0% of what you earn here.</p>
+          <LinkBtn href="/app/settings/plan">Plan &amp; usage</LinkBtn>
         </Card>
       </>
     ));

@@ -21,7 +21,7 @@ async function samplePost(env: Env, pub: Publication): Promise<Post | null> {
 }
 
 function formPage(c: Ctx, msg = '', email = '') {
-  return shell({ ...c, title: 'Get a sample issue · OpenHive', description: 'Get a real issue of the OpenHive demo newsletter in your inbox and watch it get delivered, opened and clicked.', body: `
+  return shell({ ...c, title: 'Get a sample issue · Lnkbase Newsletter', description: 'Get a real issue of the Lnkbase Newsletter demo in your inbox and watch it get delivered, opened and clicked.', body: `
 <section class="hero"><div class="wrap narrow">
   <div class="eyebrow">Try it</div>
   <h1>Get a real issue in your inbox</h1>
@@ -44,7 +44,7 @@ function formPage(c: Ctx, msg = '', email = '') {
 }
 
 function statusPage(c: Ctx, did: string, email: string) {
-  return shell({ ...c, title: 'Your sample is on its way · OpenHive', description: 'Live status of your sample email.', body: `
+  return shell({ ...c, title: 'Your sample is on its way · Lnkbase Newsletter', description: 'Live status of your sample email.', body: `
 <section class="hero"><div class="wrap narrow">
   <div class="eyebrow">Try it</div>
   <h1>Your sample is on its way</h1>
@@ -55,7 +55,7 @@ function statusPage(c: Ctx, did: string, email: string) {
     <p id="flt" class="small muted" style="margin:12px 0 0"></p>
     <p id="err" class="small" style="color:#b91c1c;margin:12px 0"></p>
   </div>
-  <p class="small muted" style="margin-top:14px">Didn't get it in a minute? Check spam and Promotions. <a href="/open" style="text-decoration:underline">See this install's live deliverability numbers</a>.</p>
+  <p class="small muted" style="margin-top:14px">Didn't get it in a minute? Check spam and Promotions. <a href="/open" style="text-decoration:underline">See our live deliverability numbers</a>.</p>
 </div></section>
 <script>
 (function(){var u='/try/s/${esc(did)}.json',t0=Date.now();

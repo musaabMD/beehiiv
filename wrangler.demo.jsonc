@@ -15,7 +15,7 @@
   // Workers AI powers the writing assistant. Uncomment after `wrangler login` (it always runs remotely).
   // "ai": { "binding": "AI" },
   "vars": {
-    "APP_NAME": "OpenHive",
+    "APP_NAME": "Lnkbase Newsletter",
     "APP_URL": "http://localhost:8787",
     "MAIL_FROM": "newsletter@trstbase.com",
     "PURCHASE_URL": "https://lnkbase.com/beehiiv",
