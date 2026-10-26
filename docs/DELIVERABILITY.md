@@ -97,6 +97,10 @@ Test locally with `wrangler dev`:
 curl -X POST 'http://localhost:8787/cdn-cgi/local/email?from=MAILER-DAEMON@mx.example.net&to=bounces@yourdomain.com' --data-binary @bounce.eml
 ```
 
+### Reader replies (Inbox)
+
+When a publication turns on Audience → Inbox → "Collect replies in Inbox", its newsletters carry `Reply-To: reply+<slug>.<delivery>@SHARED_FROM_DOMAIN`. Route those to the Worker too: on the shared sending domain, enable the Email Routing **catch-all → Send to a Worker** (or a `reply@` address with subaddressing enabled). Replies become Inbox threads; auto-replies are dropped and unknown reply addresses are rejected. See [COMMERCE.md](COMMERCE.md#4-reply-inbox).
+
 ### 3. HTTP hooks (other sources)
 
 ```

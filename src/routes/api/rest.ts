@@ -2,7 +2,8 @@
 // and the same table generates the OpenAPI document and the /docs/api reference page.
 import type { Ctx, Publication, Post, Subscriber } from '../../types';
 import { one, all, run, val, insert, update, encodeCursor, decodeCursor } from '../../lib/db';
-import { apiError } from '../../lib/apiauth';
+import { apiError, keyFromRequest } from '../../lib/apiauth';
+import { sendTx, searchTx, serializeTx, saveTemplate, serializeTemplate, TxError } from '../../lib/transactional';
 import { validateEmail } from '../../lib/guard';
 import { subscribe, getSubscriber, unsubscribe, deleteSubscriber, addTags, removeTags, getTags, setFields, joinLists, leaveLists } from '../../lib/subscribers';
 import { recalcSegment, listMatching, countMatching, EMPTY_GROUP, type RuleGroup } from '../../lib/segments';
@@ -891,6 +892,33 @@ route('GET', '/podcasts/:id/episodes', 'Podcasts', 'List episodes with download 
   const pod: any = await needRow(c, 'podcasts', pub, 'Podcast');
   return paginate(c, 'episodes', 'podcast_id = ?', [pod.id], async (e) => ({ id: e.id, guid: e.guid, title: e.title, slug: e.slug, status: e.status, premium: !!e.premium, duration: e.duration, season: e.season, number: e.number, downloads: await val(c.env, 'SELECT COUNT(*) FROM episode_downloads WHERE episode_id = ? AND is_bot = 0', e.id), published_at: iso(e.published_at), created_at: iso(e.created_at) }));
 }, { query: PAGE_Q });
+
+// ───────── transactional email (lib/transactional) ─────────
+const txFail = (c: Ctx, e: unknown) => { if (e instanceof TxError) return apiError(c, e.status, e.code, e.message); throw e; };
+route('POST', '/transactional/send', 'Transactional', 'Send one transactional email (template or subject + html/markdown/text) with merge vars; idempotent with idempotency_key', async (c, pub) => {
+  try {
+    const k = await keyFromRequest(c.env, c.req.raw);
+    const r = await sendTx(c.env, pub, (await body(c)) as any, { keyId: k?.keyId });
+    return c.json({ data: r }, (r as any).duplicate ? 200 : 201);
+  } catch (e) { return txFail(c, e); }
+}, { body: { to: 'Recipient email (required)', template_id: 'Template id or slug', subject: 'Subject (required without a template)', html: 'HTML body', markdown: 'Markdown body', text: 'Plain-text body', merge_vars: 'Object; {{key}} / {{nested.key}} in subject and body', reply_to: 'Reply-To address', from_name: 'Sender name override', attachments: '[{filename, content (base64), type}] — 5 MB total', tags: 'string[] for searching the log', idempotency_key: 'Repeat-safe key; a repeat returns the original message', track: 'boolean — open/click tracking (default false)' } });
+route('GET', '/transactional/messages', 'Transactional', 'Search the transactional message log', async (c, pub) => {
+  const rows = await searchTx(c.env, pub.id, { q: c.req.query('q'), status: c.req.query('status'), tag: c.req.query('tag'), limit: int(c.req.query('limit'), 50), before: c.req.query('before') ? Date.parse(c.req.query('before')!) : undefined });
+  return c.json({ data: rows.map(serializeTx) });
+}, { query: { q: 'Recipient, subject or message id', status: 'sent|simulated|failed|suppressed|bounced|complained', tag: 'Tag', limit: '1-200 (default 50)', before: 'ISO date: older than' } });
+route('GET', '/transactional/messages/:id', 'Transactional', 'One transactional message with status, opens and clicks', async (c, pub) => {
+  const m = await one<any>(c.env, 'SELECT * FROM tx_messages WHERE pub_id = ? AND (id = ? OR message_id = ?)', pub.id, c.req.param('id'), c.req.param('id'));
+  if (!m) throw new NotFound('Message not found.');
+  return c.json({ data: serializeTx(m) });
+});
+route('GET', '/transactional/templates', 'Transactional', 'List transactional templates', async (c, pub) => c.json({ data: (await all<any>(c.env, 'SELECT * FROM tx_templates WHERE pub_id = ? ORDER BY name', pub.id)).map(serializeTemplate) }));
+route('POST', '/transactional/templates', 'Transactional', 'Create or update (pass id) a transactional template', async (c, pub) => {
+  try {
+    const b = await body(c);
+    const tid = await saveTemplate(c.env, pub.id, { id: b.id, name: b.name, slug: b.slug, subject: b.subject, body: b.body, format: b.format });
+    return c.json({ data: serializeTemplate(await one<any>(c.env, 'SELECT * FROM tx_templates WHERE id = ?', tid)) }, b.id ? 200 : 201);
+  } catch (e) { return txFail(c, e); }
+}, { body: { id: 'Existing template id (update)', name: 'Name', slug: 'template_id used in send calls', subject: 'Subject with {{merge}} tags', body: 'Markdown or HTML', format: 'markdown|html' } });
 
 /** helper re-exported for MCP */
 export { countMatching };

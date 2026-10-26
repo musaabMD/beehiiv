@@ -13,6 +13,7 @@ import { requirePerm, audit } from '../../lib/auth';
 import { Card, Btn, LinkBtn, Field, Input, Select, Check, Toggle, Table, Stat, Stats, Status, Badge, Modal, OpenBtn, Pager, Empty, back, Muted, Help } from '../../ui/components';
 import { page, SOURCES, filtersFrom, filterGroup, filterQS, exportCSV } from './shared';
 import { form, str, int, now, DAY, ago, fmtDate, fmtDateTime, num, pct, parseJSON, chunk, id as newId } from '../../lib/util';
+import { StorePurchasesCard } from '../integrations-commerce';
 
 const app = new Hono<AppEnv>();
 
@@ -313,6 +314,7 @@ app.get('/s/:id', async (c) => {
             <Table<any> rows={orders} empty="" cols={[{ h: 'Order', r: (o) => <span>{parseJSON<any>(o.data, {}).description || o.kind}</span> }, { h: 'Status', r: (o) => <Status s={o.status} /> }, { h: 'Amount', r: (o) => `${(o.amount_cents / 100).toFixed(2)} ${o.currency.toUpperCase()}` }, { h: 'Date', r: (o) => fmtDate(o.created_at) }]} />
           </Card>
         )}
+        <StorePurchasesCard c={c} sub={s} />
         {(votes.length > 0 || responses.length > 0) && (
           <Card title="Poll & survey answers">
             <ul class="list-plain">

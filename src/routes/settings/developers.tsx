@@ -10,10 +10,14 @@ import { PROVIDERS } from '../../lib/integrations';
 import { id, now, token, sha256, form, str, ago, fmtDateTime, parseJSON } from '../../lib/util';
 import { Card, Field, Input, Select, Btn, ActionForm, Table, Badge, Status, Modal, OpenBtn, Grid, Help, Copy, Code, Toggle, back } from '../../ui/components';
 import { page, saveSettings } from './ui';
+import { registerTransactional } from './transactional';
+import { registerCommerce } from '../integrations-commerce';
 
 const mask = (s: string) => (s ? s.slice(0, 4) + '•'.repeat(Math.max(4, Math.min(16, s.length - 4))) : '');
 
 export function registerDevelopers(dash: Hono<AppEnv>) {
+  registerTransactional(dash); // Transactional email (log, templates)
+  registerCommerce(dash); // Store integrations (Shopify / WooCommerce / Stripe)
   // ───────────── Integrations ─────────────
   dash.get('/integrations', requirePerm('admin'), async (c) => {
     const pub = c.get('pub');

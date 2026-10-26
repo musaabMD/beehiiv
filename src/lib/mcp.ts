@@ -672,6 +672,15 @@ export const TOOLS: Tool[] = [
     }, ['action']),
     run: async (env, pub, a) => productsTool(env, pub, a),
   },
+  // ───────── transactional ─────────
+  {
+    name: 'send_transactional', title: 'Send a transactional email', description: 'Send one transactional email (receipt, password reset, notification) to a single recipient, from a saved template (template_id = id or slug) or subject + markdown/html/text. merge_vars fill {{key}} / {{nested.key}} tags. Does not use the newsletter allowance; capped per day. Use idempotency_key to make retries safe.',
+    inputSchema: S({ to: str('Recipient email'), template_id: str('Template id or slug'), subject: str('Subject (required without a template)'), markdown: str('Markdown body'), html: str('HTML body'), text: str('Plain-text body'), merge_vars: obj('Merge variables'), reply_to: str('Reply-To address'), tags: arr('Tags for the message log'), idempotency_key: str('Repeat-safe key'), track: { type: 'boolean', description: 'Track opens and clicks' } }, ['to']),
+    run: async (env, pub, a) => {
+      const { sendTx, TxError } = await import('./transactional');
+      try { return await sendTx(env, pub, a); } catch (e: any) { if (e instanceof TxError) throw new ToolError(e.message); throw e; }
+    },
+  },
   // ───────── docs ─────────
   {
     name: 'search_docs', title: 'Search OpenHive docs', description: 'Search the OpenHive documentation (setup, deploy, API, MCP, deliverability, support) without leaving the chat.',

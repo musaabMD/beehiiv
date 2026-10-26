@@ -53,6 +53,7 @@ Any client that supports remote MCP servers over HTTP with a custom header works
 | `ads` | Ad offers and ad revenue reports |
 | `podcasts` | Shows and episodes (see below) |
 | `products` | Digital products and promo codes (see below) |
+| `send_transactional` | Send one transactional email (template or subject + markdown/html/text, merge vars, idempotency key) |
 | `search_docs` | Search these docs |
 
 ### `podcasts` actions

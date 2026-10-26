@@ -151,6 +151,8 @@ export async function sendMail(env: Env, m: MailInput): Promise<MailResult> {
     headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
   }
   if (m.campaignId) headers['X-OpenHive-Campaign'] = m.campaignId;
+  // Inbox: when the publication collects replies, newsletter/automation Reply-To is reply+<slug>.<delivery>@SHARED_FROM_DOMAIN (lib/inbox)
+  if (kind === 'marketing' && m.pub && m.campaignId && /"collect_replies":true/.test((m.pub as any).settings || '')) m = { ...m, replyTo: (await (await import('./inbox')).inboxReplyTo(env, m.pub, m.campaignId, to)) || m.replyTo };
   const text = m.text || htmlToText(m.html);
   let pubSim = false;
   try { pubSim = !!(m.pub && JSON.parse((m.pub as any).settings || '{}').simulate_sending); } catch {}

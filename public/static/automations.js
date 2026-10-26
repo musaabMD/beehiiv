@@ -390,6 +390,8 @@
     segment_entered: (c) => [F.field('Segment', F.select(c, 'segment_id', catalog.options.segment || [], 'Choose a segment…'), 'Checked every 15 minutes; subscribers enter once when they join the segment.')],
     date_field: (c) => [F.field('Date field', F.select(c, 'key', (catalog.options.custom || []).map((x) => [x.key, x.label]), 'Choose a field…'), 'Field values like 1990-05-21. Runs yearly on the anniversary.'), F.field('Offset (days)', F.number(c, 'offset_days'), 'Negative = before the date, positive = after.')],
     inactive: (c) => [F.field('Days without opening', F.number(c, 'days', { min: 1, placeholder: '30' }))],
+    external_purchase: (c) => [F.field('Store', F.select(c, 'platform', [['shopify', 'Shopify'], ['woocommerce', 'WooCommerce'], ['stripe', 'Stripe']], 'Any store')), F.field('Product name contains (or product id)', F.input(c, 'product_contains', { placeholder: 'e.g. Hoodie' })), F.field('Minimum order total', F.number(c, 'min_total', { min: 0, placeholder: '0' }))],
+    cart_abandoned: (c) => [F.field('Wait (hours) after the checkout was last updated', F.number(c, 'delay_hours', { min: 0.25, step: 0.25, placeholder: '1' }), 'Only subscribers are emailed. The journey stops as soon as the order completes.'), F.field('Minimum cart value', F.number(c, 'min_value', { min: 0, placeholder: '0' })), F.note('Use {{cart.items}}, {{cart.total}} and a button linking to {{cart.recovery_url}} in your emails.')],
     api: () => [F.note(`Enroll subscribers from your app:<br><code>POST ${esc(meta.apiUrl)}</code><br><span class="small">Body: {"email": "reader@example.com"}. Authorization: Bearer &lt;API key&gt;.</span>`)],
   };
   function catalogSources() { return (meta.sources || []).map((s) => [s, s.replace(/_/g, ' ')]); }
