@@ -473,13 +473,13 @@ export async function suppressionSummary(env: Env, pubId: string) {
 export async function recentActivity(env: Env, pubId: string, limit = 12) {
   return all<{ kind: string; title: string; detail: string; at: number; href: string }>(env, `
     SELECT * FROM (
-      SELECT 'subscriber' AS kind, COALESCE(NULLIF(name, ''), email) AS title, 'subscribed via ' || source AS detail, created_at AS at, '/app/audience/subscribers/' || id AS href FROM subscribers WHERE pub_id = ?1 AND created_at > ?2
+      SELECT 'subscriber' AS kind, COALESCE(NULLIF(name, ''), email) AS title, 'subscribed via ' || source AS detail, created_at AS at, '/app/audience/subscribers/' || id AS href FROM subscribers WHERE pub_id = ?1 AND created_at > ?2 AND source != 'try_it'
       UNION ALL
       SELECT 'order', email, kind || ' · $' || printf('%.2f', amount_cents / 100.0), paid_at, '/app/monetize/orders' FROM orders WHERE pub_id = ?1 AND status = 'paid' AND paid_at > ?2
       UNION ALL
       SELECT 'comment', COALESCE((SELECT COALESCE(NULLIF(s.name, ''), s.email) FROM subscribers s WHERE s.id = c.subscriber_id), 'Reader'), substr(c.body, 1, 80), c.created_at, '/app/posts/' || c.post_id FROM comments c WHERE c.pub_id = ?1 AND c.created_at > ?2
       UNION ALL
-      SELECT 'unsubscribe', COALESCE(NULLIF(name, ''), email), COALESCE('unsubscribed: ' || unsubscribe_reason, 'unsubscribed'), unsubscribed_at, '/app/audience/subscribers/' || id FROM subscribers WHERE pub_id = ?1 AND unsubscribed_at > ?2
+      SELECT 'unsubscribe', COALESCE(NULLIF(name, ''), email), COALESCE('unsubscribed: ' || unsubscribe_reason, 'unsubscribed'), unsubscribed_at, '/app/audience/subscribers/' || id FROM subscribers WHERE pub_id = ?1 AND unsubscribed_at > ?2 AND source != 'try_it'
     ) ORDER BY at DESC LIMIT ?3`, pubId, Date.now() - 60 * DAY, limit);
 }
 

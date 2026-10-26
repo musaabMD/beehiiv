@@ -1,7 +1,8 @@
 // "Send me a sample issue" (/try): a visitor types their email and gets a real issue of the demo newsletter,
 // sent through the normal pipeline (tracking, unsubscribe, headers), then watches it go sent → opened → clicked.
 // Only on when TRY_IT=1 (the public demo). One email per address per day, a few per visitor, a daily cap overall.
-// The address is stored as an unsubscribed subscriber so it is never mailed again and isn't counted as a reader.
+// The address is stored as an unsubscribed subscriber (source 'try_it') so it is never mailed again, isn't counted
+// as a reader or an unsubscribe, and is hidden from the publication's subscriber list and activity feed.
 import type { Hono } from 'hono';
 import type { AppEnv, Env, Post, Publication, Subscriber } from '../../types';
 import { one, insert, run } from '../../lib/db';
@@ -97,7 +98,7 @@ export function mountTryIt(root: Hono<AppEnv>, ctxFor: (c: any) => Promise<Ctx>)
     let sub = await one<Subscriber>(c.env, 'SELECT * FROM subscribers WHERE pub_id = ? AND email = ?', pub.id, v.email);
     if (!sub) {
       const sid = id();
-      await insert(c.env, 'subscribers', { id: sid, pub_id: pub.id, email: v.email, name: '', status: 'unsubscribed', tier: 'free', source: 'try_it', source_detail: 'sample', referral_code: id(10), custom: '{}', unsubscribed_at: now(), created_at: now(), updated_at: now() });
+      await insert(c.env, 'subscribers', { id: sid, pub_id: pub.id, email: v.email, name: '', status: 'unsubscribed', tier: 'free', source: 'try_it', source_detail: 'sample', referral_code: id(10), custom: '{}', unsubscribed_at: null, created_at: now(), updated_at: now() });
       sub = await one<Subscriber>(c.env, 'SELECT * FROM subscribers WHERE id = ?', sid);
     }
     const sendId = id();

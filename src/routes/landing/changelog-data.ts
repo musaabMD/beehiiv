@@ -3,6 +3,15 @@ export interface ChangelogEntry { date: string; slug: string; title: string; bod
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-26', slug: 'lnkbase-newsletter', title: 'Now Lnkbase Newsletter, hosted at hive.lnkbase.com',
+    body: [
+      'The product is now a hosted service and part of Lnkbase. Sign up, and you\'re writing your first issue in a minute: Free up to 500 subscribers, then Starter, Pro and Scale plans by list size, with every feature on every plan and 0% of your revenue.',
+      'New accounts send from news.lnkbase.com until they add their own domain, with replies coming to them. Sending is protected for everyone: new accounts ramp up, big first campaigns get a quick review, and any campaign pauses on its own if bounces or spam complaints climb.',
+      'Settings → Plan & usage shows your subscribers and emails this month against your plan, and upgrades take effect right away.',
+    ],
+    links: [['Pricing', '/pricing'], ['Start free', '/signup']],
+  },
+  {
     date: '2026-10-26', slug: 'try-it', title: 'Get a real sample issue in your inbox',
     body: [
       'On the demo, type your email on the Try it page and get the latest issue for real, then watch it on a live status page as it\'s sent, opened and clicked. It scores 10/10 on mail-tester.com, with SPF, DKIM and DMARC all passing.',

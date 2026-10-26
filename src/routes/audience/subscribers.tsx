@@ -25,12 +25,12 @@ app.get('/', async (c) => {
   const limit = 50;
   const rows = await all<Subscriber>(
     c.env,
-    `SELECT s.* FROM subscribers s WHERE s.pub_id = ? AND (${cc.sql}) ${cur ? 'AND (s.created_at < ? OR (s.created_at = ? AND s.id < ?))' : ''} ORDER BY s.created_at DESC, s.id DESC LIMIT ?`,
+    `SELECT s.* FROM subscribers s WHERE s.pub_id = ? AND s.source != 'try_it' AND (${cc.sql}) ${cur ? 'AND (s.created_at < ? OR (s.created_at = ? AND s.id < ?))' : ''} ORDER BY s.created_at DESC, s.id DESC LIMIT ?`,
     pub.id, ...cc.params, ...(cur ? [cur.t, cur.t, cur.id] : []), limit + 1,
   );
   const more = rows.length > limit;
   const list = rows.slice(0, limit);
-  const total = await val<number>(c.env, `SELECT COUNT(*) FROM subscribers s WHERE s.pub_id = ? AND (${cc.sql})`, pub.id, ...cc.params);
+  const total = await val<number>(c.env, `SELECT COUNT(*) FROM subscribers s WHERE s.pub_id = ? AND s.source != 'try_it' AND (${cc.sql})`, pub.id, ...cc.params);
   const since = now() - 30 * DAY;
   const [active, new30, unsub30, premium] = await Promise.all([
     val<number>(c.env, `SELECT COUNT(*) FROM subscribers WHERE pub_id = ? AND status = 'active'`, pub.id),
@@ -145,7 +145,7 @@ async function targetIds(c: Ctx, f: Record<string, any>): Promise<string[]> {
   if (f.scope === 'all') {
     const g = filterGroup(filtersFrom((k) => c.req.query(k)));
     const cc = await compile(c.env, pub.id, g);
-    return (await all<{ id: string }>(c.env, `SELECT s.id FROM subscribers s WHERE s.pub_id = ? AND (${cc.sql}) LIMIT 20000`, pub.id, ...cc.params)).map((r) => r.id);
+    return (await all<{ id: string }>(c.env, `SELECT s.id FROM subscribers s WHERE s.pub_id = ? AND s.source != 'try_it' AND (${cc.sql}) LIMIT 20000`, pub.id, ...cc.params)).map((r) => r.id);
   }
   const ids: string[] = (f.ids || []).map(String).slice(0, 1000);
   if (!ids.length) return [];

@@ -17,6 +17,8 @@
   "ai": { "binding": "AI" },
   "images": { "binding": "IMAGES" },
   "routes": [{ "pattern": "hive.lnkbase.com", "custom_domain": true }],
+  "workers_dev": true,
+  "preview_urls": false, // keep the old address alive: it 301s to APP_URL, and links in already-sent emails keep working
   "triggers": { "crons": ["* * * * *"] },
   "vars": {
     "APP_NAME": "Lnkbase Newsletter",
