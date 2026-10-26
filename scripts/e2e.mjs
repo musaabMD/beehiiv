@@ -34,8 +34,16 @@ async function api(key, method, path, json) {
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
 function sql(q) {
-  const out = execSync(`npx wrangler d1 execute openhive --local ${PERSIST ? `--persist-to ${PERSIST}` : ''} --json --command ${JSON.stringify(q)}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  return JSON.parse(out)[0].results;
+  // The local database file can be briefly locked while the dev server's background jobs run: retry.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const out = execSync(`npx wrangler d1 execute openhive --local ${PERSIST ? `--persist-to ${PERSIST}` : ''} --json --command ${JSON.stringify(q)}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      return JSON.parse(out)[0].results;
+    } catch (e) {
+      if (attempt >= 6) throw e;
+      execSync(`sleep ${attempt}`);
+    }
+  }
 }
 const cron = () => fetch(BASE + '/__scheduled').catch(() => null);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -155,6 +163,9 @@ ok(stats.status === 200, 'post stats via API', JSON.stringify(stats.body).slice(
 const mcp = await fetch(`${BASE}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
 const mj = await mcp.json().catch(() => ({}));
 ok(mcp.status === 200 && mj.result?.tools?.length > 10, `MCP tools/list (${mj.result?.tools?.length || 0} tools)`);
+// Each later section starts from the main test user's session (some sections sign in as others).
+const __mainCookies = { ...cookies };
+const __restore = () => { cookies = { ...__mainCookies }; };
 console.log('11. Platform plans: usage page, subscriber cap, email allowance, upgrade, campaign safety, approval');
 cookies = cookieBackup;
 const pubRow = sql(`SELECT id, workspace_id FROM publications WHERE slug = '${slug}'`)[0];
@@ -268,6 +279,7 @@ sql(`UPDATE workspaces SET plan_status = 'active', plan_grace_until = NULL WHERE
 sql(`UPDATE sends SET status = 'cancelled' WHERE id = '${send4}'`);
 sql(`DELETE FROM subscribers WHERE id LIKE 'big%${rnd}' OR id LIKE 'bnc%${rnd}'`);
 
+__restore();
 console.log('11m. Marketing: social posting (mock Bluesky + Mastodon), calendar, campaigns, ad audiences, PWA, SSO (mock OIDC)');
 {
   // Local mock of the third-party APIs (documented endpoints only): AT Protocol PDS, Mastodon, and two OIDC providers.
@@ -562,6 +574,7 @@ console.log('11m. Marketing: social posting (mock Bluesky + Mastodon), calendar,
   }
 }
 
+__restore();
 { // commerce sync, cart abandonment, transactional email, inbox
 console.log('11c. Store sync, cart abandonment, transactional API, reply inbox');
 {
@@ -723,6 +736,7 @@ console.log('11c. Store sync, cart abandonment, transactional API, reply inbox')
 }
 
 }
+__restore();
 { // subscriber intelligence
 console.log('13. Subscriber intelligence: signals, value/CLV/churn scores, predictive segments, anomalies, next steps, comparative reports');
 const req0 = req;
