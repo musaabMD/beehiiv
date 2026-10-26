@@ -723,6 +723,107 @@ console.log('11c. Store sync, cart abandonment, transactional API, reply inbox')
 }
 
 }
+{ // subscriber intelligence
+console.log('13. Subscriber intelligence: signals, value/CLV/churn scores, predictive segments, anomalies, next steps, comparative reports');
+const req0 = req;
+{
+  cookies = userCookies;
+  const T = Date.now(), D = 86400000;
+  // the dev server drops idle keep-alive sockets: retry once on a reset connection
+  const req = async (path, opts) => { try { return await req0(path, opts); } catch { return req0(path, opts); } };
+  const stmts = [];
+  const ins = (id, email, extra = {}) => {
+    const row = { id, pub_id: pubId, email, name: '', status: 'active', tier: 'free', source: 'import', referral_code: id, custom: '{}', confirmed_at: T, created_at: T - 200 * D, updated_at: T, ...extra };
+    stmts.push(`INSERT INTO subscribers (${Object.keys(row).join(',')}) VALUES (${Object.values(row).map((v) => (v === null ? 'NULL' : typeof v === 'number' ? v : `'${v}'`)).join(',')})`);
+  };
+  // a superfan (engaged, buyer, referrer), a paid subscriber who went quiet with a failed payment, a business address, and 15 dormant readers
+  ins(`iq_fan${rnd}`, `fan.${rnd}@gmail.com`, { engagement: 95, referral_count: 6, last_open_at: T - D, last_click_at: T - D, open_count: 30, click_count: 12 });
+  ins(`iq_paid${rnd}`, `paid.${rnd}@gmail.com`, { tier: 'premium', engagement: 10, last_open_at: T - 80 * D });
+  ins(`iq_biz${rnd}`, `ceo.${rnd}@acme-widgets.io`, { engagement: 40, country: 'DE' });
+  for (let i = 0; i < 15; i++) ins(`iq_dorm${i}${rnd}`, `dorm${i}.${rnd}@gmail.com`, { engagement: 0, last_open_at: T - 150 * D });
+  stmts.push(`INSERT INTO orders (id, pub_id, kind, ref_id, subscriber_id, email, amount_cents, status, created_at, paid_at) VALUES ('iqo1${rnd}', '${pubId}', 'product', 'x', 'iq_fan${rnd}', 'fan.${rnd}@gmail.com', 4900, 'paid', ${T - 20 * D}, ${T - 20 * D}), ('iqo2${rnd}', '${pubId}', 'subscription', 'x', 'iq_paid${rnd}', 'paid.${rnd}@gmail.com', 1000, 'paid', ${T - 100 * D}, ${T - 100 * D})`);
+  stmts.push(`INSERT INTO subscriptions (id, pub_id, subscriber_id, tier_id, interval, status, amount_cents, created_at, updated_at) VALUES ('iqs${rnd}', '${pubId}', 'iq_paid${rnd}', 'x', 'month', 'past_due', 1000, ${T - 100 * D}, ${T})`);
+  sql(stmts.join('; '));
+
+  r = await req('/app/audience/top/recompute', { form: {} });
+  ok([302, 303].includes(r.status), 'recompute scores', r.status);
+  const sc = Object.fromEntries(sql(`SELECT subscriber_id, value_score, value_percentile, clv_cents, predicted_cents, purchase_likelihood, churn_risk FROM subscriber_scores WHERE pub_id = '${pubId}' AND subscriber_id LIKE 'iq_%'`).map((x) => [x.subscriber_id.replace(rnd, ''), x]));
+  ok(sc.iq_fan && sc.iq_fan.value_score >= 70 && sc.iq_fan.value_percentile >= 90 && sc.iq_fan.purchase_likelihood === 'high', 'superfan gets a top value score + high purchase likelihood', JSON.stringify(sc.iq_fan));
+  ok(sc.iq_paid && sc.iq_paid.churn_risk === 'high' && sc.iq_paid.clv_cents > 1000 && sc.iq_paid.predicted_cents > 0, 'quiet past-due paid subscriber: high churn risk, CLV = history + prediction', JSON.stringify(sc.iq_paid));
+  ok(sc.iq_dorm0 && sc.iq_dorm0.value_score < 10 && sc.iq_dorm0.churn_risk === null, 'dormant free reader: low value, no churn score');
+  r = await req('/app/audience/top'); let th = await r.text();
+  const fanAt = th.indexOf(`fan.${rnd}@gmail.com`), dormAt = th.indexOf(`dorm0.${rnd}@gmail.com`);
+  ok(r.status === 200 && fanAt > 0 && (dormAt === -1 || fanAt < dormAt), 'Top subscribers ranks the superfan above dormant readers');
+  r = await req(`/app/audience/s/iq_paid${rnd}`); th = await r.text();
+  ok(th.includes('data-churn="high"') && th.includes('data-clv'), 'subscriber page shows CLV + churn risk');
+
+  // signals: business email → organization; segment fields
+  r = await req(`/app/audience/s/iq_biz${rnd}/signals`, { form: {} });
+  const sg = sql(`SELECT business_email, organization, country FROM subscriber_signals WHERE subscriber_id = 'iq_biz${rnd}'`)[0];
+  ok(sg && sg.business_email === 1 && sg.organization === 'Acme Widgets' && sg.country === 'DE', 'signals: business email, organization, country', JSON.stringify(sg));
+  r = await req(`/app/audience/s/iq_biz${rnd}`); th = await r.text();
+  ok(th.includes('data-business="1"') && th.includes('Acme Widgets'), 'subscriber page shows signals');
+  const segRes = async (rules) => (await api(key, 'POST', '/segments', { name: `iq ${Math.random()}`, rules })).body?.data;
+  let sgm = await segRes({ op: 'and', rules: [{ field: 'business_email', cmp: 'is_true' }, { field: 'email', cmp: 'contains', value: rnd }] });
+  ok(sgm?.subscriber_count === 1, 'segment: business email', JSON.stringify(sgm).slice(0, 160));
+  sgm = await segRes({ op: 'and', rules: [{ field: 'company', cmp: 'contains', value: 'widgets' }] });
+  ok(sgm?.subscriber_count === 1, 'segment: company contains', JSON.stringify(sgm).slice(0, 160));
+  sgm = await segRes({ op: 'and', rules: [{ field: 'churn_risk', cmp: 'eq', value: 'high' }, { field: 'email', cmp: 'contains', value: `paid.${rnd}` }] });
+  ok(sgm?.subscriber_count === 1, 'segment: churn risk high');
+  sgm = await segRes({ op: 'and', rules: [{ field: 'value_percentile', cmp: 'gt', value: 89 }, { field: 'purchase_likelihood', cmp: 'eq', value: 'high' }, { field: 'clv', cmp: 'gt', value: 40 }] });
+  ok(sgm?.subscriber_count >= 1, 'segment: top value + likely buyer + CLV > $40');
+  const fanSeg = sgm?.id;
+  r = await req('/app/audience/top/signals', { form: {} });
+  ok(sql(`SELECT COUNT(*) AS n FROM subscriber_signals WHERE pub_id = '${pubId}'`)[0].n === 0, 'turning Subscriber Signals off deletes stored signals');
+  r = await req('/app/audience/top/signals', { form: { enabled: 'on' } });
+  ok(sql(`SELECT json_extract(settings, '$.subscriber_signals') AS v FROM publications WHERE id = '${pubId}'`)[0].v === 1, 'Subscriber Signals back on');
+
+  // API + MCP
+  const ins1 = await api(key, 'GET', `/subscriptions/iq_fan${rnd}/insights`);
+  ok(ins1.status === 200 && ins1.body?.data?.value_score >= 70 && ins1.body?.data?.lifetime_value?.historical_cents === 4900, 'REST: subscriber insights', JSON.stringify(ins1.body).slice(0, 200));
+  const mi = await fetch(`${BASE}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'subscriber_intelligence', arguments: { action: 'top', limit: 3 } } }) }).then((x) => x.json()).catch(() => ({}));
+  ok(Array.isArray(mi.result?.structuredContent?.items) && mi.result.structuredContent.items[0]?.email === `fan.${rnd}@gmail.com`, 'MCP: top subscribers', JSON.stringify(mi).slice(0, 200));
+
+  // next steps on the dashboard home + one-click segment
+  r = await req('/app'); th = await r.text();
+  ok(th.includes('Suggested next steps') && th.includes('data-suggestion="winback"') && th.includes('data-suggestion="churn"'), 'dashboard: suggested next steps (win back, churn)');
+  r = await req('/app/intel/segment', { form: { preset: 'inactive_90' } });
+  const segId = (r.headers.get('location') || '').split('/').pop();
+  ok(sql(`SELECT cached_count FROM segments WHERE id = '${segId}' AND pub_id = '${pubId}'`)[0]?.cached_count >= 15, 'one-click "inactive for 90 days" segment');
+  const na = await api(key, 'GET', '/insights/next_actions');
+  ok(na.status === 200 && na.body.data.some((x) => x.key === 'winback'), 'REST: next actions');
+
+  // anomalies: an unsubscribe spike today vs a quiet 14-day baseline
+  sql(`UPDATE subscribers SET status = 'unsubscribed', unsubscribed_at = ${T - 3600000} WHERE id LIKE 'iq_dorm%${rnd}' AND id NOT LIKE 'iq_dorm1${rnd}'`);
+  r = await req('/app/analytics/anomalies/check', { form: { back: '/app/analytics' } });
+  const an = sql(`SELECT id, metric, severity, emailed_at FROM anomalies WHERE pub_id = '${pubId}' AND metric = 'unsubscribes'`);
+  ok(an.length === 1 && an[0].metric === 'unsubscribes' && an[0].severity !== 'good' && an[0].emailed_at, 'unsubscribe spike detected + stored', JSON.stringify(an));
+  ok(sql(`SELECT COUNT(*) AS n FROM outbox WHERE to_email = '${email}' AND subject LIKE 'Unusual activity%'`)[0].n === 1, 'owner emailed about the anomaly');
+  await req('/app/analytics/anomalies/check', { form: {} });
+  ok(sql(`SELECT COUNT(*) AS n FROM outbox WHERE to_email = '${email}' AND subject LIKE 'Unusual activity%'`)[0].n === 1 && sql(`SELECT COUNT(*) AS n FROM anomalies WHERE pub_id = '${pubId}' AND metric = 'unsubscribes'`)[0].n === 1, 'same anomaly is not stored or emailed twice');
+  r = await req('/app'); th = await r.text();
+  const r2 = await req('/app/analytics'); const ah2 = await r2.text();
+  ok(th.includes('data-anomaly="unsubscribes"') && ah2.includes('data-anomaly="unsubscribes"'), 'alert on dashboard home + Analytics overview');
+  await req(`/app/anomalies/${an[0]?.id}/dismiss`, { form: { back: '/app' } });
+  r = await req('/app'); th = await r.text();
+  ok(!th.includes('data-anomaly="unsubscribes"'), 'alert can be dismissed');
+
+  // comparative custom reports: periods and segments side by side, saved with the comparison
+  r = await req('/app/analytics/reports?metric=subscribers&group=day&range=30d&cmp=prev'); th = await r.text();
+  ok(r.status === 200 && th.includes('Side by side') && th.includes('Previous period'), 'custom report vs previous period');
+  r = await req(`/app/analytics/reports?metric=unsubscribes&group=source&range=7d&cmp=segments&sa=${fanSeg}&sb=`); th = await r.text();
+  ok(r.status === 200 && th.includes('Side by side') && th.includes('All subscribers'), 'custom report: segment vs segment');
+  r = await req('/app/analytics/reports?metric=unsubscribes&group=day&range=7d&cmp=yoy&format=csv'); th = await r.text();
+  ok(th.startsWith('day,') && th.includes('Change %') && th.includes('Same period last year'), 'comparison CSV export');
+  await req('/app/analytics/reports', { form: { name: `Cmp ${rnd}`, config: JSON.stringify({ metric: 'subscribers', group: 'day', range: '30d', filters: [], compare: { mode: 'custom', from2: '2026-01-01', to2: '2026-01-31' } }) } });
+  r = await req('/app/analytics/reports'); th = await r.text();
+  ok(th.includes(`Cmp ${rnd}`) && th.includes('cmp=custom') && th.includes('from2=2026-01-01'), 'saved report keeps the comparison');
+  r = await req('/app/analytics/revenue'); th = await r.text();
+  ok(r.status === 200 && th.includes('data-predictions') && th.includes('Paid subscribers most likely to churn'), 'revenue analytics: CLV + churn predictions');
+  sql(`DELETE FROM subscribers WHERE id LIKE 'iq_%${rnd}'`);
+}
+
+}
 console.log('12. Errors');
 const errs = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
 ok(errs.length === 0, 'no server errors logged', JSON.stringify(errs).slice(0, 800));

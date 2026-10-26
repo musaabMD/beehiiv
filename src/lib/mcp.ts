@@ -433,6 +433,24 @@ export const TOOLS: Tool[] = [
     },
   },
   {
+    name: 'subscriber_intelligence', title: 'Subscriber intelligence',
+    description: 'action: subscriber {email_or_id} (value score, lifetime value, purchase likelihood, churn risk, public signals) | top {sort?: value|clv|purchase|churn, limit?} | anomalies (unusual changes in the last 24h vs the previous 14 days) | next_actions (data-driven suggested next steps).',
+    inputSchema: S({ action: str('subscriber | top | anomalies | next_actions'), email_or_id: str('For action=subscriber'), sort: str('value|clv|purchase|churn'), limit: num('Max results (default 20)') }, ['action']),
+    annotations: { readOnlyHint: true },
+    run: async (env, pub, a) => {
+      const P = await import('./predict');
+      if (a.action === 'subscriber') {
+        const s = await getSubscriber(env, pub.id, a.email_or_id || '');
+        if (!s) throw new ToolError('Subscriber not found.');
+        return { id: s.id, email: s.email, ...(await P.subscriberInsights(env, pub.id, s.id)) };
+      }
+      if (a.action === 'top') return (await P.topSubscribers(env, pub.id, { sort: (['value', 'clv', 'purchase', 'churn'].includes(a.sort) ? a.sort : 'value') as any, limit: clamp(int(a.limit, 20), 1, 100) })).map((x) => ({ id: x.id, email: x.email, name: x.name, value_score: x.value_score, value_percentile: x.value_percentile, clv_usd: x.clv_cents / 100, purchase_likelihood: x.purchase_likelihood, churn_risk: x.churn_risk }));
+      if (a.action === 'anomalies') return (await (await import('./anomalies')).activeAnomalies(env, pub.id, 20)).map((x) => ({ metric: x.metric, severity: x.severity, message: x.message, detected_at: iso(x.created_at) }));
+      if (a.action === 'next_actions') return (await (await import('./nextaction')).suggestions(env, pub, 10)).map((x) => ({ title: x.title, why: x.body, do: x.action.label, url: x.action.href }));
+      throw new ToolError('Unknown action.');
+    },
+  },
+  {
     name: 'add_subscriber', title: 'Add a subscriber', description: 'Subscribe an email address (validated; double opt-in respected) with optional tags.',
     inputSchema: S({ email: str('Email'), name: str('Name'), tags: arr('Tags to add') }, ['email']),
     run: async (env, pub, a) => {

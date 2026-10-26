@@ -147,15 +147,19 @@ function filterSql(def: MetricDef, filters: Filter[] = []): { sql: string; param
   return { sql: parts.length ? ' AND ' + parts.join(' AND ') : '', params };
 }
 
-export interface ReportSpec { metric: string; group: string; range: Range; filters?: Filter[]; limit?: number }
+export interface ReportSpec { metric: string; group: string; range: Range; filters?: Filter[]; limit?: number; segment?: SegmentFilter | null }
+/** Restrict a report to subscribers matching a compiled segment (see segmentFilter). */
+export interface SegmentFilter { sql: string; params: unknown[] }
 export interface ReportRow { key: string; label: string; value: number }
 
 /** group: 'time' (auto bucket) | 'hour'|'day'|'week'|'month' | a dimension key */
 export async function runReport(env: Env, pubId: string, spec: ReportSpec): Promise<{ rows: ReportRow[]; bucket?: Bucket; total: number; money: boolean; label: string }> {
   const def = METRICS[spec.metric] || METRICS.page_views;
   const f = filterSql(def, spec.filters);
-  const base = `FROM ${def.from} WHERE t.pub_id = ? AND ${def.time} >= ? AND ${def.time} <= ?${def.where ? ' AND ' + def.where : ''}${f.sql}`;
-  const params = [pubId, spec.range.from, spec.range.to, ...f.params];
+  const subj = SEGMENT_SUBJECT[spec.metric];
+  const seg = spec.segment && subj ? { sql: ` AND EXISTS (SELECT 1 FROM subscribers s WHERE s.id = ${subj} AND (${spec.segment.sql}))`, params: spec.segment.params } : { sql: '', params: [] as unknown[] };
+  const base = `FROM ${def.from} WHERE t.pub_id = ? AND ${def.time} >= ? AND ${def.time} <= ?${def.where ? ' AND ' + def.where : ''}${f.sql}${seg.sql}`;
+  const params = [pubId, spec.range.from, spec.range.to, ...f.params, ...seg.params];
   const total = Number(await val(env, `SELECT ${def.value} ${base}`, ...params)) || 0;
   const timeGroups = ['time', 'hour', 'day', 'week', 'month'];
   if (timeGroups.includes(spec.group)) {
@@ -168,6 +172,34 @@ export async function runReport(env: Env, pubId: string, spec: ReportSpec): Prom
   const dim = def.dims[spec.group] || Object.values(def.dims)[0];
   const res = await all<{ k: string | null; v: number }>(env, `SELECT ${dim[1]} AS k, ${def.value} AS v ${base} GROUP BY k ORDER BY v DESC LIMIT ?`, ...params, spec.limit ?? 25);
   return { rows: res.map((r) => ({ key: r.k ?? '(none)', label: r.k ?? '(none)', value: Number(r.v) || 0 })), total, money: !!def.money, label: def.label };
+}
+
+// ───────── comparative reports ─────────
+/** How each metric's rows link to a subscriber (metrics without an entry can't be split by segment). */
+export const SEGMENT_SUBJECT: Record<string, string> = {
+  subscribers: 't.id', unsubscribes: 't.id', page_views: 't.subscriber_id', visitors: 't.subscriber_id', emails: 't.subscriber_id', opens: 't.subscriber_id',
+  open_events: '(SELECT d.subscriber_id FROM deliveries d WHERE d.id = t.delivery_id)', clicks: '(SELECT d.subscriber_id FROM deliveries d WHERE d.id = t.delivery_id)', revenue: 't.subscriber_id',
+};
+
+/** The same-length period one year earlier. */
+export function yearAgo(r: Range): Range {
+  const shift = (t: number) => { const d = new Date(t); d.setUTCFullYear(d.getUTCFullYear() - 1); return d.getTime(); };
+  return { from: shift(r.from), to: shift(r.to), key: 'yoy', label: 'Same period last year' };
+}
+
+export interface CompareRow { key: string; label: string; a: number; b: number; change: number | null }
+/**
+ * Side-by-side comparison of two report runs (two periods, or two segments over one period).
+ * Time-grouped reports align buckets by position (day 1 vs day 1); dimension reports align by key.
+ */
+export function compareReports(a: Awaited<ReturnType<typeof runReport>>, b: Awaited<ReturnType<typeof runReport>>, byPosition: boolean): { rows: CompareRow[]; totalA: number; totalB: number; change: number | null } {
+  let rows: CompareRow[];
+  if (byPosition) rows = a.rows.map((x, i) => ({ key: x.key, label: x.label, a: x.value, b: b.rows[i]?.value || 0, change: delta(x.value, b.rows[i]?.value || 0) }));
+  else {
+    const keys = [...new Set([...a.rows.map((x) => x.key), ...b.rows.map((x) => x.key)])];
+    rows = keys.map((k) => { const va = a.rows.find((x) => x.key === k)?.value || 0, vb = b.rows.find((x) => x.key === k)?.value || 0; return { key: k, label: k, a: va, b: vb, change: delta(va, vb) }; }).sort((x, y) => y.a + y.b - (x.a + x.b));
+  }
+  return { rows, totalA: a.total, totalB: b.total, change: delta(a.total, b.total) };
 }
 
 // ───────── 3D pivot (up to three dimensions) ─────────

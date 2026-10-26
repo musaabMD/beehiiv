@@ -9,7 +9,12 @@ import { requirePerm } from '../../lib/auth';
 import {
   parseRange, previous, runReport, METRICS, dimsFor, subscriberKpis, emailKpis, revenueKpis, webKpis, podcastKpis, postPerformance, realtime,
   trafficToSubscribers, engagementDistribution, cohorts, deliverability, postDeliverability, suppressionSummary, type Filter, type Range,
+  SEGMENT_SUBJECT, yearAgo, compareReports,
 } from '../../lib/analytics';
+import { compile, segmentGroup } from '../../lib/segments';
+import { activeAnomalies } from '../../lib/anomalies';
+import { predictionSummary, topSubscribers, MAX_TENURE_MONTHS } from '../../lib/predict';
+import { AnomalyAlerts } from './intel';
 import { DashLayout } from '../../ui/layout';
 import { Card, Grid, Stats, Stat, Table, LineChart, Bars, Badge, Status, Empty, LinkBtn, Btn, Field, Input, back } from '../../ui/components';
 import { TrendChart, RangeBar, Kpi, FilterChips, parseFilters, normalizeChipQuery, CompareChart, csv, qsWith, fmtPct, fmtNum, fmtUsd, DASH_STYLE } from './parts';
@@ -43,8 +48,12 @@ export function registerAnalytics(dash: App) {
       runReport(c.env, pub.id, { metric: 'revenue', group: 'time', range: r }), runReport(c.env, pub.id, { metric: 'downloads', group: 'time', range: r }),
     ]);
     const labels = newS.rows.map((x) => x.label);
+    const anoms = await activeAnomalies(c.env, pub.id);
     return c.html(
-      <Page c={c} title="Analytics" sub="overview">
+      <Page c={c} title="Analytics" sub="overview" actions={
+        <form method="post" action="/app/analytics/anomalies/check" class="inline-form"><input type="hidden" name="back" value="/app/analytics" /><Btn small kind="ghost" attrs={{ title: 'Compare the last 24 hours with the previous 14 days' }}>Check for anomalies</Btn></form>
+      }>
+        <AnomalyAlerts items={anoms} back="/app/analytics" />
         <RangeBar c={c} range={r} />
         <h3>Audience</h3>
         <Stats>
@@ -390,6 +399,7 @@ export function registerAnalytics(dash: App) {
     const NAMES: Record<string, string> = { subscription: 'Paid subscriptions', product: 'Digital products', ticket: 'Event tickets', sponsorship: 'Sponsorships', gift: 'Gift subscriptions', group: 'Group subscriptions', replay: 'Replays' };
     const recent = await all<any>(c.env, `SELECT kind, amount_cents, status, note, created_at FROM wallet_entries WHERE pub_id = ? ORDER BY created_at DESC LIMIT 10`, pub.id);
     const byTier = await all<any>(c.env, `SELECT t.name, COUNT(*) AS n, SUM(CASE WHEN s.interval = 'year' THEN s.amount_cents / 12.0 ELSE s.amount_cents END) AS mrr FROM subscriptions s JOIN tiers t ON t.id = s.tier_id WHERE s.pub_id = ? AND s.status IN ('active','past_due') GROUP BY t.name ORDER BY mrr DESC`, pub.id);
+    const [pred, topClv, atRisk] = await Promise.all([predictionSummary(c.env, pub.id), topSubscribers(c.env, pub.id, { sort: 'clv', limit: 8 }), topSubscribers(c.env, pub.id, { sort: 'churn', limit: 8 })]);
     return c.html(
       <Page c={c} title="Revenue" sub="revenue">
         <RangeBar c={c} range={r} />
@@ -409,6 +419,31 @@ export function registerAnalytics(dash: App) {
         <Grid cols={2}>
           <Card title="Revenue split"><Bars rows={k.byKind.map((x) => ({ label: NAMES[x.kind] || x.kind, value: Number(x.v) }))} fmt={fmtUsd} /></Card>
           <Card title="MRR by tier"><Bars rows={byTier.map((x) => ({ label: `${x.name} (${x.n})`, value: Math.round(x.mrr) }))} fmt={fmtUsd} /></Card>
+        </Grid>
+        <h3 style="margin-top:8px" id="predictions">Lifetime value &amp; predictions</h3>
+        <p class="help">Customer lifetime value = revenue so far + predicted future revenue (monthly value × expected remaining months, adjusted for churn risk). Expected subscription length here is {pred.expectedTenure.toFixed(1)} months from your {fmtPct(pred.monthlyChurn * 100)} monthly churn (capped at {MAX_TENURE_MONTHS}). {pred.computedAt ? `Recomputed ${ago(pred.computedAt)}.` : 'Scores are computed in the background every few hours.'} <a href="/app/audience/top">How scores work →</a></p>
+        <div class="stats kpis4" data-predictions>
+          <Stat label="Avg customer lifetime value" value={fmtUsd(pred.avgClv)} sub={`${fmtNum(pred.customers)} paying readers`} />
+          <Stat label="Predicted future revenue" value={fmtUsd(pred.predicted)} sub={`on top of ${fmtUsd(pred.historical)} earned`} />
+          <Stat label="Likely buyers" value={fmtNum(pred.purchase.highNonBuyers)} sub="high purchase likelihood, never bought" href="/app/audience/top?sort=purchase" />
+          <Stat label="MRR at high churn risk" value={fmtUsd(pred.churn.mrrAtRisk)} sub={`${fmtNum(pred.churn.high)} high · ${fmtNum(pred.churn.medium)} medium risk`} tone={pred.churn.high ? 'down' : ''} href="/app/audience/top?sort=churn" />
+        </div>
+        <Grid cols={2}>
+          <Card title="Highest lifetime value" pad={false}>
+            <Table rows={topClv.filter((x) => x.clv_cents > 0)} empty="No paying readers yet." cols={[
+              { h: 'Subscriber', r: (x) => <a href={`/app/audience/s/${x.id}`}>{x.name || x.email}</a> },
+              { h: 'Earned', r: (x) => fmtUsd(x.revenue_cents), class: 'right' },
+              { h: 'Predicted', r: (x) => fmtUsd(x.predicted_cents), class: 'right' },
+              { h: 'CLV', r: (x) => <strong>{fmtUsd(x.clv_cents)}</strong>, class: 'right' },
+            ]} />
+          </Card>
+          <Card title="Paid subscribers most likely to churn" pad={false}>
+            <Table rows={atRisk.filter((x) => x.churn_risk && x.churn_risk !== 'low')} empty="No paid subscribers at risk right now." cols={[
+              { h: 'Subscriber', r: (x) => <a href={`/app/audience/s/${x.id}`}>{x.name || x.email}</a> },
+              { h: 'Risk', r: (x) => <Badge tone={x.churn_risk === 'high' ? 'red' : 'amber'}>{x.churn_risk} · {x.churn_score}</Badge> },
+              { h: 'Monthly value', r: (x) => fmtUsd(x.monthly_value_cents), class: 'right' },
+            ]} />
+          </Card>
         </Grid>
         <Card title="Earnings report (ad network & boosts)">
           <LineChart labels={kindSeries[0].rows.map((x) => x.label)} series={earnSeries} fmt={usdAxis} />
@@ -459,20 +494,47 @@ export function registerAnalytics(dash: App) {
     );
   });
 
-  // ───────── Custom reports ─────────
+  // ───────── Custom reports (+ comparative: two periods or two segments side by side) ─────────
   dash.get('/analytics/reports', async (c) => {
     const redirect = normalizeChipQuery(c);
     if (redirect) return c.redirect(redirect);
     const pub = c.get('pub');
-    const metric = METRICS[c.req.query('metric') || ''] ? c.req.query('metric')! : 'page_views';
+    const q = c.req.query();
+    const metric = METRICS[q.metric || ''] ? q.metric! : 'page_views';
     const dimKeys = dimsFor(metric).map(([k]) => k);
-    const groupQ = c.req.query('group') || 'time';
+    const groupQ = q.group || 'time';
     const group = ['time', 'day', 'week', 'month', ...dimKeys].includes(groupQ) ? groupQ : 'time';
-    const r = parseRange(c.req.query());
+    const r = parseRange(q);
     const filters = parseFilters(c, metric);
-    const report = await runReport(c.env, pub.id, { metric, group, range: r, filters, limit: 50 });
+    const timeGroups = ['time', 'day', 'week', 'month'];
+    const isTime = timeGroups.includes(group);
+    const segmentable = !!SEGMENT_SUBJECT[metric];
+    const cmp = ['prev', 'yoy', 'custom', 'segments'].includes(q.cmp || '') ? q.cmp! : '';
+    const segments = await all<{ id: string; name: string }>(c.env, 'SELECT id, name FROM segments WHERE pub_id = ? ORDER BY name', pub.id);
+    const segName = (sid: string) => (sid ? segments.find((s) => s.id === sid)?.name || 'Segment' : 'All subscribers');
+    const segFilter = async (sid: string | undefined) => (sid && segments.some((s) => s.id === sid) ? compile(c.env, pub.id, segmentGroup(sid)) : null);
+
+    // A = the main report. With segment comparison, A and B are the two segments over the same range.
+    const useSegs = cmp === 'segments' && segmentable;
+    const report = await runReport(c.env, pub.id, { metric, group, range: r, filters, limit: 50, segment: useSegs ? await segFilter(q.sa) : null });
+    let rangeB: Range | null = null;
+    if (cmp === 'prev') rangeB = previous(r);
+    else if (cmp === 'yoy') rangeB = yearAgo(r);
+    else if (cmp === 'custom') { const x = parseRange({ from: q.from2, to: q.to2 }); rangeB = x.key === 'custom' ? { ...x, label: `${q.from2} → ${q.to2}` } : null; }
+    // time buckets must match: compare with the same bucket size as A
+    const groupB = isTime && group === 'time' ? (report.bucket || 'day') : group;
+    const reportB = useSegs ? await runReport(c.env, pub.id, { metric, group, range: r, filters, limit: 50, segment: await segFilter(q.sb) })
+      : rangeB ? await runReport(c.env, pub.id, { metric, group: groupB, range: rangeB, filters, limit: 50 }) : null;
+    const labelA = useSegs ? segName(q.sa || '') : r.label;
+    const labelB = useSegs ? segName(q.sb || '') : rangeB?.label || '';
+    const cmpd = reportB ? compareReports(report, reportB, isTime) : null;
+
     const fmtV = (n: number) => (report.money ? fmtUsd(n) : fmtNum(n));
-    if (c.req.query('format') === 'csv') return csv(c, `report-${metric}-${group}`, [[group, report.label], ...report.rows.map((x) => [x.key, report.money ? (x.value / 100).toFixed(2) : x.value])]);
+    const money = (n: number) => (report.money ? (n / 100).toFixed(2) : n);
+    if (q.format === 'csv') {
+      if (cmpd) return csv(c, `report-${metric}-${group}-compare`, [[group, labelA, labelB, 'Change %'], ...cmpd.rows.map((x) => [x.key, money(x.a), money(x.b), x.change === null ? '' : x.change.toFixed(1)]), ['Total', money(cmpd.totalA), money(cmpd.totalB), cmpd.change === null ? '' : cmpd.change.toFixed(1)]]);
+      return csv(c, `report-${metric}-${group}`, [[group, report.label], ...report.rows.map((x) => [x.key, money(x.value)])]);
+    }
     const saved = await all<any>(c.env, 'SELECT * FROM saved_reports WHERE pub_id = ? ORDER BY created_at DESC', pub.id);
     const savedHref = (cfg: any) => {
       if (cfg.type === 'pivot') {
@@ -482,18 +544,32 @@ export function registerAnalytics(dash: App) {
         return '/app/analytics/explore?' + p.toString();
       }
       const u = new URLSearchParams();
-      u.set('metric', cfg.metric); u.set('group', cfg.group); if (cfg.range) u.set('range', cfg.range);
+      u.set('metric', cfg.metric); u.set('group', cfg.group);
+      if (cfg.range === 'custom' && cfg.from && cfg.to) { u.set('from', cfg.from); u.set('to', cfg.to); } else if (cfg.range) u.set('range', cfg.range);
       for (const f of cfg.filters || []) u.append('f', `${f.field}:${f.op}:${f.value}`);
+      if (cfg.compare?.mode) {
+        u.set('cmp', cfg.compare.mode);
+        for (const k of ['from2', 'to2', 'sa', 'sb']) if (cfg.compare[k]) u.set(k, cfg.compare[k]);
+      }
       return '/app/analytics/reports?' + u.toString();
     };
-    const timeGroups = ['time', 'day', 'week', 'month'];
+    const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const config = {
+      metric, group, range: r.key, filters,
+      ...(r.key === 'custom' ? { from: iso(r.from), to: iso(r.to) } : {}),
+      ...(cmp ? { compare: { mode: cmp, ...(cmp === 'custom' ? { from2: q.from2, to2: q.to2 } : {}), ...(cmp === 'segments' ? { sa: q.sa || '', sb: q.sb || '' } : {}) } } : {}),
+    };
+    const describe = (cfg: any) => [METRICS[cfg.metric]?.label, cfg.compare?.mode === 'segments' ? 'segment vs segment' : cfg.compare?.mode ? 'vs ' + ({ prev: 'previous period', yoy: 'last year', custom: 'another period' } as any)[cfg.compare.mode] : ''].filter(Boolean).join(' · ');
+    const chg = (d: number | null) => (d === null ? <span class="muted">new</span> : <span class={`cmp-d ${Math.abs(d) < 0.05 ? '' : d > 0 ? 'up' : 'down'}`}>{d > 0 ? '▲' : d < 0 ? '▼' : '•'} {Math.abs(d).toFixed(1)}%</span>);
+    const keepF = (c.req.queries('f') || []).map((x) => <input type="hidden" name="f" value={x} />);
+    const dimLabel = isTime ? 'Period' : dimsFor(metric).find(([k]) => k === group)?.[1] || group;
     return c.html(
       <Page c={c} title="Custom reports" sub="reports" actions={<LinkBtn href={qsWith(c, { format: 'csv' })} small>Export CSV</LinkBtn>}>
         <div class="split">
           <div>
             <Card title="Build a report">
-              <form method="get" class="row">
-                {(c.req.queries('f') || []).map((x) => <input type="hidden" name="f" value={x} />)}
+              <form method="get" class="row" data-report-form>
+                {keepF}
                 <label class="field" style="margin:0"><span class="field-l">Metric</span>
                   <select class="input" name="metric" data-autosubmit="1">{Object.entries(METRICS).map(([k, d]) => <option value={k} selected={k === metric}>{d.label}</option>)}</select>
                 </label>
@@ -504,31 +580,71 @@ export function registerAnalytics(dash: App) {
                   </select>
                 </label>
                 <label class="field" style="margin:0"><span class="field-l">Range</span>
-                  <select class="input" name="range" data-autosubmit="1">{[['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['90d', 'Last 90 days'], ['365d', 'Last 12 months'], ['ytd', 'Year to date'], ['all', 'All time']].map(([k, l]) => <option value={k} selected={r.key === k}>{l}</option>)}</select>
+                  <select class="input" name="range" data-autosubmit="1">{[['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['90d', 'Last 90 days'], ['365d', 'Last 12 months'], ['ytd', 'Year to date'], ['all', 'All time']].map(([k, l]) => <option value={k} selected={r.key === k}>{l}</option>)}{r.key === 'custom' && <option value="custom" selected>{r.label}</option>}</select>
                 </label>
+                {r.key === 'custom' && <><input type="hidden" name="from" value={iso(r.from)} /><input type="hidden" name="to" value={iso(r.to)} /></>}
+                <label class="field" style="margin:0"><span class="field-l">Compare with</span>
+                  <select class="input" name="cmp" data-autosubmit="1">
+                    <option value="" selected={!cmp}>Nothing</option>
+                    <option value="prev" selected={cmp === 'prev'}>Previous period</option>
+                    <option value="yoy" selected={cmp === 'yoy'}>Same period last year</option>
+                    <option value="custom" selected={cmp === 'custom'}>Another period…</option>
+                    {segmentable && <option value="segments" selected={cmp === 'segments'}>Two segments…</option>}
+                  </select>
+                </label>
+                {cmp === 'custom' && <>
+                  <label class="field" style="margin:0"><span class="field-l">From</span><input class="input" type="date" name="from2" value={q.from2 || iso(previous(r).from)} /></label>
+                  <label class="field" style="margin:0"><span class="field-l">To</span><input class="input" type="date" name="to2" value={q.to2 || iso(previous(r).to)} /></label>
+                  <div class="field" style="margin:0"><span class="field-l">&nbsp;</span><Btn small kind="secondary">Compare</Btn></div>
+                </>}
+                {cmp === 'segments' && segmentable && <>
+                  <label class="field" style="margin:0"><span class="field-l">Segment A</span><select class="input" name="sa" data-autosubmit="1"><option value="">All subscribers</option>{segments.map((s) => <option value={s.id} selected={s.id === q.sa}>{s.name}</option>)}</select></label>
+                  <label class="field" style="margin:0"><span class="field-l">Segment B</span><select class="input" name="sb" data-autosubmit="1"><option value="">All subscribers</option>{segments.map((s) => <option value={s.id} selected={s.id === q.sb}>{s.name}</option>)}</select></label>
+                </>}
               </form>
+              {cmp === 'segments' && !segmentable && <p class="help">This metric isn't tied to subscribers, so it can't be split by segment.</p>}
               <div style="margin-top:12px"><FilterChips c={c} metric={metric} filters={filters} /></div>
             </Card>
-            <Card title={`${report.label} · ${r.label}`} actions={<strong>{fmtV(report.total)}</strong>}>
-              {timeGroups.includes(group)
-                ? <LineChart labels={report.rows.map((x) => x.label)} series={[{ label: report.label, values: report.rows.map((x) => x.value) }]} fmt={report.money ? usdAxis : undefined} />
-                : <Bars rows={report.rows.map((x) => ({ label: x.label, value: x.value, sub: report.total && !['visitors', 'listeners'].includes(metric) ? fmtPct((x.value / report.total) * 100, 0) : '' }))} fmt={fmtV} />}
-            </Card>
-            <Card title="Data" pad={false}>
-              <Table rows={timeGroups.includes(group) ? [...report.rows].reverse() : report.rows} cols={[{ h: timeGroups.includes(group) ? 'Period' : dimsFor(metric).find(([k]) => k === group)?.[1] || group, r: (x) => x.key }, { h: report.label, r: (x) => fmtV(x.value), class: 'right' }]} />
-            </Card>
+            {cmpd ? <>
+              <Card title={`${report.label}: ${labelA} vs ${labelB}`} actions={<span data-compare-total><strong>{fmtV(cmpd.totalA)}</strong> <span class="muted">vs</span> <strong>{fmtV(cmpd.totalB)}</strong> {chg(cmpd.change)}</span>}>
+                {isTime
+                  ? <LineChart labels={report.rows.map((x) => x.label)} series={[{ label: labelA, values: cmpd.rows.map((x) => x.a) }, { label: labelB, values: cmpd.rows.map((x) => x.b), color: '#94a3b8' }]} fmt={report.money ? usdAxis : undefined} />
+                  : <Grid cols={2}>
+                    <div><h4>{labelA}</h4><Bars rows={cmpd.rows.slice(0, 15).map((x) => ({ label: x.label, value: x.a }))} fmt={fmtV} /></div>
+                    <div><h4>{labelB}</h4><Bars rows={cmpd.rows.slice(0, 15).map((x) => ({ label: x.label, value: x.b }))} fmt={fmtV} /></div>
+                  </Grid>}
+              </Card>
+              <Card title="Side by side" pad={false}>
+                <Table class="cmp-table" rows={isTime ? [...cmpd.rows].reverse() : cmpd.rows} cols={[
+                  { h: isTime ? `Period (${labelA})` : dimLabel, r: (x) => x.key },
+                  { h: labelA, r: (x) => fmtV(x.a), class: 'right' },
+                  { h: labelB, r: (x) => fmtV(x.b), class: 'right' },
+                  { h: 'Change', r: (x) => chg(x.change), class: 'right' },
+                ]} />
+              </Card>
+            </> : <>
+              <Card title={`${report.label} · ${r.label}`} actions={<strong>{fmtV(report.total)}</strong>}>
+                {isTime
+                  ? <LineChart labels={report.rows.map((x) => x.label)} series={[{ label: report.label, values: report.rows.map((x) => x.value) }]} fmt={report.money ? usdAxis : undefined} />
+                  : <Bars rows={report.rows.map((x) => ({ label: x.label, value: x.value, sub: report.total && !['visitors', 'listeners'].includes(metric) ? fmtPct((x.value / report.total) * 100, 0) : '' }))} fmt={fmtV} />}
+              </Card>
+              <Card title="Data" pad={false}>
+                <Table rows={isTime ? [...report.rows].reverse() : report.rows} cols={[{ h: dimLabel, r: (x) => x.key }, { h: report.label, r: (x) => fmtV(x.value), class: 'right' }]} />
+              </Card>
+            </>}
           </div>
           <div>
             <Card title="Save this report">
               <form method="post" action="/app/analytics/reports">
-                <input type="hidden" name="config" value={JSON.stringify({ metric, group, range: r.key, filters })} />
-                <Field label="Name"><Input name="name" placeholder="e.g. Mobile traffic from X" required /></Field>
+                <input type="hidden" name="config" value={JSON.stringify(config)} />
+                <Field label="Name"><Input name="name" placeholder={cmp ? 'e.g. Signups vs last year' : 'e.g. Mobile traffic from X'} required /></Field>
                 <Btn small>Save report</Btn>
               </form>
+              <p class="help" style="margin:8px 0 0">Saves the metric, grouping, filters, range{cmp ? ' and comparison' : ''}.</p>
             </Card>
             <Card title="Saved reports" pad={false}>
               <Table rows={saved} empty="No saved reports yet." cols={[
-                { h: 'Report', r: (x) => <a href={savedHref(parseJSON(x.config, {}))}>{x.name}</a> },
+                { h: 'Report', r: (x) => { const cfg = parseJSON<any>(x.config, {}); return <span><a href={savedHref(cfg)}>{x.name}</a><div class="muted small">{describe(cfg)}</div></span>; } },
                 { h: '', r: (x) => <form method="post" action={`/app/analytics/reports/${x.id}/delete`} class="inline-form"><button class="btn btn-ghost btn-sm" data-confirm="Delete this saved report?">✕</button></form>, class: 'right' },
               ]} />
             </Card>

@@ -184,6 +184,10 @@ export const DASH_STYLE = `
 .kpis4{grid-template-columns:repeat(4,minmax(0,1fr))}@media(max-width:1280px){.kpis4{grid-template-columns:repeat(2,minmax(0,1fr))}}.kpis6{grid-template-columns:repeat(6,minmax(0,1fr))}@media(max-width:1280px){.kpis4{grid-template-columns:repeat(4,minmax(0,1fr))}@media(max-width:1280px){.kpis4{grid-template-columns:repeat(2,minmax(0,1fr))}}.kpis6{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:640px){.kpis4{grid-template-columns:repeat(4,minmax(0,1fr))}@media(max-width:1280px){.kpis4{grid-template-columns:repeat(2,minmax(0,1fr))}}.kpis6{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .hello{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px}.hello h2{font-size:22px;margin:0}
 .seg-toggle{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}.seg-toggle a{padding:4px 10px;text-decoration:none;font-size:12.5px;color:var(--muted)}.seg-toggle a.on{background:var(--surface-2);color:var(--text);font-weight:600}
+.anoms{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}.anom{display:flex;gap:10px;align-items:flex-start;margin:0}.anom .grow{min-width:0}.anom form{margin:0}.anom-x{background:none;border:0;cursor:pointer;color:inherit;opacity:.6;font-size:16px;line-height:1;padding:2px 4px}.anom-x:hover{opacity:1}
+.nba{list-style:none;padding:0;margin:0}.nba li{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--border)}.nba li:last-child{border:0;padding-bottom:0}.nba li:first-child{padding-top:0}
+.nba .ni{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;flex:none;background:var(--surface-2);font-size:14px}.nba .nt{font-weight:600;line-height:1.35}.nba .nb{font-size:13px;color:var(--muted);margin:3px 0 8px}.nba form{margin:0}
+.cmp-table td.right,.cmp-table th.right{text-align:right}.cmp-d{font-size:12px;font-weight:600}.cmp-d.up{color:var(--green)}.cmp-d.down{color:var(--danger)}
 `;
 
 /** Line/area chart with a zoomed y-axis (for cumulative totals where a 0 baseline hides the trend). */

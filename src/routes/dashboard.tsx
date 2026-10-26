@@ -15,6 +15,9 @@ import { registerAnalytics } from './dashboard/analytics';
 import { registerExplore } from './dashboard/explore';
 import { ago, fmtDate, DAY, stripTags } from '../lib/util';
 import { planStatus, maybeWarnUsage } from '../lib/plans';
+import { registerIntel, AnomalyAlerts, NextSteps } from './dashboard/intel';
+import { activeAnomalies } from '../lib/anomalies';
+import { suggestions } from '../lib/nextaction';
 
 const dash = new Hono<AppEnv>();
 const site = new Hono<AppEnv>();
@@ -62,6 +65,7 @@ dash.get('/', async (c) => {
   const plan = await planStatus(c.env, pub.workspace_id).catch(() => null);
   if (plan) await maybeWarnUsage(c.env, plan).catch(() => {});
   const drafts = await all<any>(c.env, `SELECT id, title, status, scheduled_at, updated_at FROM posts WHERE pub_id = ? AND status IN ('draft','scheduled') ORDER BY updated_at DESC LIMIT 4`, pub.id);
+  const [anoms, nba] = showStats ? await Promise.all([activeAnomalies(c.env, pub.id), suggestions(c.env, pub)]) : [[], []];
   let running = subs.activeAtStart;
   const total = growth.rows.map((x, i) => (running += x.value - (unsubs.rows[i]?.value || 0)));
   const hour = new Date().getUTCHours();
@@ -75,6 +79,7 @@ dash.get('/', async (c) => {
           {!plan.suspended && <div style="margin-top:6px"><a href="/app/settings/plan"><strong>See plans &amp; usage →</strong></a></div>}
         </div>
       )}
+      <AnomalyAlerts items={anoms} back="/app" />
       <div class="hello">
         <div>
           <h2>{greet}, {(user.name || user.email).split(' ')[0]} 👋</h2>
@@ -99,6 +104,7 @@ dash.get('/', async (c) => {
       )}
       <div class="split">
         <div>
+          <NextSteps items={nba} />
           {showStats && (
             <Card title="Subscriber growth" actions={
               <span class="seg-toggle">{[['30d', '30 days'], ['90d', '90 days'], ['365d', '12 months']].map(([k, l]) => <a href={`/app?range=${k}`} class={k === rk ? 'on' : ''}>{l}</a>)}</span>
@@ -159,6 +165,7 @@ dash.get('/', async (c) => {
 });
 
 registerExplore(dash);
+registerIntel(dash);
 registerAnalytics(dash);
 
 // ───────── AI assistant (⌘J) ─────────

@@ -47,6 +47,16 @@ export const FIELDS: Record<string, { label: string; kind: string; cmps: string[
   community_member: { label: 'Community member', kind: 'bool', cmps: ['is_true', 'is_false'] },
   condition_set: { label: 'Matches condition set', kind: 'condition_set', cmps: ['matches', 'not_matches'] },
   ...COMMERCE_FIELDS, // external store purchases + abandoned carts (lib/commerce-rules)
+  // Subscriber Signals (public profile + email domain) and predictions (lib/signals.ts, lib/predict.ts)
+  job_title: { label: 'Job title (Signals)', kind: 'text', cmps: ['contains', 'equals', 'is_empty', 'not_empty'] },
+  company: { label: 'Company (Signals)', kind: 'text', cmps: ['contains', 'equals', 'is_empty', 'not_empty'] },
+  has_social: { label: 'Has a verified social account (Signals)', kind: 'bool', cmps: ['is_true', 'is_false'] },
+  business_email: { label: 'Business email address (Signals)', kind: 'bool', cmps: ['is_true', 'is_false'] },
+  value_score: { label: 'Value score (0–100)', kind: 'number', cmps: ['gt', 'lt', 'eq'] },
+  value_percentile: { label: 'Value percentile (100 = most valuable)', kind: 'number', cmps: ['gt', 'lt'] },
+  clv: { label: 'Customer lifetime value ($)', kind: 'number', cmps: ['gt', 'lt'] },
+  purchase_likelihood: { label: 'Purchase likelihood', kind: 'enum', cmps: ['eq', 'neq'], options: ['high', 'medium', 'low'] },
+  churn_risk: { label: 'Churn risk (paid subscribers)', kind: 'enum', cmps: ['eq', 'neq'], options: ['high', 'medium', 'low'] },
 };
 
 const COLS: Record<string, string> = {
@@ -160,6 +170,31 @@ async function compileRule(env: Env, pubId: string, r: Rule, depth: number): Pro
       return { sql: `${r.cmp === 'no' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM event_registrations er WHERE er.subscriber_id = s.id AND er.event_id = ?)`, params: [v] };
     case 'community_member':
       return { sql: `${r.cmp === 'is_false' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM community_members cm WHERE cm.subscriber_id = s.id AND cm.status = 'active')`, params: [] };
+    case 'job_title':
+    case 'company': {
+      const expr = r.field === 'company' ? 'COALESCE(NULLIF(g.company, \'\'), g.organization)' : 'g.job_title';
+      const sub = (cond: string) => `EXISTS (SELECT 1 FROM subscriber_signals g WHERE g.subscriber_id = s.id AND ${cond})`;
+      if (r.cmp === 'is_empty') return { sql: `NOT ${sub(`${expr} IS NOT NULL AND ${expr} != ''`)}`, params: [] };
+      if (r.cmp === 'not_empty') return { sql: sub(`${expr} IS NOT NULL AND ${expr} != ''`), params: [] };
+      if (r.cmp === 'equals') return { sql: sub(`${expr} = ? COLLATE NOCASE`), params: [String(v ?? '')] };
+      return { sql: sub(`${expr} LIKE ?`), params: [`%${v ?? ''}%`] };
+    }
+    case 'has_social':
+    case 'business_email': {
+      const cond = r.field === 'has_social' ? 'g.social_count > 0' : 'g.business_email = 1';
+      return { sql: `${r.cmp === 'is_false' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM subscriber_signals g WHERE g.subscriber_id = s.id AND ${cond})`, params: [] };
+    }
+    case 'value_score':
+    case 'value_percentile':
+    case 'clv': {
+      const colx = r.field === 'clv' ? 'x.clv_cents' : `x.${r.field}`;
+      const num = r.field === 'clv' ? Math.round(Number(v) * 100) : Number(v);
+      const op = r.cmp === 'gt' ? '>' : r.cmp === 'lt' ? '<' : '=';
+      return { sql: `EXISTS (SELECT 1 FROM subscriber_scores x WHERE x.subscriber_id = s.id AND ${colx} ${op} ?)`, params: [num] };
+    }
+    case 'purchase_likelihood':
+    case 'churn_risk':
+      return { sql: `${r.cmp === 'neq' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM subscriber_scores x WHERE x.subscriber_id = s.id AND x.${r.field} = ?)`, params: [String(v)] };
     case 'condition_set': {
       const cs = await one<{ rules: string }>(env, 'SELECT rules FROM condition_sets WHERE id = ? AND pub_id = ?', v, pubId);
       if (!cs) return { sql: '1=1', params: [] };

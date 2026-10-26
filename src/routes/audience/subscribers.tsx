@@ -14,6 +14,11 @@ import { Card, Btn, LinkBtn, Field, Input, Select, Check, Toggle, Table, Stat, S
 import { page, SOURCES, filtersFrom, filterGroup, filterQS, exportCSV } from './shared';
 import { form, str, int, now, DAY, ago, fmtDate, fmtDateTime, num, pct, parseJSON, chunk, id as newId } from '../../lib/util';
 import { StorePurchasesCard } from '../integrations-commerce';
+import { getSignals, enrichSubscriber, signalsEnabled, setSignalsEnabled, domainSignals } from '../../lib/signals';
+import {
+  scoreSubscriber, scorePublication, topSubscribers, predictionSummary, lastScoredAt, queueScoring,
+  VALUE_W, REFERRALS_FOR_FULL_SCORE, MAX_TENURE_MONTHS, PURCHASE_HIGH, PURCHASE_MEDIUM, CHURN_HIGH, CHURN_MEDIUM,
+} from '../../lib/predict';
 
 const app = new Hono<AppEnv>();
 
@@ -49,6 +54,7 @@ app.get('/', async (c) => {
   return page(c, {
     title: 'Subscribers', sub: 'subscribers',
     actions: <>
+      <LinkBtn href="/app/audience/top" small>★ Top subscribers</LinkBtn>
       <LinkBtn href="/app/audience/imports" small>Import</LinkBtn>
       <LinkBtn href={`/app/audience/export${qs}`} small>Export CSV</LinkBtn>
       <OpenBtn target="#add-sub" small>+ Add subscriber</OpenBtn>
@@ -253,6 +259,10 @@ app.get('/s/:id', async (c) => {
     all<any>(c.env, `SELECT id, name, status FROM automations WHERE pub_id = ? AND status = 'active' ORDER BY name`, pub.id),
     all<{ tag: string }>(c.env, 'SELECT DISTINCT tag FROM subscriber_tags WHERE pub_id = ? ORDER BY tag LIMIT 300', pub.id),
   ]);
+  const sigOn = signalsEnabled(pub);
+  const [scores, signals] = await Promise.all([scoreSubscriber(c.env, pub.id, s.id).catch(() => null), sigOn ? getSignals(c.env, s.id) : Promise.resolve(null)]);
+  if (sigOn && !signals && s.status === 'active') c.executionCtx.waitUntil(enrichSubscriber(c.env, s).catch(() => {}));
+  const dom = domainSignals(s.email);
   const custom = parseJSON<Record<string, any>>(s.custom, {});
   const sent = history.filter((h) => ['sent', 'deferred'].includes(h.status)).length;
   const opened = history.filter((h) => h.opened_at).length;
@@ -278,6 +288,14 @@ app.get('/s/:id', async (c) => {
       <Stat label="Emails received" value={num(sent)} sub={`${pct(opened, sent)} opened · ${pct(clicked, sent)} clicked`} />
       <Stat label="Referrals" value={num(s.referral_count)} sub={`code ${s.referral_code}`} />
     </Stats>
+    {scores && (
+      <Stats>
+        <Stat label="Value score" value={<span data-value-score>{scores.value_score}</span>} sub={scores.value_percentile !== null ? `top ${Math.max(1, 100 - scores.value_percentile)}% of your readers` : 'engagement, revenue, referrals, recency'} href="/app/audience/top" />
+        <Stat label="Customer lifetime value" value={<span data-clv>{'$' + (scores.clv_cents / 100).toFixed(2)}</span>} sub={`$${(scores.revenue_cents / 100).toFixed(2)} so far + $${(scores.predicted_cents / 100).toFixed(2)} predicted`} />
+        <Stat label="Purchase likelihood" value={<span data-purchase={scores.purchase_likelihood}><Badge tone={scores.purchase_likelihood === 'high' ? 'green' : scores.purchase_likelihood === 'medium' ? 'amber' : 'gray'}>{scores.purchase_likelihood}</Badge></span>} sub={<span title={scores.explain.purchase.join(', ')}>{scores.purchase_score}/100 · {scores.explain.purchase.length ? scores.explain.purchase.slice(0, 2).map((x) => x.replace(/^\+\d+ /, '')).join(', ') : 'no buying signals yet'}</span>} />
+        <Stat label="Churn risk" value={scores.churn_risk ? <span data-churn={scores.churn_risk}><Badge tone={scores.churn_risk === 'high' ? 'red' : scores.churn_risk === 'medium' ? 'amber' : 'green'}>{scores.churn_risk}</Badge></span> : <Muted>—</Muted>} sub={scores.churn_risk ? <span title={scores.explain.churn.join(', ')}>{scores.churn_score}/100{scores.explain.churn.length ? ' · ' + scores.explain.churn.slice(0, 2).map((x) => x.replace(/^\+\d+ /, '')).join(', ') : ''}</span> : 'paid subscribers only'} />
+      </Stats>
+    )}
     <div class="split">
       <div>
         <Card title="Engagement history" pad={false}>
@@ -330,6 +348,28 @@ app.get('/s/:id', async (c) => {
         )}
       </div>
       <div>
+        <Card title="Subscriber signals" actions={sigOn ? <form method="post" action={`/app/audience/s/${s.id}/signals`} class="inline-form"><Btn small kind="ghost">Refresh</Btn></form> : undefined}>
+          {!sigOn ? <Help>Subscriber Signals is off for this publication. <a href="/app/audience/top">Turn it on</a> to enrich readers with public profile data.</Help> : <div data-signals>
+            {signals?.gravatar_status === 'found' && (
+              <div class="row" style="gap:12px;flex-wrap:nowrap;margin-bottom:10px">
+                {signals.avatar_url && <img src={signals.avatar_url} alt="" width="48" height="48" style="border-radius:50%;flex:none" loading="lazy" />}
+                <div style="min-width:0">
+                  <strong>{signals.display_name || s.name || s.email}</strong>
+                  {(signals.job_title || signals.company) && <div class="small" data-job>{[signals.job_title, signals.company].filter(Boolean).join(' at ')}</div>}
+                  {signals.location && <div class="small muted">{signals.location}</div>}
+                </div>
+              </div>
+            )}
+            <dl class="kv small">
+              <dt>Email type</dt><dd data-business={dom.business ? '1' : '0'}>{dom.business ? <Badge tone="blue">business</Badge> : <Badge>personal</Badge>} <Muted>{dom.domain}</Muted></dd>
+              {dom.organization && <><dt>Organization</dt><dd>{dom.organization}</dd></>}
+              {(signals?.country || s.country) && <><dt>Country</dt><dd>{signals?.country || s.country}</dd></>}
+              {signals && signals.socials.length > 0 && <><dt>Social</dt><dd>{signals.socials.map((x: { url: string; label: string }) => <a href={x.url} target="_blank" rel="noopener nofollow" class="badge b-gray" style="margin:0 4px 4px 0;text-decoration:none">{x.label}</a>)}</dd></>}
+              {signals?.profile_url && <><dt>Profile</dt><dd><a href={signals.profile_url} target="_blank" rel="noopener nofollow">Public Gravatar profile ↗</a></dd></>}
+            </dl>
+            <Help>{!signals ? 'Looking up public signals in the background…' : signals.gravatar_status === 'found' ? `From their public Gravatar profile · checked ${ago(signals.updated_at)}` : signals.gravatar_status === 'none' ? `No public Gravatar profile · checked ${ago(signals.updated_at)}` : `Profile lookup pending · checked ${ago(signals.updated_at)}`}</Help>
+          </div>}
+        </Card>
         <Card title="Details">
           <form method="post" action={`/app/audience/s/${s.id}/update`}>
             <Field label="Email"><Input name="email" value={s.email} readonly /></Field>
@@ -390,6 +430,110 @@ app.get('/s/:id', async (c) => {
       </div>
     </div>
   </>);
+});
+
+// ───────── top subscribers (value score, CLV, purchase likelihood, churn risk) + Subscriber Signals setting ─────────
+const LEVEL_TONE: Record<string, 'green' | 'amber' | 'red' | 'gray'> = { high: 'green', medium: 'amber', low: 'gray' };
+const RISK_TONE: Record<string, 'green' | 'amber' | 'red' | 'gray'> = { high: 'red', medium: 'amber', low: 'green' };
+const usd = (c: number) => '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
+const PresetBtn = (p: { preset: string; label: string }) => (
+  <form method="post" action="/app/intel/segment" class="inline-form"><input type="hidden" name="preset" value={p.preset} /><Btn small kind="secondary">{p.label}</Btn></form>
+);
+
+app.get('/top', async (c) => {
+  const pub = c.get('pub');
+  const sortQ = c.req.query('sort');
+  const sort = (['value', 'clv', 'purchase', 'churn'].includes(sortQ || '') ? sortQ : 'value') as 'value' | 'clv' | 'purchase' | 'churn';
+  const [rows, summary, scoredAt, sigCount] = await Promise.all([
+    topSubscribers(c.env, pub.id, { sort, limit: 50 }), predictionSummary(c.env, pub.id), lastScoredAt(c.env, pub.id),
+    val<number>(c.env, `SELECT COUNT(*) FROM subscriber_signals WHERE pub_id = ? AND (gravatar_status = 'found' OR business_email = 1)`, pub.id),
+  ]);
+  if (!scoredAt) { await queueScoring(c.env, pub.id); kick(c.env, c.executionCtx); }
+  const enabled = signalsEnabled(pub);
+  const tabs: Array<[string, string]> = [['value', 'Most valuable'], ['clv', 'Lifetime value'], ['purchase', 'Likely to buy'], ['churn', 'Churn risk (paid)']];
+  return page(c, {
+    title: 'Top subscribers', sub: 'subscribers', crumbs: [['/app/audience', 'Subscribers']],
+    actions: <>
+      <form method="post" action="/app/audience/top/recompute" class="inline-form"><Btn small kind="secondary">Recompute now</Btn></form>
+    </>,
+  }, <>
+    <Stats>
+      <Stat label="Subscribers scored" value={num(summary.scored)} sub={scoredAt ? `updated ${ago(scoredAt)}` : 'computing in the background…'} />
+      <Stat label="Avg customer lifetime value" value={usd(summary.avgClv)} sub={`${num(summary.customers)} paying readers`} href="/app/analytics/revenue#predictions" />
+      <Stat label="Likely to buy" value={num(summary.purchase.high)} sub={`${num(summary.purchase.highNonBuyers)} have never bought`} href="/app/audience/top?sort=purchase" />
+      <Stat label="Paid at high churn risk" value={num(summary.churn.high)} sub={`${usd(summary.churn.mrrAtRisk)}/mo at risk`} href="/app/audience/top?sort=churn" />
+    </Stats>
+    <div class="row" style="margin-bottom:12px;gap:6px;flex-wrap:wrap">
+      {tabs.map(([k, l]) => <a class={`btn btn-sm ${k === sort ? 'btn-primary' : 'btn-ghost'}`} href={`/app/audience/top?sort=${k}`}>{l}</a>)}
+      <span class="grow" />
+      <Muted>Save as a segment:</Muted>
+      <PresetBtn preset="top_10" label="Top 10%" />
+      <PresetBtn preset="purchase_high" label="Likely buyers" />
+      <PresetBtn preset="churn_high" label="At-risk paid" />
+      {enabled && <PresetBtn preset="business" label="Business emails" />}
+    </div>
+    <Card pad={false}>
+          <Table<any> rows={rows} rowHref={(x) => `/app/audience/s/${x.id}`} empty={<Empty title={scoredAt ? 'Nothing to rank here yet' : 'Scoring your subscribers…'} body={scoredAt ? (sort === 'churn' ? 'No paid subscribers yet.' : 'Scores appear once you have active subscribers.') : 'This runs in the background and takes a few seconds for most lists. Refresh in a moment.'} />} cols={[
+            { h: '#', r: (x) => <span class="muted small">{rows.indexOf(x) + 1}</span>, class: 'w1' },
+            { h: 'Subscriber', r: (x) => <span class="row" style="gap:8px;flex-wrap:nowrap">{x.avatar_url ? <img src={x.avatar_url} alt="" width="24" height="24" style="border-radius:50%;flex:none" loading="lazy" /> : null}<span style="min-width:0"><a href={`/app/audience/s/${x.id}`}>{x.name || x.email}</a>{(x.job_title || x.company) && <div class="muted small truncate">{[x.job_title, x.company].filter(Boolean).join(' · ')}</div>}</span></span> },
+            { h: 'Value', r: (x) => <span title={`Percentile ${x.value_percentile}`}><strong>{x.value_score}</strong> <Muted>top {Math.max(1, 100 - x.value_percentile)}%</Muted></span>, class: 'right' },
+            { h: 'Engagement', r: (x) => x.engagement, class: 'right' },
+            { h: 'Referrals', r: (x) => x.referral_count, class: 'right' },
+            { h: 'Revenue', r: (x) => (x.revenue_cents ? usd(x.revenue_cents) : <Muted>—</Muted>), class: 'right' },
+            { h: 'CLV', r: (x) => (x.clv_cents ? usd(x.clv_cents) : <Muted>—</Muted>), class: 'right' },
+            { h: 'Buy', r: (x) => <Badge tone={LEVEL_TONE[x.purchase_likelihood]}>{x.purchase_likelihood}</Badge> },
+            { h: 'Churn', r: (x) => (x.churn_risk ? <Badge tone={RISK_TONE[x.churn_risk]}>{x.churn_risk}</Badge> : <Muted>free</Muted>) },
+            { h: 'Last active', r: (x) => <span class="small nowrap">{x.last_active_at ? ago(x.last_active_at) : '—'}</span> },
+          ]} />
+    </Card>
+    <div class="grid g2">
+      <div>
+        <Card title="How the scores work">
+          <dl class="kv small">
+            <dt>Value score</dt><dd>0–100: engagement ({VALUE_W.engagement}), revenue vs your top payers ({VALUE_W.revenue}), referrals ({VALUE_W.referrals}, full at {REFERRALS_FOR_FULL_SCORE}) and recency ({VALUE_W.recency}, full within 7 days of activity, zero after 90).</dd>
+            <dt>Lifetime value</dt><dd>Revenue so far + predicted: monthly value × expected remaining months ({summary.expectedTenure.toFixed(1)} from your {(summary.monthlyChurn * 100).toFixed(1)}% monthly churn, max {MAX_TENURE_MONTHS}) × a churn-risk factor.</dd>
+            <dt>Purchase likelihood</dt><dd>Points for engagement, site visits in 90 days, past purchases, recent activity and recent clicks. High ≥ {PURCHASE_HIGH}, medium ≥ {PURCHASE_MEDIUM}.</dd>
+            <dt>Churn risk</dt><dd>Paid subscribers only: past-due payment, paused, trial ending, no opens in 30/60 days, low engagement, no site visits, new subscription. High ≥ {CHURN_HIGH}, medium ≥ {CHURN_MEDIUM}.</dd>
+          </dl>
+          <Help>Recomputed every few hours. Every score is also a segment field (Audience → Segments) so you can target or exclude these readers.</Help>
+        </Card>
+      </div>
+      <div>
+        <Card title="Subscriber Signals">
+          <p class="small" style="margin-top:0">Enrich subscribers with free, <strong>public</strong> signals: their public Gravatar profile (name, photo, location, job title, company, verified social accounts), the organization behind a work email address, and country from data you already have. Nothing private is looked up.</p>
+          <form method="post" action="/app/audience/top/signals">
+            <Toggle name="enabled" checked={enabled} label="Enrich subscribers with public signals" hint={enabled ? `${num(sigCount)} subscribers have signals so far. Turning this off deletes stored signals.` : 'Off — no lookups are made and nothing is stored.'} />
+            <div class="form-actions"><Btn small kind="secondary">Save</Btn></div>
+          </form>
+        </Card>
+      </div>
+    </div>
+  </>);
+});
+
+app.post('/top/recompute', async (c) => {
+  const pub = c.get('pub');
+  const r = await scorePublication(c.env, pub.id, { budgetMs: 8000 });
+  if (!r.done) { await enqueue(c.env, 'intel.scores', { pub_id: pub.id, after: r.after, started: now() }); kick(c.env, c.executionCtx); }
+  return back(c, '/app/audience/top', r.done ? `Scored ${num(r.scored)} subscribers` : 'Scoring continues in the background');
+});
+
+app.post('/top/signals', requirePerm('admin'), async (c) => {
+  const f = await form(c.req);
+  const on = f.enabled === 'on';
+  await setSignalsEnabled(c.env, c.get('pub').id, on);
+  await audit(c, 'settings.subscriber_signals', undefined, { enabled: on });
+  return back(c, '/app/audience/top', on ? 'Subscriber Signals turned on — enrichment runs in the background' : 'Subscriber Signals turned off and stored signals deleted');
+});
+
+app.post('/s/:id/signals', async (c) => {
+  const pub = c.get('pub');
+  const s = await loadSub(c);
+  if (!s) return back(c, '/app/audience', 'Subscriber not found', 'err');
+  if (!signalsEnabled(pub)) return back(c, `/app/audience/s/${s.id}`, 'Subscriber Signals is turned off for this publication', 'err');
+  await enrichSubscriber(c.env, s, { force: true });
+  return back(c, `/app/audience/s/${s.id}`, 'Signals refreshed');
 });
 
 app.post('/s/:id/update', async (c) => {
