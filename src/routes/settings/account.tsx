@@ -2,7 +2,8 @@
 import type { Hono } from 'hono';
 import type { AppEnv, Ctx } from '../../types';
 import { one, all, run, insert } from '../../lib/db';
-import { requirePerm, audit } from '../../lib/auth';
+import { requirePerm, audit, sealSecret, secretsConfigured, ssoDomainVerified, oidcDiscover, FREEMAIL, type WorkspaceSso } from '../../lib/auth';
+import { appUrl } from '../../lib/pub';
 import { settings } from '../../lib/pub';
 import { stripeEnabled, stripePost, stripeGet } from '../../lib/payments';
 import { sendTransactional, button } from '../../lib/email';
@@ -172,6 +173,8 @@ export function registerAccount(dash: Hono<AppEnv>) {
     const current = wsList.find((w) => w.id === pub?.workspace_id);
     const transfers = pub ? await all<any>(c.env, `SELECT * FROM transfers WHERE pub_id = ? ORDER BY created_at DESC LIMIT 10`, pub.id) : [];
     const isOwner = c.get('role') === 'owner';
+    const ssoWs = current && (current.ws_role === 'owner' || current.ws_role === 'admin') ? current : null;
+    const sso = ssoWs ? await one<WorkspaceSso>(c.env, 'SELECT * FROM workspace_sso WHERE workspace_id = ?', ssoWs.id) : null;
     const consent = pub ? `I, ${user.name || user.email}, the owner of "${pub.name}", consent to transfer full ownership of this publication — including its posts, subscriber list, website, settings and revenue — to the recipient named below. I confirm I have the right to transfer these subscribers and that the recipient will become the data controller for them.` : '';
     return page(c, 'workspace', 'Workspace', (
       <>
@@ -194,6 +197,7 @@ export function registerAccount(dash: Hono<AppEnv>) {
             { h: 'Teams & roles', r: (p) => <div class="row" style="gap:4px">{p.teams.map((t) => <Badge tone="blue">{t}</Badge>)}</div> },
           ]} />
         </Card>
+        {ssoWs && <SsoCard c={c} ws={ssoWs} sso={sso} />}
         {pub && (
           <Card title={`Transfer ${pub.name}`}>
             {isOwner ? (
@@ -219,6 +223,75 @@ export function registerAccount(dash: Hono<AppEnv>) {
         )}
       </>
     ));
+  });
+
+  // ───────────── Enterprise SSO (per workspace, generic OIDC) ─────────────
+  const ssoAdmin = async (c: Ctx) => {
+    const ws = c.get('pub')?.workspace_id;
+    if (!ws) return null;
+    const ok = await one(c.env, `SELECT 1 FROM memberships WHERE workspace_id = ? AND user_id = ? AND pub_id = '' AND role IN ('owner','admin')`, ws, c.get('user').id);
+    return ok ? ws : null;
+  };
+  const SSO_BACK = '/app/settings/workspace#sso';
+
+  dash.post('/workspace/sso', async (c) => {
+    const ws = await ssoAdmin(c);
+    if (!ws) return back(c, SSO_BACK, 'Only workspace owners and admins can configure SSO.', 'err');
+    const f = await form(c.req);
+    const issuer = str(f.issuer, 300).replace(/\/$/, '');
+    const clientId = str(f.client_id, 300);
+    const secret = str(f.client_secret, 1000);
+    const domain = str(f.domain, 120).toLowerCase().replace(/^@/, '');
+    const role = ['admin', 'member', 'contributor'].includes(f.default_role) ? f.default_role : 'member';
+    if (!/^https:\/\/[^\s/]+/i.test(issuer) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(issuer)) return back(c, SSO_BACK, 'The issuer must be an https:// URL.', 'err');
+    if (!clientId) return back(c, SSO_BACK, 'Client ID required.', 'err');
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) return back(c, SSO_BACK, 'Enter your email domain, e.g. example.com', 'err');
+    if (FREEMAIL.has(domain)) return back(c, SSO_BACK, `${domain} is a public email provider and can't be used for SSO.`, 'err');
+    const taken = await one(c.env, 'SELECT 1 FROM workspace_sso WHERE domain = ? AND workspace_id != ? AND domain_verified_at IS NOT NULL', domain, ws);
+    if (taken) return back(c, SSO_BACK, `${domain} is already verified by another workspace.`, 'err');
+    if (!secretsConfigured(c.env)) return back(c, SSO_BACK, 'Set the APP_SECRET secret first (it encrypts the client secret).', 'err');
+    try { await oidcDiscover(issuer); } catch (e: any) { return back(c, SSO_BACK, `Couldn't load ${issuer}/.well-known/openid-configuration: ${e?.message || e}`, 'err'); }
+    const cur = await one<WorkspaceSso>(c.env, 'SELECT * FROM workspace_sso WHERE workspace_id = ?', ws);
+    if (!cur && !secret) return back(c, SSO_BACK, 'Client secret required.', 'err');
+    const t = now();
+    const sealed = secret ? await sealSecret(c.env, secret) : cur!.client_secret;
+    const changedIdp = !cur || cur.issuer !== issuer || cur.client_id !== clientId || !!secret;
+    const changedDomain = !cur || cur.domain !== domain;
+    const enabled = f.enabled === 'on' ? 1 : 0;
+    let enforce = f.enforce === 'on' ? 1 : 0;
+    const tested = changedIdp || changedDomain ? null : cur!.tested_at;
+    const verifiedAt = changedDomain ? null : cur!.domain_verified_at;
+    const notes: string[] = [];
+    if ((enabled || enforce) && !verifiedAt) notes.push('Verify the domain before SSO can be used.');
+    if (enforce && !tested) { enforce = 0; notes.push('Run a successful test sign-in before requiring SSO.'); }
+    await run(c.env, `INSERT INTO workspace_sso (workspace_id, issuer, client_id, client_secret, domain, verify_token, domain_verified_at, enabled, enforce, default_role, tested_at, updated_by, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(workspace_id) DO UPDATE SET issuer = excluded.issuer, client_id = excluded.client_id, client_secret = excluded.client_secret, domain = excluded.domain,
+        domain_verified_at = excluded.domain_verified_at, verify_token = CASE WHEN workspace_sso.domain = excluded.domain THEN workspace_sso.verify_token ELSE excluded.verify_token END,
+        enabled = excluded.enabled, enforce = excluded.enforce, default_role = excluded.default_role, tested_at = excluded.tested_at, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+      ws, issuer, clientId, sealed, domain, token(16), verifiedAt, enabled, enforce, role, tested, c.get('user').id, t, t);
+    await audit(c, 'sso.configure', ws, { issuer, domain, enabled, enforce });
+    return back(c, SSO_BACK, ['SSO settings saved.', ...notes].join(' '), notes.length ? 'err' : 'ok');
+  });
+
+  dash.post('/workspace/sso/verify', async (c) => {
+    const ws = await ssoAdmin(c);
+    if (!ws) return back(c, SSO_BACK, 'Not allowed', 'err');
+    const cur = await one<WorkspaceSso>(c.env, 'SELECT * FROM workspace_sso WHERE workspace_id = ?', ws);
+    if (!cur) return back(c, SSO_BACK, 'Save the SSO settings first.', 'err');
+    if (!(await ssoDomainVerified(cur.domain, cur.verify_token))) return back(c, SSO_BACK, `TXT record not found yet at _lnkbase-sso.${cur.domain}. DNS changes can take a few minutes.`, 'err');
+    if (await one(c.env, 'SELECT 1 FROM workspace_sso WHERE domain = ? AND workspace_id != ? AND domain_verified_at IS NOT NULL', cur.domain, ws)) return back(c, SSO_BACK, 'Another workspace already verified this domain.', 'err');
+    await run(c.env, 'UPDATE workspace_sso SET domain_verified_at = ?, updated_at = ? WHERE workspace_id = ?', now(), now(), ws);
+    await audit(c, 'sso.domain_verified', cur.domain);
+    return back(c, SSO_BACK, `${cur.domain} verified.`);
+  });
+
+  dash.post('/workspace/sso/delete', async (c) => {
+    const ws = await ssoAdmin(c);
+    if (!ws) return back(c, SSO_BACK, 'Not allowed', 'err');
+    await run(c.env, 'DELETE FROM workspace_sso WHERE workspace_id = ?', ws);
+    await audit(c, 'sso.remove', ws);
+    return back(c, SSO_BACK, 'SSO removed. Password and magic-link login work again for everyone.');
   });
 
   dash.post('/workspace/:id/rename', async (c) => {
@@ -257,3 +330,42 @@ export function registerAccount(dash: Hono<AppEnv>) {
 }
 
 export { fmtDateTime };
+
+function SsoCard(p: { c: Ctx; ws: { id: string; name: string }; sso: WorkspaceSso | null }) {
+  const s = p.sso;
+  const callback = appUrl(p.c.env, '/sso/callback');
+  return (
+    <Card id="sso" title={<span class="row">Enterprise SSO {s?.enabled && s.domain_verified_at ? <Badge tone="green">on</Badge> : <Badge>off</Badge>} {s?.enforce ? <Badge tone="amber">required</Badge> : null}</span>}>
+      <p class="muted">Let people sign in to <strong>{p.ws.name}</strong> with your identity provider (Okta, Microsoft Entra ID, Google Workspace, JumpCloud, Auth0 — anything that speaks OpenID Connect). New people from your domain are added to this workspace on their first sign-in.</p>
+      {!secretsConfigured(p.c.env) && <div class="callout warn">Set the <code>APP_SECRET</code> secret (<code>npx wrangler secret put APP_SECRET</code>) — the client secret is encrypted with it.</div>}
+      <Help>In your identity provider create an OIDC web application with the redirect (callback) URI <code>{callback}</code> and scopes <code>openid email profile</code>.</Help>
+      <form method="post" action="/app/settings/workspace/sso" class="stack">
+        <Field label="Issuer URL" hint="e.g. https://your-org.okta.com or https://login.microsoftonline.com/<tenant>/v2.0"><Input name="issuer" value={s?.issuer} required placeholder="https://" /></Field>
+        <Grid>
+          <Field label="Client ID"><Input name="client_id" value={s?.client_id} required /></Field>
+          <Field label="Client secret" hint={s ? 'Leave blank to keep the saved secret.' : undefined}><Input name="client_secret" type="password" attrs={{ autocomplete: 'off' }} /></Field>
+        </Grid>
+        <Grid>
+          <Field label="Email domain" hint="Only addresses at this domain can use (and, when required, must use) SSO."><Input name="domain" value={s?.domain} required placeholder="example.com" /></Field>
+          <Field label="Role for new people"><select class="input" name="default_role">{[['member', 'Member'], ['contributor', 'Contributor'], ['admin', 'Admin']].map(([v, l]) => <option value={v} selected={(s?.default_role || 'member') === v}>{l}</option>)}</select></Field>
+        </Grid>
+        <Toggle name="enabled" checked={!!s?.enabled} label="Enable SSO" hint="“Sign in with SSO” works for addresses at your domain." />
+        <Toggle name="enforce" checked={!!s?.enforce} label="Require SSO for this domain" hint={s?.tested_at ? 'Password, magic-link and Google login are refused for addresses at your domain.' : 'Available after a successful test sign-in.'} />
+        <div class="row"><Btn>Save SSO settings</Btn>{s && <a class="btn btn-secondary" href={`/sso/test/${p.ws.id}`} data-sso-test>Test sign-in</a>}</div>
+      </form>
+      {s && (
+        <>
+          <hr />
+          <h4>Domain verification {s.domain_verified_at ? <Badge tone="green">verified</Badge> : <Badge tone="amber">pending</Badge>}</h4>
+          {!s.domain_verified_at && <p class="small">Add this DNS record, then click Verify:</p>}
+          <div class="table-wrap"><table class="table small"><tbody><tr><td>TXT</td><td><code>_lnkbase-sso.{s.domain}</code></td><td><code>lnkbase-sso={s.verify_token}</code></td></tr></tbody></table></div>
+          <div class="row" style="margin-top:8px">
+            {!s.domain_verified_at && <ActionForm action="/app/settings/workspace/sso/verify" label="Verify domain" />}
+            <ActionForm action="/app/settings/workspace/sso/delete" label="Remove SSO" kind="danger" confirm="Remove SSO? People keep their accounts and can log in with a magic link." />
+          </div>
+          <p class="small muted" style="margin-top:8px">{s.tested_at ? `Last successful test sign-in: ${fmtDateTime(s.tested_at)} UTC` : 'Not tested yet.'}</p>
+        </>
+      )}
+    </Card>
+  );
+}

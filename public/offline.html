@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#1c1917" />
+  <title>You're offline · Lnkbase Newsletter</title>
+  <link rel="icon" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body class="plain">
+  <main class="plain-box" style="text-align:center">
+    <img src="/static/favicon.svg" alt="" width="56" height="56" style="margin:0 auto 14px;display:block" />
+    <h1>You're offline</h1>
+    <p class="muted">Lnkbase Newsletter needs a connection to load your dashboard. Your drafts are saved on the server, so nothing is lost.</p>
+    <button class="btn btn-primary" type="button" onclick="location.reload()">Try again</button>
+  </main>
+  <script>addEventListener('online', function () { location.reload(); });</script>
+</body>
+</html>

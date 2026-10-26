@@ -2,7 +2,9 @@
 // Usage: BASE=http://localhost:8790 PERSIST=.wrangler/int node scripts/e2e.mjs
 // Walks: signup → onboarding → API key → public subscribe → API subscriber → post → send → cron → open/click tracking
 //        → public site → paid tier checkout (test mode) → one-click unsubscribe → webhooks/automation sanity
-//        → platform plans (usage page, subscriber cap, email allowance, simulated upgrade, campaign pause, approval).
+//        → platform plans (usage page, subscriber cap, email allowance, simulated upgrade, campaign pause, approval)
+//        → marketing (social posting against a local mock Bluesky PDS + Mastodon, calendar, campaigns, ad audiences),
+//          PWA, and SSO (Google + Enterprise OIDC against a local mock provider on MOCK_PORT, default 8816).
 import { execSync } from 'node:child_process';
 
 const BASE = process.env.BASE || 'http://localhost:8787';
@@ -264,6 +266,300 @@ ok(gp.includes('Free limits apply') && gp.includes('/ 500 ('), 'after the grace 
 sql(`UPDATE workspaces SET plan_status = 'active', plan_grace_until = NULL WHERE id = '${wsId}'`);
 sql(`UPDATE sends SET status = 'cancelled' WHERE id = '${send4}'`);
 sql(`DELETE FROM subscribers WHERE id LIKE 'big%${rnd}' OR id LIKE 'bnc%${rnd}'`);
+
+console.log('11m. Marketing: social posting (mock Bluesky + Mastodon), calendar, campaigns, ad audiences, PWA, SSO (mock OIDC)');
+{
+  // Local mock of the third-party APIs (documented endpoints only): AT Protocol PDS, Mastodon, and two OIDC providers.
+  const http = await import('node:http');
+  const nodeCrypto = await import('node:crypto');
+  const MOCK_PORT = Number(process.env.MOCK_PORT || 8816);
+  const MOCK = `http://localhost:${MOCK_PORT}`;
+  const log = [];
+  const { privateKey, publicKey } = nodeCrypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'k1', use: 'sig', alg: 'RS256' };
+  const b64u = (b) => Buffer.from(b).toString('base64url');
+  const codes = new Map();
+  const idp = { google: { sub: 'g-1-' + rnd, email: `google.${rnd}@gmail.com`, email_verified: true, name: 'Goo Gle' }, corp: { sub: 'c-1-' + rnd, email: `alice@corp-${rnd}.example`, email_verified: true, name: 'Alice Corp' } };
+  const clients = { google: ['mock-google-client', 'mock-google-secret'], corp: ['corp-client', 'corp-secret'] };
+  const readBody = (q) => new Promise((res) => { const ch = []; q.on('data', (d) => ch.push(d)); q.on('end', () => res(Buffer.concat(ch))); });
+  const server = http.createServer(async (q, s) => {
+    const u = new URL(q.url, MOCK);
+    const body = await readBody(q);
+    const json = (code, obj) => { s.writeHead(code, { 'content-type': 'application/json' }); s.end(JSON.stringify(obj)); };
+    log.push({ method: q.method, path: u.pathname, auth: q.headers.authorization || '', ct: q.headers['content-type'] || '', body: body.toString('utf8', 0, Math.min(body.length, 4000)), size: body.length });
+    const m = u.pathname.match(/^\/(google|corp)(\/.*)$/);
+    if (m) {
+      const [, p, rest] = m;
+      const iss = `${MOCK}/${p}`;
+      if (rest === '/.well-known/openid-configuration') return json(200, { issuer: iss, authorization_endpoint: `${iss}/authorize`, token_endpoint: `${iss}/token`, jwks_uri: `${iss}/jwks`, userinfo_endpoint: `${iss}/userinfo` });
+      if (rest === '/jwks') return json(200, { keys: [jwk] });
+      if (rest === '/authorize') {
+        const code = 'code-' + nodeCrypto.randomBytes(8).toString('hex');
+        codes.set(code, { p, nonce: u.searchParams.get('nonce'), challenge: u.searchParams.get('code_challenge'), client: u.searchParams.get('client_id'), redirect: u.searchParams.get('redirect_uri'), who: { ...idp[p] } });
+        s.writeHead(302, { location: `${u.searchParams.get('redirect_uri')}?code=${code}&state=${encodeURIComponent(u.searchParams.get('state'))}` });
+        return s.end();
+      }
+      if (rest === '/token') {
+        const f = new URLSearchParams(body.toString());
+        const c = codes.get(f.get('code'));
+        codes.delete(f.get('code'));
+        if (!c || c.p !== p || f.get('client_id') !== clients[p][0] || f.get('client_secret') !== clients[p][1] || f.get('redirect_uri') !== c.redirect) return json(400, { error: 'invalid_grant' });
+        if (b64u(nodeCrypto.createHash('sha256').update(f.get('code_verifier') || '').digest()) !== c.challenge) return json(400, { error: 'invalid_grant', error_description: 'PKCE mismatch' });
+        const now = Math.floor(Date.now() / 1000);
+        const head = b64u(JSON.stringify({ alg: 'RS256', kid: 'k1', typ: 'JWT' }));
+        const claims = b64u(JSON.stringify({ iss, aud: c.client, sub: c.who.sub, email: c.who.email, email_verified: c.who.email_verified, name: c.who.name, nonce: c.nonce, iat: now, exp: now + 300 }));
+        const sig = b64u(nodeCrypto.sign('RSA-SHA256', Buffer.from(`${head}.${claims}`), privateKey));
+        return json(200, { access_token: 'at-' + rnd, token_type: 'Bearer', id_token: `${head}.${claims}.${sig}` });
+      }
+    }
+    // AT Protocol (Bluesky PDS)
+    if (u.pathname === '/bsky/xrpc/com.atproto.server.createSession') {
+      const b = JSON.parse(body.toString() || '{}');
+      if (b.identifier !== 'tester.bsky.social' || b.password !== 'abcd-efgh-ijkl-mnop') return json(401, { error: 'AuthenticationRequired', message: 'Invalid identifier or password' });
+      return json(200, { accessJwt: 'jwt-' + rnd, refreshJwt: 'r', did: 'did:plc:tester', handle: 'tester.bsky.social' });
+    }
+    if (u.pathname === '/bsky/xrpc/com.atproto.repo.uploadBlob') {
+      if (q.headers.authorization !== 'Bearer jwt-' + rnd) return json(401, { error: 'AuthMissing' });
+      return json(200, { blob: { $type: 'blob', ref: { $link: 'bafkreimock' }, mimeType: q.headers['content-type'], size: body.length } });
+    }
+    if (u.pathname === '/bsky/xrpc/com.atproto.repo.createRecord') {
+      if (q.headers.authorization !== 'Bearer jwt-' + rnd) return json(401, { error: 'AuthMissing' });
+      const rk = 'rk' + nodeCrypto.randomBytes(4).toString('hex');
+      return json(200, { uri: `at://did:plc:tester/app.bsky.feed.post/${rk}`, cid: 'bafyreimock' });
+    }
+    // Mastodon
+    const mastoAuth = q.headers.authorization === 'Bearer masto-token-' + rnd;
+    if (u.pathname.startsWith('/masto/api/') && !mastoAuth) return json(401, { error: 'The access token is invalid' });
+    if (u.pathname === '/masto/api/v1/accounts/verify_credentials') return json(200, { id: '109', username: 'tester', acct: 'tester', display_name: 'Tester', url: `${MOCK}/masto/@tester` });
+    if (u.pathname === '/masto/api/v2/media') return json(200, { id: 'm1', type: 'image', url: `${MOCK}/masto/media/m1.png` });
+    if (u.pathname === '/masto/api/v1/statuses') { const b = JSON.parse(body.toString() || '{}'); return json(200, { id: '1100' + log.length, url: `${MOCK}/masto/@tester/1100${log.length}`, content: b.status }); }
+    if (u.pathname === '/page') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end('<html><head><title>Mock page</title><meta property="og:title" content="Mock OG title"><meta property="og:description" content="Mock description"></head></html>'); }
+    json(404, { error: 'not found' });
+  });
+  await new Promise((res) => server.listen(MOCK_PORT, res));
+  const mockLog = (path) => log.filter((l) => l.path === path);
+
+  try {
+    cookies = {};
+    const mEmail = `mkt.${rnd}@gmail.com`;
+    await req('/signup', { form: { name: 'Mkt Owner', email: mEmail, password: 'correct-horse-9' } });
+    const mSlug = `mkt-${rnd}`;
+    await req('/app/onboarding', { form: { name: `Mkt ${rnd}`, slug: mSlug, description: 'Marketing', language: 'en', timezone: 'UTC' } });
+    const mPub = sql(`SELECT id, workspace_id FROM publications WHERE slug = '${mSlug}'`)[0];
+    const mKeyHtml = await (await req('/app/settings/api', { form: { name: 'mkt' } })).text();
+    const mKey = mKeyHtml.match(/oh_live_[A-Za-z0-9_-]+/)?.[0];
+    const mkt = cookies;
+
+    // ── social accounts ──
+    r = await req('/app/social/accounts/bluesky', { form: { identifier: 'tester.bsky.social', app_password: 'wrong-pass', service: `${MOCK}/bsky` } });
+    ok(decodeURIComponent(decodeURIComponent(cookies.oh_flash || '')).includes("Couldn't connect Bluesky") && !sql(`SELECT COUNT(*) AS n FROM social_accounts WHERE pub_id = '${mPub.id}'`)[0].n, 'Bluesky: wrong app password is rejected');
+    r = await req('/app/social/accounts/bluesky', { form: { identifier: '@tester.bsky.social', app_password: 'abcd-efgh-ijkl-mnop', service: `${MOCK}/bsky` } });
+    r = await req('/app/social/accounts/mastodon', { form: { instance: `${MOCK}/masto`, token: `masto-token-${rnd}` } });
+    const accts = sql(`SELECT id, network, handle, credentials FROM social_accounts WHERE pub_id = '${mPub.id}' ORDER BY network`);
+    ok(accts.length === 2 && accts[0].handle === '@tester.bsky.social' && accts[1].handle.startsWith('@tester@localhost'), 'Bluesky (createSession) and Mastodon (verify_credentials) connected', JSON.stringify(accts.map((a) => a.handle)));
+    ok(accts.every((a) => a.credentials.startsWith('v1.') && !a.credentials.includes('abcd-efgh') && !a.credentials.includes('masto-token')), 'credentials are AES-GCM encrypted at rest');
+    const [bsky, masto] = accts;
+
+    // ── compose: post now with link + image to both ──
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const fd = new FormData(); fd.append('file', new Blob([png], { type: 'image/png' }), 'pixel.png');
+    const up = await (await fetch(`${BASE}/app/posts/media/upload`, { method: 'POST', headers: { cookie: jar(), 'user-agent': UA }, body: fd })).json();
+    const imgKey = sql(`SELECT key FROM uploads WHERE id = '${up.id}'`)[0]?.key;
+    ok(!!imgKey, 'image uploaded to the media library');
+    r = await req('/app/social/new'); const compose = await r.text();
+    ok(r.status === 200 && compose.includes('data-intent="linkedin"') && compose.includes('Write a post for this issue'), 'composer renders (share intents + AI helper)');
+    const pf = new URLSearchParams({ text: `Hello from the e2e ${rnd} https://example.com/inline`, link: `${MOCK}/page`, image_key: imgKey, image_alt: 'a pixel', when: 'now' });
+    pf.append('accounts[]', bsky.id); pf.append('accounts[]', masto.id);
+    r = await fetch(`${BASE}/app/social/posts`, { method: 'POST', headers: { cookie: jar(), 'user-agent': UA, 'content-type': 'application/x-www-form-urlencoded' }, body: pf, redirect: 'manual' });
+    for (let i = 0; i < 6; i++) { await cron(); await sleep(1200); if (sql(`SELECT COUNT(*) AS n FROM social_posts WHERE pub_id = '${mPub.id}' AND status = 'posted'`)[0].n >= 2) break; }
+    const posted = sql(`SELECT network, status, remote_url, link_url, error FROM social_posts WHERE pub_id = '${mPub.id}' ORDER BY network`);
+    ok(posted.length === 2 && posted.every((p) => p.status === 'posted'), 'post now: both networks posted via the job queue', JSON.stringify(posted));
+    ok(posted[0].remote_url?.startsWith('https://bsky.app/profile/tester.bsky.social/post/rk') && posted[1].remote_url?.includes('/masto/@tester/'), 'history links to the live posts', JSON.stringify(posted.map((p) => p.remote_url)));
+    const rec = JSON.parse(mockLog('/bsky/xrpc/com.atproto.repo.createRecord').at(-1)?.body || '{}');
+    ok(rec.record?.embed?.$type === 'app.bsky.embed.external' && rec.record.embed.external.title === 'Mock OG title' && rec.record.embed.external.thumb?.ref && rec.record.embed.external.uri.includes('utm_source=bluesky') && rec.record.facets?.[0]?.features?.[0]?.uri === 'https://example.com/inline', 'Bluesky record: link card (OG title, image thumb, UTM-tagged) + link facet', JSON.stringify(rec).slice(0, 300));
+    ok(mockLog('/bsky/xrpc/com.atproto.repo.uploadBlob').length >= 1 && mockLog('/bsky/xrpc/com.atproto.repo.uploadBlob')[0].ct === 'image/png', 'Bluesky image uploaded as a blob');
+    const st = JSON.parse(mockLog('/masto/api/v1/statuses').at(-1)?.body || '{}');
+    ok(st.media_ids?.[0] === 'm1' && st.status.includes('utm_source=mastodon') && st.visibility === 'public' && mockLog('/masto/api/v2/media')[0]?.ct.startsWith('multipart/form-data'), 'Mastodon: media upload + status with UTM link', JSON.stringify(st).slice(0, 200));
+    r = await req('/app/social'); const hist = await r.text();
+    ok(hist.includes('data-live-url') && hist.includes('bsky.app/profile/tester.bsky.social'), 'history page shows live links');
+
+    // ── schedule + failure path ──
+    const tomorrow = new Date(Date.now() + 26 * 3600e3);
+    const sf = new URLSearchParams({ text: `Scheduled ${rnd}`, link: '', when: 'schedule', scheduled_at: tomorrow.toISOString() }); sf.append('accounts[]', bsky.id);
+    await fetch(`${BASE}/app/social/posts`, { method: 'POST', headers: { cookie: jar(), 'user-agent': UA, 'content-type': 'application/x-www-form-urlencoded' }, body: sf, redirect: 'manual' });
+    const sched = sql(`SELECT id, status, scheduled_at FROM social_posts WHERE pub_id = '${mPub.id}' AND text = 'Scheduled ${rnd}'`)[0];
+    ok(sched?.status === 'scheduled' && Math.abs(sched.scheduled_at - tomorrow.getTime()) < 2000 && sql(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'social.post' AND payload LIKE '%${sched.id}%' AND status = 'pending'`)[0].n === 1, 'scheduled social post queued for its time');
+    const tooLong = new URLSearchParams({ text: 'x'.repeat(301), when: 'now' }); tooLong.append('accounts[]', bsky.id);
+    await fetch(`${BASE}/app/social/posts`, { method: 'POST', headers: { cookie: jar(), 'user-agent': UA, 'content-type': 'application/x-www-form-urlencoded' }, body: tooLong, redirect: 'manual' });
+    ok(!sql(`SELECT COUNT(*) AS n FROM social_posts WHERE pub_id = '${mPub.id}' AND length(text) = 301`)[0].n, 'Bluesky 300-character limit enforced');
+
+    // ── AI helper (falls back to a plain draft when Workers AI is unavailable) ──
+    const draftPost = await api(mKey, 'POST', '/posts', { title: `Launch issue ${rnd}`, subtitle: 'Big news', markdown: `Read [the launch](https://example.com/launch) and [docs](https://example.com/docs?x=1).`, platform: 'both' });
+    const dpId = draftPost.body?.data?.id;
+    r = await req('/app/social/suggest', { json: { post_id: dpId, network: 'bluesky' }, headers: { accept: 'application/json' } });
+    const sug = await r.json().catch(() => ({}));
+    ok(r.status === 200 && typeof sug.text === 'string' && sug.text.length > 5 && sug.text.length <= 300, `AI "write a post for this issue" returns a draft (ai=${sug.ai})`, JSON.stringify(sug).slice(0, 160));
+
+    // ── auto-share on publish ──
+    await req(`/app/social/accounts/${bsky.id}/auto`, { form: { on: '1' } });
+    const pubPost = await api(mKey, 'POST', '/posts', { title: `Auto ${rnd}`, subtitle: 'Shared automatically', markdown: 'Hello', platform: 'web' });
+    await req(`/app/posts/${pubPost.body.data.id}/publish`, { json: { mode: 'now' }, headers: { accept: 'application/json' } });
+    for (let i = 0; i < 5; i++) { await cron(); await sleep(1200); if (sql(`SELECT status FROM social_posts WHERE post_id = '${pubPost.body.data.id}'`)[0]?.status === 'posted') break; }
+    const auto = sql(`SELECT status, text, link_url, account_id FROM social_posts WHERE post_id = '${pubPost.body.data.id}'`);
+    ok(auto.length === 1 && auto[0].account_id === bsky.id && auto[0].status === 'posted' && auto[0].link_url.includes(`/p/`) && auto[0].text.startsWith(`Auto ${rnd}`), 'publishing a post auto-shares it to channels with auto-share on (only those)', JSON.stringify(auto));
+
+    // ── calendar ──
+    const schedPost = await api(mKey, 'POST', '/posts', { title: `Calendar ${rnd}`, markdown: 'Hi', platform: 'both' });
+    const spId = schedPost.body.data.id;
+    const inTwoDays = new Date(Date.now() + 2 * 86400e3); inTwoDays.setUTCHours(15, 30, 0, 0);
+    r = await req(`/app/posts/${spId}/publish`, { json: { mode: 'schedule', scheduled_at: inTwoDays.toISOString() }, headers: { accept: 'application/json' } });
+    r = await req(`/app/calendar?view=month&date=${inTwoDays.toISOString().slice(0, 10)}`); let calHtml = await r.text();
+    ok(r.status === 200 && calHtml.includes(`Calendar ${rnd}`) && calHtml.includes(`data-id="${spId}"`) && calHtml.includes('data-drag="1"') && calHtml.includes(`Auto ${rnd}`), 'month calendar shows scheduled + sent posts and social posts (draggable when scheduled)');
+    r = await req(`/app/calendar?view=week&date=${inTwoDays.toISOString().slice(0, 10)}&types=post`); calHtml = await r.text();
+    ok(r.status === 200 && calHtml.includes(`Calendar ${rnd}`) && !calHtml.includes('data-kind="social"'), 'week view + type filter');
+    const target = new Date(inTwoDays.getTime() + 3 * 86400e3).toISOString().slice(0, 10);
+    sql(`UPDATE workspaces SET sending_status = 'suspended' WHERE id = '${mPub.workspace_id}'`);
+    r = await req('/app/calendar/move', { json: { kind: 'post', id: spId, date: target }, headers: { accept: 'application/json' } });
+    const blocked = await r.json();
+    ok(r.status === 402 && blocked.code === 'suspended', 'drag-to-reschedule respects sending safety (suspended → 402)', JSON.stringify(blocked).slice(0, 160));
+    sql(`UPDATE workspaces SET sending_status = 'active' WHERE id = '${mPub.workspace_id}'`);
+    r = await req('/app/calendar/move', { json: { kind: 'post', id: spId, date: target }, headers: { accept: 'application/json' } });
+    const mv = await r.json();
+    ok(r.status === 200 && mv.at === `${target}T15:30:00.000Z`, 'move keeps the time of day', JSON.stringify(mv));
+    r = await req(`/app/posts/${spId}/publish`, { json: { mode: 'schedule', scheduled_at: mv.at }, headers: { accept: 'application/json' } });
+    ok(r.status === 200 && sql(`SELECT scheduled_at FROM posts WHERE id = '${spId}'`)[0].scheduled_at === Date.parse(mv.at), 'post rescheduled through the existing schedule route');
+    r = await req('/app/calendar/move', { json: { kind: 'social', id: sched.id, date: target }, headers: { accept: 'application/json' } });
+    ok(r.status === 200 && new Date(sql(`SELECT scheduled_at FROM social_posts WHERE id = '${sched.id}'`)[0].scheduled_at).toISOString().slice(0, 10) === target, 'scheduled social post moved on the calendar');
+    r = await req('/app/calendar/move', { json: { kind: 'post', id: pubPost.body.data.id, date: target }, headers: { accept: 'application/json' } });
+    ok(r.status === 409, 'sent posts cannot be dragged');
+
+    // ── campaigns ──
+    r = await req('/app/campaigns', { form: { name: `Spring ${rnd}`, starts: new Date().toISOString().slice(0, 10), ends: target, goal_kind: 'signups', goal_target: '10' } });
+    const camp = sql(`SELECT id, slug FROM campaigns WHERE pub_id = '${mPub.id}'`)[0];
+    ok(camp && camp.slug === `spring-${rnd}`, 'campaign created with slug = utm_campaign');
+    await req(`/app/campaigns/${camp.id}/items`, { form: { kind: 'post', ref_post: dpId } });
+    await req(`/app/campaigns/${camp.id}/items`, { form: { kind: 'social', ref_social: sched.id } });
+    const tagged = sql(`SELECT content FROM posts WHERE id = '${dpId}'`)[0].content;
+    ok(tagged.includes(`utm_campaign=spring-${rnd}`) && tagged.includes(`utm_source=${mSlug}`) && tagged.includes('x=1'), 'links in campaign posts get utm_campaign automatically', tagged.slice(0, 300));
+    ok(sql(`SELECT campaign_id FROM social_posts WHERE id = '${sched.id}'`)[0].campaign_id === camp.id, 'social post grouped into the campaign');
+    // a reader signs up through a campaign link, then buys something
+    const cReader = `camp.reader.${rnd}@gmail.com`;
+    const saved = cookies; cookies = {};
+    await req(`/s/${mSlug}/subscribe`, { form: { email: cReader, website: '', _t: String(Date.now() - 8000), utm: JSON.stringify({ utm_source: 'bluesky', utm_medium: 'social', utm_campaign: `spring-${rnd}` }) } });
+    await fetch(`${BASE}/s/${mSlug}/?utm_source=bluesky&utm_medium=social&utm_campaign=spring-${rnd}`, { headers: { 'user-agent': UA } });
+    cookies = saved;
+    const cSub = sql(`SELECT id, utm_campaign FROM subscribers WHERE email = '${cReader}'`)[0];
+    sql(`INSERT INTO orders (id, pub_id, kind, subscriber_id, email, amount_cents, currency, status, created_at, paid_at) VALUES ('ord${rnd}', '${mPub.id}', 'product', '${cSub?.id}', '${cReader}', 1999, 'usd', 'paid', ${Date.now()}, ${Date.now()})`);
+    await api(mKey, 'POST', `/posts/${dpId}/send`, {});
+    for (let i = 0; i < 6; i++) { await cron(); await sleep(1200); if (sql(`SELECT COUNT(*) AS n FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = '${dpId}' AND d.status = 'sent'`)[0].n >= 1) break; }
+    r = await req(`/app/campaigns/${camp.id}`); const ch = await r.text();
+    ok(r.status === 200 && cSub?.utm_campaign === `spring-${rnd}` && /data-campaign-signups[^>]*>1</.test(ch) && /data-campaign-revenue[^>]*>\$19\.99</.test(ch), 'campaign report: attributed signup + revenue', (ch.match(/data-campaign-[a-z]+[^>]*>[^<]*</g) || []).join(' '));
+    ok(/data-campaign-delivered[^>]*>[1-9]/.test(ch) && ch.includes('data-campaign-opens'), 'campaign report: combined sends, opens, clicks', (ch.match(/data-campaign-[a-z]+[^>]*>[^<]*</g) || []).join(' '));
+    r = await req(`/app/campaigns/${camp.id}/report.csv`); const csvR = await r.text();
+    ok(csvR.includes(`utm_campaign,spring-${rnd}`) && csvR.includes('revenue,19.99'), 'campaign report CSV');
+
+    // ── ad audiences ──
+    const sha = (s) => nodeCrypto.createHash('sha256').update(s).digest('hex');
+    r = await req('/app/ad-audiences'); const aud = await r.text();
+    ok(r.status === 200 && aud.includes('data-retargeting-note') && aud.includes('Customer Match'), 'ad audiences page explains it replaces retargeting ads');
+    r = await req('/app/ad-audiences/download?segment=all&platform=google'); const g = await r.text();
+    const gl = g.trim().split('\n');
+    ok(gl[0] === 'Email' && gl.includes(sha(`campreader${rnd}@gmail.com`)) && !g.includes('@'), 'Google Customer Match CSV: Email header, SHA-256 of normalized email (gmail dots removed)', gl.slice(0, 3).join('|'));
+    r = await req('/app/ad-audiences/download?segment=all&platform=meta'); const mcsv = await r.text();
+    ok(mcsv.split('\n')[0] === 'email' && mcsv.includes(sha(cReader)), 'Meta Custom Audiences CSV: email header, SHA-256 of trimmed lowercase email');
+    r = await req('/app/ad-audiences/feeds', { form: { segment: 'all', platform: 'meta', name: 'Everyone → Meta' } });
+    const fh = await r.text();
+    const feedUrl = fh.match(/https?:\/\/[^"<\s]+\/audiences\/aud_[A-Za-z0-9_-]+\.csv/)?.[0];
+    ok(!!feedUrl && !sql(`SELECT COUNT(*) AS n FROM ad_audience_feeds WHERE token_hash LIKE 'aud_%'`)[0].n, 'secret re-export URL shown once (only its hash stored)');
+    const pull = await fetch(feedUrl.replace(/^https?:\/\/[^/]+/, BASE));
+    ok(pull.status === 200 && (await pull.text()).includes(sha(cReader)), 'ads tool can pull the list with the secret URL (no login)');
+    const feedId = sql(`SELECT id FROM ad_audience_feeds WHERE pub_id = '${mPub.id}'`)[0].id;
+    await req(`/app/ad-audiences/feeds/${feedId}/revoke`, { form: {} });
+    ok((await fetch(feedUrl.replace(/^https?:\/\/[^/]+/, BASE))).status === 404, 'revoked URL stops working');
+    r = await req('/app/audience/segments'); ok(r.status === 200, 'segments page renders (with Ad audience button when segments exist)');
+
+    // ── PWA ──
+    const man = await fetch(`${BASE}/manifest.webmanifest`);
+    const mj = await man.json().catch(() => ({}));
+    ok(man.status === 200 && mj.display === 'standalone' && mj.icons?.some((i) => i.sizes === '512x512' && i.purpose === 'maskable'), 'web app manifest with 192/512 + maskable icons');
+    for (const p of ['/static/icons/icon-192.png', '/static/icons/icon-512.png', '/static/icons/maskable-512.png', '/static/icons/apple-touch-icon.png']) { const ir = await fetch(BASE + p); if (ir.status !== 200 || !(ir.headers.get('content-type') || '').includes('png')) ok(false, 'icon ' + p, ir.status); }
+    const sw = await fetch(`${BASE}/sw.js`); const swt = await sw.text();
+    ok(sw.status === 200 && swt.includes("startsWith('/app')") && !/cache\.put\(req, res\.clone\(\)\)[^]*mode === 'navigate'/.test(swt), 'service worker served (static cache + offline page only)');
+    ok((await fetch(`${BASE}/offline`)).status === 200, 'offline page served');
+    r = await req('/app'); const home = await r.text();
+    ok(home.includes('rel="manifest"') && home.includes("serviceWorker.register('/sw.js'"), 'dashboard links the manifest and registers the service worker');
+
+    // ── Sign in with Google (mock OIDC provider) ──
+    cookies = {};
+    r = await req('/login'); const lh = await r.text();
+    if (lh.includes('data-google-signin')) {
+      r = await req('/auth/google');
+      let loc = r.headers.get('location') || '';
+      ok(r.status === 302 && loc.startsWith(`${MOCK}/google/authorize`) && loc.includes('code_challenge_method=S256') && loc.includes('nonce='), 'Google: redirects to the provider with PKCE + nonce');
+      let cb = await fetch(loc, { redirect: 'manual' });
+      r = await req(new URL(cb.headers.get('location')).pathname + new URL(cb.headers.get('location')).search);
+      ok([302, 303].includes(r.status) && (r.headers.get('location') || '').includes('/app/onboarding') && !!cookies.oh_sid, 'Google: new user signed up and sent to onboarding', r.status + ' ' + r.headers.get('location'));
+      const gu = sql(`SELECT u.email_verified, (SELECT COUNT(*) FROM memberships m WHERE m.user_id = u.id AND m.role = 'owner') AS ws FROM users u WHERE email = '${idp.google.email}'`)[0];
+      ok(gu?.email_verified === 1 && gu.ws === 1 && sql(`SELECT COUNT(*) AS n FROM user_identities WHERE provider = 'google' AND subject = 'g-1-${rnd}'`)[0].n === 1, 'Google: identity linked, workspace created');
+      // existing account with the same verified email links instead of duplicating
+      cookies = {};
+      idp.google = { sub: 'g-2-' + rnd, email: mEmail, email_verified: true, name: 'Mkt Owner' };
+      sql(`UPDATE users SET email_verified = 1 WHERE email = '${mEmail}'`);
+      loc = (await req('/auth/google')).headers.get('location');
+      cb = await fetch(loc, { redirect: 'manual' });
+      r = await req(new URL(cb.headers.get('location')).pathname + new URL(cb.headers.get('location')).search);
+      const mUserId = sql(`SELECT id FROM users WHERE email = '${mEmail}'`)[0].id;
+      ok([302, 303].includes(r.status) && sql(`SELECT user_id FROM user_identities WHERE provider = 'google' AND subject = 'g-2-${rnd}'`)[0]?.user_id === mUserId && sql(`SELECT COUNT(*) AS n FROM users WHERE email = '${mEmail}'`)[0].n === 1, 'Google: existing account linked by verified email');
+      // replayed state is refused
+      r = await req(new URL(cb.headers.get('location')).pathname + new URL(cb.headers.get('location')).search);
+      ok(r.status === 400, 'Google: callback state is single-use');
+    } else ok(true, 'Google sign-in hidden when GOOGLE_CLIENT_ID/SECRET are not configured');
+
+    // ── Enterprise SSO (mock OIDC provider) ──
+    cookies = mkt;
+    const corpDomain = `corp-${rnd}.example`;
+    r = await req('/app/settings/workspace/sso', { form: { issuer: `${MOCK}/corp`, client_id: 'corp-client', client_secret: 'corp-secret', domain: 'gmail.com', default_role: 'member', enabled: 'on' } });
+    ok(!sql(`SELECT COUNT(*) AS n FROM workspace_sso WHERE workspace_id = '${mPub.workspace_id}'`)[0].n, 'SSO: public email domains cannot be claimed');
+    r = await req('/app/settings/workspace/sso', { form: { issuer: `${MOCK}/corp`, client_id: 'corp-client', client_secret: 'corp-secret', domain: corpDomain, default_role: 'member', enabled: 'on', enforce: 'on' } });
+    let wss = sql(`SELECT * FROM workspace_sso WHERE workspace_id = '${mPub.workspace_id}'`)[0];
+    ok(wss && wss.client_secret.startsWith('v1.') && !wss.client_secret.includes('corp-secret') && wss.enforce === 0, 'SSO saved (client secret encrypted; cannot enforce before a successful test)');
+    r = await req('/app/settings/workspace'); ok((await r.text()).includes(`_lnkbase-sso.${corpDomain}`), 'workspace settings show the SSO card with the DNS TXT record');
+    r = await req(`/sso/test/${mPub.workspace_id}`);
+    let cb = await fetch(r.headers.get('location'), { redirect: 'manual' });
+    r = await req(new URL(cb.headers.get('location')).pathname + new URL(cb.headers.get('location')).search);
+    ok(!!sql(`SELECT tested_at FROM workspace_sso WHERE workspace_id = '${mPub.workspace_id}'`)[0].tested_at, 'SSO: admin test sign-in succeeds (signature, nonce, PKCE verified)');
+    sql(`UPDATE workspace_sso SET domain_verified_at = ${Date.now()} WHERE workspace_id = '${mPub.workspace_id}'`); // DNS TXT can't be published for a test domain
+    await req('/app/settings/workspace/sso', { form: { issuer: `${MOCK}/corp`, client_id: 'corp-client', client_secret: '', domain: corpDomain, default_role: 'member', enabled: 'on', enforce: 'on' } });
+    wss = sql(`SELECT enabled, enforce FROM workspace_sso WHERE workspace_id = '${mPub.workspace_id}'`)[0];
+    ok(wss.enabled === 1 && wss.enforce === 1, 'SSO enabled and enforced after the test');
+    // an existing password account at the domain is now SSO-only
+    cookies = {};
+    await req('/signup', { form: { name: 'Pre Existing', email: `bob@${corpDomain}`, password: 'correct-horse-9' } });
+    ok(!sql(`SELECT COUNT(*) AS n FROM users WHERE email = 'bob@${corpDomain}'`)[0].n, 'SSO enforced: password signup at the domain refused');
+    cookies = {};
+    r = await req('/login', { form: { email: `alice@${corpDomain}`, password: 'whatever-123', mode: 'password' } });
+    ok((r.headers.get('location') || '').startsWith('/sso?email='), 'SSO enforced: password login redirected to SSO');
+    r = await req('/sso', { form: { email: `alice@${corpDomain}` } });
+    const corpLoc = r.headers.get('location') || '';
+    ok(corpLoc.startsWith(`${MOCK}/corp/authorize`) && corpLoc.includes('login_hint='), 'SSO: work email routes to the workspace identity provider');
+    cb = await fetch(corpLoc, { redirect: 'manual' });
+    r = await req(new URL(cb.headers.get('location')).pathname + new URL(cb.headers.get('location')).search);
+    const alice = sql(`SELECT u.id, m.role FROM users u JOIN memberships m ON m.user_id = u.id AND m.workspace_id = '${mPub.workspace_id}' WHERE u.email = 'alice@${corpDomain}'`)[0];
+    ok([302, 303].includes(r.status) && alice?.role === 'member' && !!cookies.oh_sid, 'SSO: first sign-in provisions the person into the workspace');
+    r = await req('/app'); ok(r.status === 200 && (await r.text()).includes(`Mkt ${rnd}`), 'SSO user lands in the workspace dashboard');
+    cookies = {};
+    idp.corp = { sub: 'c-9', email: `mallory@evil-${rnd}.example`, email_verified: true, name: 'Mallory' };
+    r = await req('/sso', { form: { email: `alice@${corpDomain}` } });
+    cb = await fetch(r.headers.get('location'), { redirect: 'manual' });
+    r = await req(new URL(cb.headers.get('location')).pathname + new URL(cb.headers.get('location')).search);
+    ok(r.status === 403 && !sql(`SELECT COUNT(*) AS n FROM users WHERE email = 'mallory@evil-${rnd}.example'`)[0].n, 'SSO: identities outside the allowed domain are refused');
+    cookies = {};
+    r = await req('/login', { form: { email: `alice@${corpDomain}`, mode: 'magic' } });
+    ok((r.headers.get('location') || '').startsWith('/sso?email='), 'SSO enforced: magic links refused too');
+  } finally {
+    server.close();
+  }
+}
 
 console.log('12. Errors');
 const errs = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);

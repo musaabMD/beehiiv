@@ -8,7 +8,9 @@ import { one, all, run, insert } from '../lib/db';
 import {
   hashPassword, verifyPassword, createSession, destroySession, currentUser, issueToken, consumeToken,
   createReaderSession, destroyReaderSession, readerEmail, userPubs,
+  oidcStart, oidcFinish, ssoForEmail, ssoEnforcedFor, openSecret, type OidcConfig, type OidcIdentity,
 } from '../lib/auth';
+import { isSuperadmin } from '../lib/plans';
 import { validateEmail, rateLimit, clientIP } from '../lib/guard';
 import { sendTransactional, button } from '../lib/email';
 import { siteUrl, appUrl, getPub } from '../lib/pub';
@@ -53,6 +55,7 @@ root.get('/signup', async (c) => {
         <input type="text" name="website" class="hide" tabindex={-1} autocomplete="off" />
         <Btn>Create account</Btn>
       </form>
+      <SsoButtons c={c} next={next} />
       <p class="muted center" style="margin-top:16px">Already have an account? <a href={`/login${next ? `?next=${encodeURIComponent(next)}` : ''}`}>Log in</a></p>
     </PlainLayout>,
   );
@@ -70,6 +73,8 @@ root.post('/signup', async (c) => {
   if (pw.length < 8) return fail('Password must be at least 8 characters.');
   const v = await validateEmail(str(f.email), { strict: true });
   if (!v.ok) return fail(v.reason || 'Invalid email.');
+  const enforcedSignup = await ssoEnforcedFor(c.env, v.email);
+  if (enforcedSignup) return back(c, `/sso?email=${encodeURIComponent(v.email)}`, `${enforcedSignup.workspace_name} requires single sign-on for @${enforcedSignup.domain} addresses. Continue with SSO.`, 'err');
   const existing = await one<User & { password_hash: string | null }>(c.env, 'SELECT * FROM users WHERE email = ?', v.email);
   if (existing && !existing.is_guest) return fail('An account with that email already exists. Log in instead.');
   const t = now();
@@ -107,6 +112,7 @@ root.get('/login', async (c) => {
         <div class="divider-text">or</div>
         <Btn kind="secondary" name="mode" value="magic" attrs={{ formnovalidate: '' }}>Email me a magic link</Btn>
       </form>
+      <SsoButtons c={c} next={next} sso />
       <p class="muted center" style="margin-top:16px">
         <a href="/device">Log in with your phone</a> · New here? <a href={`/signup${next ? `?next=${encodeURIComponent(next)}` : ''}`}>Create an account</a>
       </p>
@@ -124,6 +130,9 @@ root.post('/login', async (c) => {
   const okEmail = await rateLimit(c.env, `login:email:${email}`, 10, 900);
   if (!okIp || !okEmail) return back(c, backTo, TOO_MANY, 'err');
   const user = await one<User & { password_hash: string | null }>(c.env, 'SELECT * FROM users WHERE email = ? AND is_guest = 0', email);
+  // Enterprise SSO: password and magic-link login are refused for the workspace's domain (platform operators excepted).
+  const enforced = await ssoEnforcedFor(c.env, email);
+  if (enforced && !isSuperadmin(c.env, user)) return back(c, `/sso?email=${encodeURIComponent(email)}${f.next ? `&next=${encodeURIComponent(f.next)}` : ''}`, `${enforced.workspace_name} requires single sign-on for @${enforced.domain} addresses.`, 'err');
   if (f.mode === 'magic') {
     if (user) {
       const tok = await issueToken(c.env, 'login', 15 * MIN, { user_id: user.id, data: { next } });
@@ -175,6 +184,8 @@ root.post('/forgot', async (c) => {
   const email = str(f.email, 254).toLowerCase();
   if (!(await rateLimit(c.env, `forgot:${clientIP(c.req.raw)}`, 10, 3600)) || !(await rateLimit(c.env, `forgot:${email}`, 3, 3600))) return back(c, '/forgot', TOO_MANY, 'err');
   const user = await one<User>(c.env, 'SELECT * FROM users WHERE email = ? AND is_guest = 0', email);
+  const enforcedReset = await ssoEnforcedFor(c.env, email);
+  if (enforcedReset && !isSuperadmin(c.env, user)) return back(c, `/sso?email=${encodeURIComponent(email)}`, `${enforcedReset.workspace_name} manages sign-in for @${enforcedReset.domain} through single sign-on, so there is no password to reset here.`, 'err');
   if (user) {
     const tok = await issueToken(c.env, 'reset', 30 * MIN, { user_id: user.id });
     await sendTransactional(c.env, user.email, 'Reset your password', `<p>Someone requested a password reset for your ${esc(c.env.APP_NAME)} account.</p>${button('Choose a new password', appUrl(c.env, `/reset/${tok}`))}<p style="color:#6b7280;font-size:13px">The link expires in 30 minutes. If this wasn't you, ignore this email.</p>`);
@@ -217,6 +228,186 @@ root.get('/verify/:token', async (c) => {
   const data = JSON.parse(row.data || '{}');
   if (data.email) await run(c.env, 'UPDATE users SET email = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM users WHERE email = ?)', data.email, row.user_id, data.email);
   return c.html(<PlainLayout title="Email verified"><h1>Email verified ✓</h1><p><a class="btn btn-primary" href="/app">Continue</a></p></PlainLayout>);
+});
+
+// ───────────────────────── single sign-on (Google + per-workspace Enterprise OIDC) ─────────────────────────
+// One redirect URI for every provider: <APP_URL>/sso/callback. The single-use state token records which provider
+// started the flow (and PKCE verifier + nonce). Identities link to existing accounts by verified email.
+const ssoRedirect = (c: Ctx) => appUrl(c.env, '/sso/callback');
+const googleConfigured = (c: Ctx) => !!(c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET);
+const googleCfg = (c: Ctx): OidcConfig => ({ issuer: c.env.GOOGLE_ISSUER || 'https://accounts.google.com', clientId: c.env.GOOGLE_CLIENT_ID!, clientSecret: c.env.GOOGLE_CLIENT_SECRET! });
+
+function SsoButtons(p: { c: Ctx; next?: string; sso?: boolean }) {
+  const q = p.next ? `?next=${encodeURIComponent(p.next)}` : '';
+  if (!googleConfigured(p.c) && !p.sso) return null;
+  return (
+    <div class="sso-buttons">
+      <div class="divider-text">or</div>
+      {googleConfigured(p.c) && (
+        <a class="btn btn-secondary btn-block sso-google" href={`/auth/google${q}`} data-google-signin>
+          {raw('<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>')}
+          <span>Continue with Google</span>
+        </a>
+      )}
+      {p.sso && <a class="btn btn-ghost btn-block" href={`/sso${q}`} data-sso-link>Sign in with SSO (work account)</a>}
+    </div>
+  );
+}
+
+function ssoFail(c: Ctx, msg: string, status = 400) {
+  return c.html(<PlainLayout title="Sign-in failed"><h1>Sign-in didn't work</h1><p data-sso-error>{msg}</p><p><a class="btn btn-primary" href="/login">Back to log in</a></p></PlainLayout>, status as 400);
+}
+
+root.get('/auth/google', async (c) => {
+  if (!googleConfigured(c)) return c.notFound();
+  if (!(await rateLimit(c.env, `sso:ip:${clientIP(c.req.raw)}`, 30, 900))) return ssoFail(c, TOO_MANY, 429);
+  try {
+    return c.redirect(await oidcStart(c.env, googleCfg(c), ssoRedirect(c), { p: 'google', next: safeNext(c.req.query('next'), '') }), 302);
+  } catch (e: any) {
+    return ssoFail(c, `Google sign-in is unavailable: ${e?.message || e}`, 502);
+  }
+});
+
+root.get('/sso', async (c) => {
+  const next = c.req.query('next') || '';
+  return c.html(
+    <PlainLayout title="Sign in with SSO" c={c}>
+      <h1>Single sign-on</h1>
+      <p class="muted">Enter your work email. If your organization has set up single sign-on, we'll send you to its sign-in page.</p>
+      <form method="post" action="/sso">
+        <input type="hidden" name="next" value={next} />
+        <Field label="Work email"><Input name="email" type="email" required autofocus value={c.req.query('email') || ''} attrs={{ autocomplete: 'email' }} /></Field>
+        <Btn>Continue</Btn>
+      </form>
+      <p class="muted center" style="margin-top:16px"><a href="/login">Other ways to log in</a></p>
+    </PlainLayout>,
+  );
+});
+
+root.post('/sso', async (c) => {
+  const f = await form(c.req);
+  const email = str(f.email, 254).toLowerCase();
+  if (!(await rateLimit(c.env, `sso:ip:${clientIP(c.req.raw)}`, 30, 900))) return back(c, '/sso', TOO_MANY, 'err');
+  const sso = await ssoForEmail(c.env, email);
+  if (!sso) return back(c, `/sso?email=${encodeURIComponent(email)}`, `Single sign-on isn't set up for @${email.split('@')[1] || '…'}. Log in with your password or a magic link instead.`, 'err');
+  try {
+    const cfg = { issuer: sso.issuer, clientId: sso.client_id, clientSecret: await openSecret(c.env, sso.client_secret) };
+    return c.redirect(await oidcStart(c.env, cfg, ssoRedirect(c), { p: 'oidc', ws: sso.workspace_id, next: safeNext(f.next, '') }, email), 302);
+  } catch (e: any) {
+    return ssoFail(c, `Your organization's identity provider couldn't be reached: ${e?.message || e}`, 502);
+  }
+});
+
+async function wsSsoConfig(c: Ctx, wsId: string): Promise<OidcConfig | null> {
+  const s = await one<any>(c.env, 'SELECT * FROM workspace_sso WHERE workspace_id = ?', wsId);
+  if (!s) return null;
+  return { issuer: s.issuer, clientId: s.client_id, clientSecret: await openSecret(c.env, s.client_secret) };
+}
+
+/** Find the user for an identity: linked identity → existing account with the same (verified) email → new account. */
+async function userForIdentity(c: Ctx, provider: string, idn: OidcIdentity, o: { createWorkspace: boolean }): Promise<{ user: User; created: boolean }> {
+  const t = now();
+  const linked = await one<User>(c.env, 'SELECT u.* FROM user_identities i JOIN users u ON u.id = i.user_id WHERE i.provider = ? AND i.subject = ?', provider, idn.sub);
+  if (linked) {
+    await run(c.env, 'UPDATE user_identities SET last_login_at = ?, email = ? WHERE provider = ? AND subject = ?', t, idn.email, provider, idn.sub);
+    return { user: linked, created: false };
+  }
+  let user = await one<User>(c.env, 'SELECT * FROM users WHERE email = ?', idn.email);
+  let created = false;
+  if (user && user.is_guest) {
+    await run(c.env, 'UPDATE users SET is_guest = 0, name = COALESCE(NULLIF(name, \'\'), ?) WHERE id = ?', idn.name || idn.email.split('@')[0], user.id);
+    if (o.createWorkspace && !(await one(c.env, 'SELECT 1 FROM memberships WHERE user_id = ?', user.id))) {
+      const wid = id();
+      await insert(c.env, 'workspaces', { id: wid, name: `${(idn.name || idn.email).split(/[ @]/)[0]}'s workspace`, owner_id: user.id, created_at: t });
+      await insert(c.env, 'memberships', { workspace_id: wid, pub_id: '', user_id: user.id, role: 'owner', created_at: t });
+    }
+  } else if (!user) {
+    const uid = id();
+    const name = idn.name || idn.email.split('@')[0];
+    await insert(c.env, 'users', { id: uid, email: idn.email, name, password_hash: null, email_verified: 1, created_at: t });
+    if (o.createWorkspace) {
+      const wid = id();
+      await insert(c.env, 'workspaces', { id: wid, name: `${name.split(' ')[0]}'s workspace`, owner_id: uid, created_at: t });
+      await insert(c.env, 'memberships', { workspace_id: wid, pub_id: '', user_id: uid, role: 'owner', created_at: t });
+    }
+    user = (await one<User>(c.env, 'SELECT * FROM users WHERE id = ?', uid))!;
+    created = true;
+  }
+  if (!created && !user!.email_verified) {
+    // Someone may have registered this address without proving they own it: the provider just did, so the
+    // unverified password and any sessions made with it are dropped (prevents pre-registration takeover).
+    await run(c.env, 'UPDATE users SET password_hash = NULL WHERE id = ?', user!.id);
+    await run(c.env, 'DELETE FROM sessions WHERE user_id = ?', user!.id);
+  }
+  await run(c.env, 'UPDATE users SET email_verified = 1 WHERE id = ?', user!.id);
+  await run(c.env, 'INSERT OR IGNORE INTO user_identities (provider, subject, user_id, email, last_login_at, created_at) VALUES (?, ?, ?, ?, ?, ?)', provider, idn.sub, user!.id, idn.email, t, t);
+  return { user: user!, created };
+}
+
+root.get('/sso/callback', async (c) => {
+  const state = c.req.query('state') || '';
+  if (c.req.query('error')) {
+    await consumeToken(c.env, 'oidc_state', state).catch(() => null);
+    return ssoFail(c, c.req.query('error') === 'access_denied' ? 'Sign-in was cancelled.' : `The identity provider returned an error: ${str(c.req.query('error_description') || c.req.query('error'), 200)}`);
+  }
+  let idn: OidcIdentity;
+  try {
+    idn = await oidcFinish(c.env, async (d) => (d.p === 'google' ? (googleConfigured(c) ? googleCfg(c) : null) : d.ws ? wsSsoConfig(c, String(d.ws)) : null), ssoRedirect(c), state, str(c.req.query('code'), 2000));
+  } catch (e: any) {
+    return ssoFail(c, String(e?.message || e));
+  }
+  const d = idn.data;
+  const next = safeNext(d.next, '');
+  const domain = idn.email.split('@')[1] || '';
+
+  if (d.p === 'google') {
+    if (!idn.emailVerified) return ssoFail(c, 'Google says this email address is not verified.');
+    const enforced = await ssoEnforcedFor(c.env, idn.email);
+    const existing = await one<User>(c.env, 'SELECT * FROM users WHERE email = ?', idn.email);
+    if (enforced && !isSuperadmin(c.env, existing)) return back(c, `/sso?email=${encodeURIComponent(idn.email)}`, `${enforced.workspace_name} requires single sign-on for @${enforced.domain} addresses.`, 'err');
+    const { user, created } = await userForIdentity(c, 'google', idn, { createWorkspace: true });
+    await createSession(c, user.id);
+    await insert(c.env, 'audit_log', { id: id(), pub_id: null, user_id: user.id, action: created ? 'auth.signup_google' : 'auth.login_google', target: idn.email, data: '{}', created_at: now() });
+    return c.redirect(next || (created || !(await one(c.env, 'SELECT 1 FROM memberships WHERE user_id = ? LIMIT 1', user.id)) ? '/app/onboarding' : '/app'), 303);
+  }
+
+  // Enterprise OIDC
+  const sso = await one<any>(c.env, `SELECT s.*, w.name AS workspace_name FROM workspace_sso s JOIN workspaces w ON w.id = s.workspace_id WHERE s.workspace_id = ?`, String(d.ws || ''));
+  if (!sso) return ssoFail(c, 'Single sign-on is no longer configured for this workspace.');
+  if (domain !== sso.domain) return ssoFail(c, `Signed in as ${idn.email}, but ${sso.workspace_name} only allows @${sso.domain} accounts through single sign-on.`, 403);
+  if (d.test) {
+    // Admin "Test sign-in": proves the configuration works; doesn't change who is signed in.
+    const admin = await currentUser(c);
+    if (!admin || admin.id !== d.test) return ssoFail(c, 'Start the test from Settings → Workspace while signed in.', 403);
+    await run(c.env, 'UPDATE workspace_sso SET tested_at = ?, updated_at = ? WHERE workspace_id = ?', now(), now(), sso.workspace_id);
+    flash(c, `SSO test succeeded: the identity provider signed in ${idn.email}. You can now enable and enforce SSO.`);
+    return c.redirect('/app/settings/workspace#sso', 303);
+  }
+  if (!sso.enabled || !sso.domain_verified_at) return ssoFail(c, 'Single sign-on is not enabled for this workspace yet.', 403);
+  const { user, created } = await userForIdentity(c, `oidc:${sso.workspace_id}`, idn, { createWorkspace: false });
+  // Just-in-time provisioning: people from the verified domain join the workspace with its default role.
+  await run(c.env, `INSERT INTO memberships (workspace_id, pub_id, user_id, role, created_at) VALUES (?, '', ?, ?, ?) ON CONFLICT(workspace_id, pub_id, user_id) DO NOTHING`, sso.workspace_id, user.id, ['admin', 'member', 'contributor'].includes(sso.default_role) ? sso.default_role : 'member', now());
+  await createSession(c, user.id);
+  await insert(c.env, 'audit_log', { id: id(), pub_id: null, user_id: user.id, action: created ? 'auth.sso_provisioned' : 'auth.login_sso', target: idn.email, data: JSON.stringify({ workspace_id: sso.workspace_id }), created_at: now() });
+  const firstPub = await one<{ id: string }>(c.env, 'SELECT id FROM publications WHERE workspace_id = ? AND status != \'deleted\' ORDER BY created_at LIMIT 1', sso.workspace_id);
+  if (firstPub) setCookie(c, 'oh_pub', firstPub.id, { path: '/', sameSite: 'Lax', maxAge: 365 * 86400 });
+  return c.redirect(next || '/app', 303);
+});
+
+/** Admin "Test sign-in" for a workspace's SSO configuration (before it is enabled or enforced). */
+root.get('/sso/test/:ws', async (c) => {
+  const user = await currentUser(c);
+  if (!user) return c.redirect('/login');
+  const ws = c.req.param('ws');
+  const ok = await one(c.env, `SELECT 1 FROM memberships WHERE workspace_id = ? AND user_id = ? AND pub_id = '' AND role IN ('owner','admin')`, ws, user.id);
+  if (!ok) return c.text('Not allowed', 403);
+  const cfg = await wsSsoConfig(c, ws).catch(() => null);
+  if (!cfg) return back(c, '/app/settings/workspace#sso', 'Save the SSO settings first.', 'err');
+  try {
+    return c.redirect(await oidcStart(c.env, cfg, ssoRedirect(c), { p: 'oidc', ws, test: user.id }), 302);
+  } catch (e: any) {
+    return back(c, '/app/settings/workspace#sso', `Couldn't reach the identity provider: ${e?.message || e}`, 'err');
+  }
 });
 
 // ───────────────────────── cross-device login ─────────────────────────
@@ -276,6 +467,7 @@ root.post('/device/email', async (c) => {
   if (!code) return c.redirect('/device');
   if (!(await rateLimit(c.env, `device:${email}`, 5, 900)) || !(await rateLimit(c.env, `device:ip:${clientIP(c.req.raw)}`, 20, 900))) return back(c, '/device', TOO_MANY, 'err');
   const user = await one<User>(c.env, 'SELECT * FROM users WHERE email = ? AND is_guest = 0', email);
+  if ((await ssoEnforcedFor(c.env, email)) && !isSuperadmin(c.env, user)) return back(c, '/device', 'Your organization requires single sign-on. Sign in with SSO on the phone, then open the approval link there.', 'err');
   if (user) {
     const tok = await issueToken(c.env, 'login', 15 * MIN, { user_id: user.id, data: { next: `/device/${code}` } });
     await sendTransactional(c.env, user.email, 'Approve your desktop login', `<p>Open this on your phone to sign in there and approve the login on your computer (code <strong>${esc(code)}</strong>).</p>${button('Approve login', appUrl(c.env, `/magic/${tok}`))}`);

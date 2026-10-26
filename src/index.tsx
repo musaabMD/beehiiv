@@ -31,6 +31,11 @@ import grow from './routes/grow';
 import settingsMod from './routes/settings';
 import api from './routes/api';
 import platform from './routes/platform';
+import social from './routes/social';
+import calendar from './routes/calendar';
+import campaigns from './routes/campaigns';
+import adAudiences from './routes/adaudiences';
+import './lib/campaigns';
 
 export { CollabRoom } from './lib/collab';
 export { LiveRoom } from './lib/live';
@@ -97,12 +102,16 @@ const mods: Array<[string, Module]> = [
   ['/app/settings', settingsMod],
   ['/app/api', api],
   ['/app/admin', platform],
+  ['/app/social', social],
+  ['/app/calendar', calendar],
+  ['/app/campaigns', campaigns],
+  ['/app/ad-audiences', adAudiences],
   ['/app', dashboard], // home, analytics, AI helper
 ];
 for (const [path, m] of mods) if (m.dash) app.route(path, m.dash);
 
 // Root (public, non-publication) routes
-for (const m of [core, platform, landing, auth, api, audience, posts, podcasts, events, monetize, grow, community, settingsMod, dashboard, website] as Module[]) if (m.root) app.route('/', m.root);
+for (const m of [core, platform, landing, auth, api, audience, posts, podcasts, events, monetize, grow, community, settingsMod, dashboard, website, adAudiences] as Module[]) if (m.root) app.route('/', m.root);
 
 // Publication site routes — website last (it owns the "/:page" catch-all)
 for (const m of [auth, audience, monetize, grow, podcasts, events, community, posts, settingsMod, dashboard, website] as Module[]) if (m.site) app.route('/s/:slug', m.site);

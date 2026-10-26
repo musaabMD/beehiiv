@@ -19,12 +19,29 @@ export const NAV: NavItem[] = [
   { key: 'website', label: 'Website', href: '/app/website', icon: 'globe', perm: 'manage', sub: [['pages', 'Pages', '/app/website'], ['theme', 'Theme & layout', '/app/website/theme'], ['nav', 'Navigation', '/app/website/nav'], ['popups', 'Pop-ups & gating', '/app/website/popups'], ['redirects', 'Redirects', '/app/website/redirects'], ['seo', 'SEO & crawlers', '/app/website/seo'], ['templates', 'Saved blocks & pages', '/app/website/templates']] },
   { key: 'grow', label: 'Grow', href: '/app/grow', icon: 'trend', perm: 'manage', sub: [['referrals', 'Referral program', '/app/grow'], ['recommendations', 'Recommendations', '/app/grow/recommendations'], ['boosts', 'Boosts', '/app/grow/boosts'], ['links', 'Magic links', '/app/grow/links'], ['bio', 'Link in bio', '/app/grow/bio']] },
   { key: 'monetize', label: 'Monetize', href: '/app/monetize', icon: 'dollar', perm: 'manage', sub: [['tiers', 'Paid subscriptions', '/app/monetize'], ['offers', 'Offers & codes', '/app/monetize/offers'], ['products', 'Digital products', '/app/monetize/products'], ['orders', 'Orders', '/app/monetize/orders'], ['ads', 'Ad network', '/app/monetize/ads'], ['sponsors', 'Sponsorships', '/app/monetize/sponsorships'], ['wallet', 'Wallet & payouts', '/app/monetize/wallet']] },
+  { key: 'marketing', label: 'Marketing', href: '/app/calendar', icon: 'link', perm: 'manage', sub: [['calendar', 'Calendar', '/app/calendar'], ['campaigns', 'Campaigns', '/app/campaigns'], ['social', 'Social posts', '/app/social'], ['adaudiences', 'Ad audiences', '/app/ad-audiences']] },
   { key: 'podcasts', label: 'Podcasts', href: '/app/podcasts', icon: 'mic', perm: 'manage' },
   { key: 'events', label: 'Events', href: '/app/events', icon: 'calendar', perm: 'manage' },
   { key: 'community', label: 'Community', href: '/app/community', icon: 'chat', perm: 'manage' },
   { key: 'analytics', label: 'Analytics', href: '/app/analytics', icon: 'chart', perm: 'manage', sub: [['overview', 'Overview', '/app/analytics'], ['posts', 'Post performance', '/app/analytics/posts'], ['web', 'Website traffic', '/app/analytics/web'], ['bots', 'Bots & AI crawlers', '/app/analytics/bots'], ['subscribers', 'Subscriber growth', '/app/analytics/subscribers'], ['deliverability', 'Deliverability', '/app/analytics/deliverability'], ['revenue', 'Revenue', '/app/analytics/revenue'], ['podcasts', 'Podcasts', '/app/analytics/podcasts'], ['reports', 'Custom reports', '/app/analytics/reports'], ['explore', '3D explorer', '/app/analytics/explore']] },
   { key: 'settings', label: 'Settings', href: '/app/settings', icon: 'gear', sub: [['publication', 'Publication', '/app/settings'], ['team', 'Team', '/app/settings/team'], ['authors', 'Authors', '/app/settings/authors'], ['email', 'Email & senders', '/app/settings/email'], ['domains', 'Domains', '/app/settings/domains'], ['integrations', 'Integrations', '/app/settings/integrations'], ['api', 'API keys & MCP', '/app/settings/api'], ['webhooks', 'Webhooks', '/app/settings/webhooks'], ['plan', 'Plan & usage', '/app/settings/plan'], ['billing', 'Payments & billing', '/app/settings/billing'], ['workspace', 'Workspace', '/app/settings/workspace'], ['audit', 'Audit log', '/app/settings/audit'], ['monitoring', 'Monitoring', '/app/settings/monitoring'], ['profile', 'My profile', '/app/settings/profile']] },
 ];
+
+/** Installable app (PWA): manifest, icons, theme colour. The service worker (public/sw.js) caches static assets
+ *  and an offline page only — dashboard HTML (private data) is never cached. */
+export const PwaHead = () => (
+  <>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#1c1917" />
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Lnkbase" />
+  </>
+);
+export const PwaRegister = () => (
+  <script dangerouslySetInnerHTML={{ __html: `if('serviceWorker' in navigator&&location.protocol!=='file:'){addEventListener('load',function(){navigator.serviceWorker.register('/sw.js',{scope:'/'}).catch(function(){})})}` }} />
+);
 
 export interface LayoutProps {
   c: Ctx;
@@ -65,6 +82,7 @@ export function DashLayout(p: LayoutProps) {
           <meta name="viewport" content="width=device-width,initial-scale=1" />
           <title>{`${p.title} · ${pub?.name || c.env.APP_NAME}`}</title>
           <link rel="icon" href="/static/favicon.svg" />
+          <PwaHead />
           <link rel="stylesheet" href="/static/app.css" />
           {(p.styles || []).map((s) => <link rel="stylesheet" href={s} />)}
           {p.head}
@@ -149,6 +167,7 @@ export function DashLayout(p: LayoutProps) {
           <script type="application/json" id="palette-data">{raw(JSON.stringify(palette).replace(/</g, '\\u003c'))}</script>
           <script src="/static/app.js" defer></script>
           {(p.scripts || []).map((s) => <script src={s} defer></script>)}
+          <PwaRegister />
         </body>
       </html>
     </>
@@ -167,6 +186,7 @@ export function PlainLayout(p: { title: string; children?: Child; wide?: boolean
           <meta name="viewport" content="width=device-width,initial-scale=1" />
           <title>{p.title}</title>
           <link rel="icon" href="/static/favicon.svg" />
+          <PwaHead />
           <link rel="stylesheet" href="/static/app.css" />
           {p.head}
         </head>
@@ -177,6 +197,7 @@ export function PlainLayout(p: { title: string; children?: Child; wide?: boolean
             {p.children}
           </main>
           <script src="/static/app.js" defer></script>
+          <PwaRegister />
         </body>
       </html>
     </>

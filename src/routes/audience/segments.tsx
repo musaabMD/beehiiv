@@ -42,7 +42,7 @@ app.get('/segments', async (c) => {
         { h: 'Type', r: (s) => <Status s={s.kind === 'static' ? 'static' : 'dynamic'} /> },
         { h: 'Subscribers', r: (s) => <strong>{num(s.cached_count)}</strong> },
         { h: 'Calculated', r: (s) => <span class="small">{ago(s.calculated_at)}</span> },
-        { h: '', r: (s) => <div class="row end"><ActionForm action={`/app/audience/segments/${s.id}/recalc`} label="Recalculate" /><LinkBtn small href={`/app/audience/segments/${s.id}/members`}>Members</LinkBtn></div> },
+        { h: '', r: (s) => <div class="row end"><ActionForm action={`/app/audience/segments/${s.id}/recalc`} label="Recalculate" /><LinkBtn small href={`/app/audience/segments/${s.id}/members`}>Members</LinkBtn><LinkBtn small href={`/app/ad-audiences?segment=${s.id}`}>Ad audience</LinkBtn></div> },
       ]} />
     ) : <Card><Empty icon="◎" title="No segments yet" body="Group subscribers by behavior, attributes, engagement, purchases, poll answers and more. Use segments to target sends, power dynamic content, and drive automations." action={<LinkBtn href="/app/audience/segments/new" kind="primary">Create a segment</LinkBtn>} /></Card>
   ));

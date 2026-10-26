@@ -42,6 +42,11 @@ export interface Env {
   MAIL_FROM_WARMUP?: string;    // 'off' disables warm-up caps for the default MAIL_FROM domain
   // Hosted service (Lnkbase Newsletter)
   SHARED_FROM_DOMAIN?: string;  // publications without a verified domain send from <slug>@<this>; default MAIL_FROM's domain
+  // Marketing + SSO
+  APP_SECRET?: string;          // secret for encrypting stored credentials (social tokens, SSO client secrets); required outside localhost
+  GOOGLE_CLIENT_ID?: string;    // "Sign in with Google" (OAuth 2.0 / OIDC); the button only shows when both are set
+  GOOGLE_CLIENT_SECRET?: string;
+  GOOGLE_ISSUER?: string;       // override for testing (default https://accounts.google.com)
 }
 
 export type Role = 'owner' | 'admin' | 'member' | 'contributor';

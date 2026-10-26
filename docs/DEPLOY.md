@@ -131,6 +131,35 @@ npx wrangler secret put DISCORD_CLIENT_SECRET
 
 Role sync itself still needs the bot token and server ID in Community → Settings. `DISCORD_API_BASE` exists only to point the token exchange at a mock server in tests.
 
+## 11e. Stored credentials: APP_SECRET (required for social posting and SSO)
+
+Social account credentials (Bluesky app passwords, Mastodon access tokens) and Enterprise SSO client secrets are encrypted at rest with AES-256-GCM, using a key derived (HKDF-SHA-256) from `APP_SECRET`. Set it once to any long random string and never change it (changing it makes stored credentials unreadable; reconnect the accounts if you must rotate):
+
+```sh
+openssl rand -base64 48 | npx wrangler secret put APP_SECRET
+```
+
+Without it the dashboard refuses to store credentials (only on `localhost` a development key is used).
+
+## 11f. Marketing channels
+
+- **Social posts** (Marketing → Social posts): Bluesky connects with a handle + [app password](https://bsky.app/settings/app-passwords) (AT Protocol `createSession` / `uploadBlob` / `createRecord`, link cards with image thumbs); Mastodon with an instance URL + access token (scopes `read:accounts write:statuses write:media`). LinkedIn, X, Threads and Facebook are share-intent links only — their posting APIs need app review or paid access. Scheduled posts run on the job queue; auto-share posts each newsletter issue when it is published.
+- **Calendar** and **Campaigns** need no setup. Campaign attribution uses `utm_campaign = <campaign slug>`, added to links in campaign posts (draft/scheduled) and social links.
+- **Ad audiences**: hashed (SHA-256) customer lists for Google Ads Customer Match and Meta Custom Audiences, downloadable or pulled from a secret URL `https://<APP_URL host>/audiences/aud_….csv`.
+
+## 11g. Single sign-on (optional)
+
+**Sign in with Google** appears on the login and signup pages once both secrets are set. In Google Cloud Console → APIs & Services → Credentials, create an OAuth client ID (Web application) with the authorized redirect URI `https://<APP_URL host>/sso/callback`, then:
+
+```sh
+npx wrangler secret put GOOGLE_CLIENT_ID
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+```
+
+Accounts link by verified email. (`GOOGLE_ISSUER` exists only to point at a mock provider in tests.)
+
+**Enterprise SSO** is per workspace (Settings → Workspace → Enterprise SSO): any OpenID Connect provider (Okta, Entra ID, Google Workspace, Auth0…), redirect URI `https://<APP_URL host>/sso/callback`. The workspace proves it owns the email domain with a DNS TXT record (`_lnkbase-sso.<domain>` = `lnkbase-sso=<token>`); public mail domains can't be claimed. After a successful *Test sign-in*, "Require SSO" refuses password, magic-link and Google login for that domain (platform superadmins excepted). New people from the domain are added to the workspace with the configured role on first sign-in.
+
 ## 12. Cron and background work
 
 `triggers.crons` runs every minute: scheduled posts, send batches, automation steps, deferred-mail retries, webhook retries, segment refreshes, warmup and blocklist checks. Nothing else to set up.
