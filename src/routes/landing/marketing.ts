@@ -65,7 +65,7 @@ footer.foot{border-top:1px solid var(--line);padding:48px 0 32px;color:var(--mut
 .foot .cols a{display:block;color:#44403c;margin-bottom:8px}.foot .cols a:hover{color:var(--text)}
 .foot .base{margin-top:32px;padding-top:20px;border-top:1px solid var(--line);font-size:13px}
 @media(max-width:960px){.grid{grid-template-columns:repeat(2,1fr)}.top nav{display:none}.foot .cols{grid-template-columns:1fr 1fr}}
-@media(max-width:620px){.grid,.grid2{grid-template-columns:1fr}section{padding:40px 0}.hero{padding-top:44px}th,td{padding:10px 12px}.hide-sm{display:none}}
+@media(max-width:620px){.btn{white-space:normal;height:auto;min-height:46px;padding:10px 18px;text-align:center}.grid,.grid2{grid-template-columns:1fr}section{padding:40px 0}.hero{padding-top:44px}th,td{padding:10px 12px}.hide-sm{display:none}}
 `;
 
 export function shell(o: ShellOpts): string {

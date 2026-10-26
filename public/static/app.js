@@ -203,3 +203,6 @@
     if (!isNaN(d)) i.value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
   });
 })();
+
+// Open a dialog named in the URL hash (e.g. /app/automations#new-automation from the command palette).
+(function () { try { if (!location.hash || location.hash.length < 2) return; const d = document.getElementById(decodeURIComponent(location.hash.slice(1))); if (d && d.showModal && !d.open) d.showModal(); } catch (e) {} })();

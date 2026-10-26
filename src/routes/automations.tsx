@@ -169,6 +169,9 @@ function TemplateGallery() {
   );
 }
 
+// The command palette and old links use GET /new: open the template gallery.
+dash.get('/new', (c) => c.redirect('/app/automations#new-automation'));
+
 dash.post('/new', async (c) => {
   const f = await form(c.req);
   const tpl = templateByKey(str(f.template));
