@@ -18,6 +18,7 @@ import { registerDomains } from './settings/domains';
 import { registerDevelopers } from './settings/developers';
 import { registerAccount } from './settings/account';
 import { registerMonitoring } from './settings/monitoring';
+import { registerPlan } from './settings/plan';
 import '../lib/domains';
 import '../lib/integrations';
 
@@ -541,6 +542,7 @@ registerDomains(dash);
 registerDevelopers(dash);
 registerAccount(dash);
 registerMonitoring(dash);
+registerPlan(dash);
 
 const root = new Hono<AppEnv>();
 export default { dash, root } satisfies Module;

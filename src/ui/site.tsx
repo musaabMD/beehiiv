@@ -1,5 +1,6 @@
 /** @jsxImportSource hono/jsx */
 // Public publication website shell: theme tokens, global navbar/footer, signup + login modals, pop-ups, analytics.
+import { showsBranding, brandingUrl, BRAND } from '../lib/plans';
 import type { Child } from 'hono/jsx';
 import { raw } from 'hono/html';
 import type { Ctx, Publication } from '../types';
@@ -66,10 +67,11 @@ export async function SiteLayout(p: SiteProps) {
   const cfg = settings(pub);
   const base = siteUrl(c.env, pub);
   const reader = c.get('reader');
-  const [navLinks, navPages, css] = await Promise.all([
+  const [navLinks, navPages, css, branded] = await Promise.all([
     all<{ label: string; url: string; location: string }>(c.env, 'SELECT label, url, location FROM nav_links WHERE pub_id = ? ORDER BY position', pub.id),
     all<{ title: string; slug: string }>(c.env, `SELECT title, slug FROM pages WHERE pub_id = ? AND status = 'published' AND show_in_nav = 1 AND slug != '' ORDER BY created_at`, pub.id),
     siteCss(c.env),
+    showsBranding(c.env, pub.workspace_id), // Free plan: "Published with Lnkbase Newsletter" badge
   ]);
   const header = navLinks.filter((n) => n.location === 'header');
   const footer = navLinks.filter((n) => n.location === 'footer');
@@ -156,6 +158,12 @@ export async function SiteLayout(p: SiteProps) {
                 <p class="s-muted s-small">© {new Date().getFullYear()} {pub.name}. Powered by <a href="https://lnkbase.com/beehiiv">OpenHive</a>.</p>
               </div>
             </footer>
+          )}
+          {branded && (
+            <a class="s-brand-badge" href={brandingUrl(pub.slug)} target="_blank" rel="noopener" data-platform-badge
+              style="position:fixed;right:14px;bottom:14px;z-index:40;display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border-radius:999px;background:#111827;color:#fff;font:600 12px/1.2 system-ui,-apple-system,sans-serif;text-decoration:none;box-shadow:0 2px 10px rgba(0,0,0,.18);opacity:.92">
+              Published with {BRAND.name}
+            </a>
           )}
 
           <dialog class="s-modal" id="m-subscribe">

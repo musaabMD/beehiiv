@@ -1,6 +1,7 @@
 import type { Env, Publication } from '../types';
 import { one } from './db';
 import { parseJSON } from './util';
+import { applySharedSender } from './sharedsender';
 
 export interface PubSettings {
   double_opt_in?: boolean;
@@ -57,5 +58,7 @@ export async function senderFor(env: Env, pub: Publication, purpose = 'newslette
     (senderId ? await one<any>(env, 'SELECT email, name FROM sender_addresses WHERE id = ? AND pub_id = ?', senderId, pub.id) : null) ||
     (await one<any>(env, 'SELECT email, name FROM sender_addresses WHERE pub_id = ? AND purpose = ? ORDER BY is_default DESC LIMIT 1', pub.id, purpose)) ||
     (await one<any>(env, 'SELECT email, name FROM sender_addresses WHERE pub_id = ? ORDER BY is_default DESC LIMIT 1', pub.id));
-  return { email: row?.email || env.MAIL_FROM, name: row?.name || pub.from_name || pub.name };
+  // Without a verified custom sending domain, mail goes out from the shared sender (<slug>@SHARED_FROM_DOMAIN).
+  const s = await applySharedSender(env, pub, { email: row?.email || env.MAIL_FROM, name: row?.name || pub.from_name || pub.name });
+  return { email: s.email, name: s.name };
 }

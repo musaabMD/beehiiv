@@ -607,7 +607,13 @@ route('POST', '/posts/:id/send', 'Send API', 'Publish/send now or schedule (targ
     await emit(c.env, { pubId: pub.id, type: 'post.scheduled', refId: p.id, data: { post_id: p.id, title: p.title, scheduled_at: iso(at) }, activity: false });
     return c.json({ data: { post_id: p.id, status: 'scheduled', scheduled_at: iso(at) } }, 202);
   }
-  const sendId = await publishPost(c.env, pub, p);
+  let sendId: string | null;
+  try { sendId = await publishPost(c.env, pub, p); }
+  catch (e) {
+    const { SendBlockedError } = await import('../../lib/plans');
+    if (e instanceof SendBlockedError) return c.json({ error: { code: e.code, message: e.message, upgrade_url: e.upgradeUrl } }, 402);
+    throw e;
+  }
   try { const { kick } = await import('../../lib/jobs'); kick(c.env, c.executionCtx); } catch {}
   return c.json({ data: { post_id: p.id, status: 'published', send_id: sendId, email: p.platform !== 'web' } }, 202);
 }, { body: { scheduled_at: 'ISO datetime (omit to send now)', segment_ids: 'string[] send to', exclude_segment_ids: 'string[]', list_id: 'string', audience: 'all|free|premium', platform: 'email|web|both', email_subject: 'string', ab_test: '{subjects: string[2-5], sample_pct, wait_minutes, metric: opens|clicks}' } });

@@ -6,6 +6,8 @@ import { one, all, run, val, insert, update, batch, stmt, insertStmt } from '../
 import { compile } from '../../lib/segments';
 import { validateEmail } from '../../lib/guard';
 import { countRejection } from '../../lib/rejections';
+import { planStatus, LIMITS } from '../../lib/plans';
+
 import { suppress } from '../../lib/email';
 import { emit } from '../../lib/events';
 import { registerJob, enqueue, kick } from '../../lib/jobs';
@@ -16,6 +18,13 @@ import { page, exportCSV } from './shared';
 import { form, str, now, id, ago, num, parseJSON, parseCSV, slugify, fmtDateTime } from '../../lib/util';
 
 const app = new Hono<AppEnv>();
+/** Free plans and brand-new accounts must confirm the list was opted in (list-quality gate). */
+async function importConsentRequired(env: Env, pub: Publication): Promise<boolean> {
+  const st = await planStatus(env, pub.workspace_id);
+  if (!st || st.exempt) return false;
+  return LIMITS.IMPORT_CONSENT_PLANS.includes(st.effective.id) || st.newAccount.active;
+}
+
 
 // ───────── lists ─────────
 app.get('/lists', async (c) => {
@@ -225,6 +234,7 @@ app.get('/imports/:id/map', async (c) => {
   const lists = await all<any>(c.env, 'SELECT id, name, is_default FROM lists WHERE pub_id = ? ORDER BY name', pub.id);
   const opts: Array<[string, string]> = [['', 'Ignore'], ['email', 'Email'], ['name', 'Full name'], ['first_name', 'First name'], ['last_name', 'Last name'], ['tags', 'Tags (comma separated)'], ['created_at', 'Subscribed date'], ['utm_source', 'Source / UTM source'], ['status', 'Status (unsubscribed and bounced rows stay out)'], ...fields.map((f) => [`custom:${f.key}`, `Custom: ${f.label}`] as [string, string]), ['new_field', 'Create new custom field from column']];
   const dbl = settings(pub).double_opt_in;
+  const needConsent = await importConsentRequired(c.env, pub);
   return page(c, { title: `Import ${imp.filename}`, sub: 'imports', crumbs: [['/app/audience/imports', 'Import & export']] }, (
     <form method="post" action={`/app/audience/imports/${imp.id}/run`}>
       <Card title={`Map columns · ${num(imp.total)} rows`} pad={false}>
@@ -241,7 +251,8 @@ app.get('/imports/:id/map', async (c) => {
         <Toggle name="send_welcome" label="Trigger welcome automations for new subscribers" hint="Leave off for migrations from another platform." />
         {dbl ? <Toggle name="require_confirm" label="Send double opt-in confirmation emails" hint="Imported subscribers will be pending until they confirm." /> : null}
         <Toggle name="update_existing" checked label="Update names & custom fields of existing subscribers" />
-        <Help>Every address is validated: invalid syntax, disposable domains and typo'd domains (gmial.com) are skipped with a reason. Previously unsubscribed or bounced readers are never resubscribed.</Help>
+        <Help>Every address is validated: invalid syntax, disposable domains and typo'd domains (gmial.com) are skipped with a reason. Previously unsubscribed or bounced readers are never resubscribed. Lists where more than {Math.round(LIMITS.IMPORT_MAX_INVALID_RATE * 100)}% of rows are invalid or disposable are rejected — that's a sign of an old or purchased list, which hurts deliverability for everyone.</Help>
+        {needConsent && <Check name="consent" value="yes" label={<strong>These people asked to get my emails.</strong>} hint="They subscribed to my newsletter (for example on my website or another newsletter platform). I'm not importing a purchased, rented or scraped list." />}
         <div class="form-actions"><a class="btn btn-ghost" href="/app/audience/imports">Cancel</a><Btn>Start import</Btn></div>
       </Card>
     </form>
@@ -256,9 +267,30 @@ app.post('/imports/:id/run', async (c) => {
   const map: Record<string, string> = {};
   for (const [k, v] of Object.entries(f)) if (k.startsWith('col_') && v) map[k.slice(4)] = String(v);
   if (!Object.values(map).includes('email')) return back(c, `/app/audience/imports/${imp.id}/map`, 'Map one column to Email', 'err');
-  // create custom fields for "new_field" columns
+  if (f.consent !== 'yes' && (await importConsentRequired(c.env, pub))) return back(c, `/app/audience/imports/${imp.id}/map`, 'Please confirm that the people on this list asked to get your emails.', 'err');
   const obj = await c.env.MEDIA.get(`${pub.id}/private/imports/${imp.id}.csv`);
-  const head = parseCSV(((await obj?.text()) || '').split('\n')[0] || '')[0] || [];
+  const csvText = (await obj?.text()) || '';
+  // list-quality gate: reject lists with too many invalid / disposable addresses before importing anything
+  {
+    const emailCol = Number(Object.entries(map).find(([, v]) => v === 'email')![0]);
+    const rows = parseCSV(csvText.replace(/^\uFEFF/, '')).slice(1).filter((r) => r.some((x) => x.trim()));
+    const blocked = settings(pub).blocked_domains;
+    const bad: Array<{ row: number; email: string; reason: string }> = [];
+    let n = 0;
+    for (const [i, r] of rows.entries()) {
+      n++;
+      const v = await validateEmail((r[emailCol] || '').trim(), { extraBlocked: blocked });
+      if (!v.ok) bad.push({ row: i + 2, email: (r[emailCol] || '').trim(), reason: v.reason || 'invalid' });
+    }
+    if (n && bad.length / n > LIMITS.IMPORT_MAX_INVALID_RATE) {
+      await run(c.env, `UPDATE imports SET status = 'rejected', skipped = ?, errors = ? WHERE id = ?`, bad.length, JSON.stringify(bad.slice(0, 500)), imp.id);
+      await c.env.MEDIA.delete(`${pub.id}/private/imports/${imp.id}.csv`);
+      await audit(c, 'subscribers.import_rejected', imp.id, { rows: n, invalid: bad.length });
+      return back(c, `/app/audience/imports/${imp.id}`, `Import rejected: ${num(bad.length)} of ${num(n)} rows (${Math.round((bad.length / n) * 100)}%) are invalid or disposable addresses — more than the ${Math.round(LIMITS.IMPORT_MAX_INVALID_RATE * 100)}% we accept. Clean the list and upload it again.`, 'err');
+    }
+  }
+  // create custom fields for "new_field" columns
+  const head = parseCSV(csvText.split('\n')[0] || '')[0] || [];
   for (const [idx, v] of Object.entries(map)) {
     if (v !== 'new_field') continue;
     const label = (head[Number(idx)] || `field_${idx}`).slice(0, 80);

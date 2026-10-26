@@ -1,7 +1,8 @@
 // End-to-end smoke test against a running `wrangler dev`.
 // Usage: BASE=http://localhost:8790 PERSIST=.wrangler/int node scripts/e2e.mjs
 // Walks: signup → onboarding → API key → public subscribe → API subscriber → post → send → cron → open/click tracking
-//        → public site → paid tier checkout (test mode) → one-click unsubscribe → webhooks/automation sanity.
+//        → public site → paid tier checkout (test mode) → one-click unsubscribe → webhooks/automation sanity
+//        → platform plans (usage page, subscriber cap, email allowance, simulated upgrade, campaign pause, approval).
 import { execSync } from 'node:child_process';
 
 const BASE = process.env.BASE || 'http://localhost:8787';
@@ -151,6 +152,112 @@ ok(stats.status === 200, 'post stats via API', JSON.stringify(stats.body).slice(
 const mcp = await fetch(`${BASE}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
 const mj = await mcp.json().catch(() => ({}));
 ok(mcp.status === 200 && mj.result?.tools?.length > 10, `MCP tools/list (${mj.result?.tools?.length || 0} tools)`);
+console.log('11. Platform plans: usage page, subscriber cap, email allowance, upgrade, campaign safety, approval');
+cookies = cookieBackup;
+const pubRow = sql(`SELECT id, workspace_id FROM publications WHERE slug = '${slug}'`)[0];
+const wsId = pubRow.workspace_id, pubId = pubRow.id;
+const fakeSubs = (n, tag) => sql(`WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < ${n}) INSERT INTO subscribers (id, pub_id, email, name, status, tier, source, referral_code, custom, confirmed_at, created_at, updated_at) SELECT '${tag}' || i || '${rnd}', '${pubId}', '${tag}' || i || '.${rnd}@gmail.com', '', 'active', 'free', 'import', '${tag}' || i || '${rnd}', '{}', 0, 0, 0 FROM k`);
+const newPost = async (title) => (await api(key, 'POST', '/posts', { title: `${title} ${rnd}`, markdown: 'Hello {{subscriber.first_name|there}}', platform: 'both' })).body?.data?.id;
+sql(`UPDATE platform_domains SET warmup_started_at = 1`); // warm-up of the shared sender domain isn't under test here
+const wsPlan = () => sql(`SELECT plan_id FROM workspaces WHERE id = '${wsId}'`)[0].plan_id;
+
+r = await req('/app/settings/plan');
+let ph2 = await r.text();
+ok(r.status === 200 && ph2.includes('data-usage="Active subscribers"') && ph2.includes('data-plan="pro"'), 'Plan & usage page renders usage bars and plan cards');
+ok(wsPlan() === 'free', 'new workspace starts on Free');
+ok(sql(`SELECT COUNT(*) AS n FROM outbox WHERE subject LIKE '%Issue ${rnd}%' AND html LIKE '%Sent with%' AND from_email LIKE '%<${slug}@%'`)[0].n >= 1, 'Free plan email carries branding footer and shared sender address');
+r = await req(`/s/${slug}/`); ok((await r.text()).includes('data-platform-badge'), 'Free plan site shows the badge');
+
+// subscriber cap: readers are kept, sending is blocked
+fakeSubs(520, 'cap');
+let p2 = await newPost('Capped');
+let sres = await api(key, 'POST', `/posts/${p2}/send`, {});
+ok(sres.status === 402 && sres.body?.error?.code === 'subscriber_cap' && !!sres.body?.error?.upgrade_url, 'send blocked over the subscriber cap (402 + upgrade link)', JSON.stringify(sres.body).slice(0, 200));
+ok(sql(`SELECT status FROM posts WHERE id = '${p2}'`)[0].status === 'draft', 'blocked post stays a draft');
+r = await req('/app'); ok((await r.text()).includes('data-plan-banner'), 'dashboard shows the plan banner');
+ok(sql(`SELECT COUNT(*) AS n FROM outbox WHERE subject LIKE '%close to your Free plan limits%' AND to_email = '${email}'`)[0].n === 1, '80% usage email sent to the owner (once)');
+sql(`DELETE FROM subscribers WHERE id LIKE 'cap%${rnd}'`);
+
+// monthly email allowance: blocked before starting, with an upgrade link in the send dialog
+sql(`UPDATE workspaces SET created_at = created_at - 4 * 86400000 WHERE id = '${wsId}'`); // past the new-account ramp
+const firstSend = sql(`SELECT id FROM sends WHERE post_id = '${postId}'`)[0].id;
+sql(`WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < 2500) INSERT INTO deliveries (id, send_id, pub_id, subscriber_id, email, status, attempts, sent_at, created_at) SELECT 'al' || i || '${rnd}', '${firstSend}', '${pubId}', NULL, 'al' || i || '@gmail.com', 'sent', 1, ${Date.now()}, ${Date.now()} FROM k`);
+r = await req(`/app/posts/${p2}/count`, { json: {}, headers: { accept: 'application/json' } });
+const cj = await r.json();
+ok(cj.plan && cj.plan.ok === false && cj.plan.code === 'email_allowance' && cj.plan.upgrade_url.includes('/app/settings/plan'), 'send dialog check reports the allowance with an upgrade link', JSON.stringify(cj).slice(0, 200));
+sres = await api(key, 'POST', `/posts/${p2}/send`, {});
+ok(sres.status === 402 && sres.body?.error?.code === 'email_allowance', 'send over the monthly email allowance blocked (402)', JSON.stringify(sres.body).slice(0, 200));
+r = await req(`/app/posts/${p2}/publish`, { json: { mode: 'now' }, headers: { accept: 'application/json' } });
+const pj = await r.json().catch(() => ({}));
+ok(r.status === 402 && pj.upgrade_url, 'editor send returns the reason + upgrade link', JSON.stringify(pj).slice(0, 160));
+
+// upgrade through the simulated checkout
+r = await req('/app/settings/plan/change', { form: { plan_id: 'pro', interval: 'month' } });
+const coLoc = r.headers.get('location') || '';
+ok(coLoc.includes('/checkout/plan/'), 'upgrade redirects to the (simulated) checkout', coLoc);
+const coPath = new URL(coLoc, BASE).pathname;
+r = await req(coPath); ok(r.status === 200 && (await r.text()).includes('Test checkout'), 'simulated plan checkout page');
+r = await req(coPath, { form: {} });
+ok([302, 303].includes(r.status) && wsPlan() === 'pro', 'payment upgrades the workspace to Pro', wsPlan());
+sres = await api(key, 'POST', `/posts/${p2}/send`, {});
+ok(sres.status === 202, 'send works after upgrading', JSON.stringify(sres.body).slice(0, 160));
+r = await req(`/s/${slug}/`); ok(!(await r.text()).includes('data-platform-badge'), 'paid plan removes the site badge');
+
+// downgrade is scheduled for the period end
+r = await req('/app/settings/plan/change', { form: { plan_id: 'starter', interval: 'month' } });
+const pend = sql(`SELECT plan_id, plan_pending_id, plan_period_end FROM workspaces WHERE id = '${wsId}'`)[0];
+ok(pend.plan_id === 'pro' && pend.plan_pending_id === 'starter' && pend.plan_period_end > Date.now(), 'downgrade takes effect at period end', JSON.stringify(pend));
+r = await req('/app/settings/plan/change', { form: { plan_id: 'pro', interval: 'month' } });
+ok(!sql(`SELECT plan_pending_id FROM workspaces WHERE id = '${wsId}'`)[0].plan_pending_id, 'keeping the current plan cancels the scheduled downgrade');
+
+// campaign safety: >2% hard bounces after 200 deliveries pauses the send
+fakeSubs(300, 'bnc');
+sql(`UPDATE publications SET settings = json_set(settings, '$.send_rate_per_minute', 50) WHERE id = '${pubId}'`);
+const p3 = await newPost('Bouncy');
+sres = await api(key, 'POST', `/posts/${p3}/send`, {});
+ok(sres.status === 202, 'campaign started', JSON.stringify(sres.body).slice(0, 120));
+const send3 = sres.body?.data?.send_id;
+for (let i = 0; i < 6; i++) { await cron(); await sleep(1500); if (sql(`SELECT COUNT(*) AS n FROM deliveries WHERE send_id = '${send3}'`)[0].n >= 50) break; }
+sql(`WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < 250) INSERT INTO deliveries (id, send_id, pub_id, subscriber_id, email, status, bounce_type, attempts, sent_at, created_at) SELECT 'bd' || i || '${rnd}', '${send3}', '${pubId}', NULL, 'bd' || i || '@gmail.com', CASE WHEN i <= 15 THEN 'bounced' ELSE 'sent' END, CASE WHEN i <= 15 THEN 'hard' ELSE NULL END, 1, ${Date.now()}, ${Date.now()} FROM k`);
+sql(`UPDATE jobs SET run_at = 0 WHERE kind = 'send.batch' AND status = 'pending' AND payload LIKE '%${send3}%'`);
+for (let i = 0; i < 6; i++) { await cron(); await sleep(1500); if (sql(`SELECT status FROM sends WHERE id = '${send3}'`)[0].status === 'paused') break; }
+const s3 = sql(`SELECT status, status_reason FROM sends WHERE id = '${send3}'`)[0];
+ok(s3.status === 'paused' && /Hard-bounce rate/.test(s3.status_reason || ''), 'campaign paused for hard bounces', JSON.stringify(s3));
+ok(sql(`SELECT COUNT(*) AS n FROM outbox WHERE to_email = '${email}' AND subject LIKE '%was paused%'`)[0].n === 1, 'owner emailed about the pause');
+r = await req(`/app/posts/${p3}`); ok((await r.text()).includes('data-send-reason="paused"'), 'post page shows why it paused');
+sql(`UPDATE publications SET settings = json_remove(settings, '$.send_rate_per_minute') WHERE id = '${pubId}'`);
+sql(`DELETE FROM deliveries WHERE id LIKE 'bd%${rnd}' OR id LIKE 'al%${rnd}'`);
+
+// first large campaign from an untrusted account waits for superadmin approval
+fakeSubs(1000, 'big');
+const p4 = await newPost('Big');
+sres = await api(key, 'POST', `/posts/${p4}/send`, {});
+const send4 = sres.body?.data?.send_id;
+ok(sres.status === 202 && sql(`SELECT status FROM sends WHERE id = '${send4}'`)[0].status === 'pending_approval', 'first campaign over 1,000 recipients is held for review');
+const userCookies = cookies; cookies = {};
+const opsEmail = `ops.${rnd}@gmail.com`;
+await req('/signup', { form: { name: 'Ops', email: opsEmail, password: 'correct-horse-9' } });
+r = await req('/app/admin'); ok(r.status === 404 || r.status === 302, 'non-superadmin cannot open Platform admin', r.status);
+sql(`UPDATE users SET is_superadmin = 1 WHERE email = '${opsEmail}'`);
+r = await req('/app/admin'); const ah = await r.text();
+ok(r.status === 200 && ah.includes(email), 'superadmin sees workspaces with usage + rates');
+r = await req('/app/admin/sends'); ok((await r.text()).includes(`Big ${rnd}`), 'held campaign listed for review');
+r = await req(`/app/admin/sends/${send4}/approve`, { form: {} });
+ok(['sending', 'sent'].includes(sql(`SELECT status FROM sends WHERE id = '${send4}'`)[0].status) && !!sql(`SELECT trusted_at FROM workspaces WHERE id = '${wsId}'`)[0].trusted_at, 'superadmin approval starts the send and trusts the workspace');
+ok(sql(`SELECT COUNT(*) AS n FROM outbox WHERE to_email = '${email}' AND subject LIKE 'Approved:%'`)[0].n === 1, 'owner notified of the approval');
+r = await req(`/app/admin/w/${wsId}/suspend`, { form: { note: 'e2e check' } });
+ok(sql(`SELECT sending_status FROM workspaces WHERE id = '${wsId}'`)[0].sending_status === 'suspended', 'superadmin can suspend sending');
+cookies = userCookies;
+sres = await api(key, 'POST', `/posts/${await newPost('Suspended')}/send`, {});
+ok(sres.status === 402 && sres.body?.error?.code === 'suspended', 'suspended workspace cannot send');
+cookies = {}; await req('/login', { form: { email: opsEmail, password: 'correct-horse-9' } });
+await req(`/app/admin/w/${wsId}/unsuspend`, { form: {} });
+ok(sql(`SELECT sending_status FROM workspaces WHERE id = '${wsId}'`)[0].sending_status === 'active', 'superadmin can unsuspend');
+cookies = userCookies;
+sql(`UPDATE sends SET status = 'cancelled' WHERE id = '${send4}'`);
+sql(`DELETE FROM subscribers WHERE id LIKE 'big%${rnd}' OR id LIKE 'bnc%${rnd}'`);
+
+console.log('12. Errors');
 const errs = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
 ok(errs.length === 0, 'no server errors logged', JSON.stringify(errs).slice(0, 800));
 

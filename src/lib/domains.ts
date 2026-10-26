@@ -91,9 +91,15 @@ export function platformHost(env: Env): string {
   return (env.MAIL_FROM.split('@')[1] || '').toLowerCase();
 }
 
+/** Platform-owned sending domains: MAIL_FROM's domain plus the shared sender domain (SHARED_FROM_DOMAIN), if different. */
+export function platformHosts(env: Env): string[] {
+  const shared = (env.SHARED_FROM_DOMAIN || '').trim().toLowerCase();
+  return [...new Set([platformHost(env), shared].filter(Boolean))];
+}
+
 /** Warm-up row for `host` when it's the default MAIL_FROM domain (created on first use); null otherwise or when disabled. */
 export async function platformWarmupDomain(env: Env, host: string): Promise<{ hostname: string; warmup_started_at: number | null; blocklisted: number } | null> {
-  if (!host || host !== platformHost(env) || (env.MAIL_FROM_WARMUP || '').toLowerCase() === 'off') return null;
+  if (!host || !platformHosts(env).includes(host) || (env.MAIL_FROM_WARMUP || '').toLowerCase() === 'off') return null;
   let row = await one<any>(env, 'SELECT * FROM platform_domains WHERE hostname = ?', host);
   if (!row) {
     const first = await one<{ t: number | null }>(env, `SELECT MIN(created_at) AS t FROM outbox WHERE from_email LIKE ? AND status IN ('sent','simulated')`, `%@${host}>`);
@@ -156,7 +162,8 @@ export async function checkBlocklists(env: Env) {
     }
   }
   // the default MAIL_FROM domain (tracked in platform_domains) — alert the instance operators
-  const p = await platformWarmupDomain(env, platformHost(env)).catch(() => null);
+  for (const host of platformHosts(env)) {
+  const p = await platformWarmupDomain(env, host).catch(() => null);
   if (p) {
     try {
       const res = await blocklistStatus(p.hostname);
@@ -171,6 +178,7 @@ export async function checkBlocklists(env: Env) {
     } catch (e) {
       await logError(env, 'domains.blocklist', e);
     }
+  }
   }
 }
 

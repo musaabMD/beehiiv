@@ -179,7 +179,7 @@ export async function sendMail(env: Env, m: MailInput): Promise<MailResult> {
   }
   await insert(env, 'outbox', {
     id: id(), pub_id: m.pub?.id ?? null, to_email: to, from_email: `${from.name || ''} <${from.email}>`, subject: m.subject,
-    html: m.html.length > 400_000 ? m.html.slice(0, 400_000) : m.html, headers: JSON.stringify(headers), status: res.status, error: res.error ?? null,
+    html: m.html.length > 400_000 ? m.html.slice(0, 400_000) : m.html, headers: JSON.stringify(m.replyTo ? { ...headers, 'Reply-To': m.replyTo } : headers), status: res.status, error: res.error ?? null,
     message_id: res.messageId ?? null, kind, created_at: now(),
   });
   // Marketing senders (sender.ts, automations) record bounces against their delivery rows. Transactional mail (login

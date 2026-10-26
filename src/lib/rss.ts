@@ -137,7 +137,15 @@ async function makePost(env: Env, pub: Publication, feed: any, items: FeedItem[]
   await run(env, `UPDATE posts SET email_subject = ?, preview_text = ?, audience = ?, segment_ids = ?, exclude_segment_ids = ?, thumbnail_url = ?, updated_at = ? WHERE id = ?`,
     subject, truncate(preview, 150), feed.audience || 'all', feed.segment_ids || '[]', feed.exclude_segment_ids || '[]', first.image, now(), pid);
   const post = (await one<Post>(env, 'SELECT * FROM posts WHERE id = ?', pid))!;
-  if (feed.action === 'send') await publishPost(env, pub, post);
+  if (feed.action === 'send') {
+    try { await publishPost(env, pub, post); }
+    catch (e) {
+      const { SendBlockedError } = await import('./plans');
+      if (!(e instanceof SendBlockedError)) throw e;
+      const { notifyBlocked } = await import('./sender');
+      await notifyBlocked(env, pub, post, e);
+    }
+  }
   for (const it of items) await run(env, `UPDATE rss_items SET status = 'used', post_id = ? WHERE feed_id = ? AND guid = ?`, pid, feed.id, it.guid);
   return post;
 }

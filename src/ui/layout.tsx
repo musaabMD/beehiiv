@@ -4,6 +4,7 @@ import { raw } from 'hono/html';
 import type { Ctx } from '../types';
 import { siteUrl } from '../lib/pub';
 import { can } from '../lib/auth';
+import { isSuperadmin } from '../lib/plans';
 import { readFlash } from './components';
 import { icon } from './icons';
 
@@ -22,7 +23,7 @@ export const NAV: NavItem[] = [
   { key: 'events', label: 'Events', href: '/app/events', icon: 'calendar', perm: 'manage' },
   { key: 'community', label: 'Community', href: '/app/community', icon: 'chat', perm: 'manage' },
   { key: 'analytics', label: 'Analytics', href: '/app/analytics', icon: 'chart', perm: 'manage', sub: [['overview', 'Overview', '/app/analytics'], ['posts', 'Post performance', '/app/analytics/posts'], ['web', 'Website traffic', '/app/analytics/web'], ['bots', 'Bots & AI crawlers', '/app/analytics/bots'], ['subscribers', 'Subscriber growth', '/app/analytics/subscribers'], ['deliverability', 'Deliverability', '/app/analytics/deliverability'], ['revenue', 'Revenue', '/app/analytics/revenue'], ['podcasts', 'Podcasts', '/app/analytics/podcasts'], ['reports', 'Custom reports', '/app/analytics/reports'], ['explore', '3D explorer', '/app/analytics/explore']] },
-  { key: 'settings', label: 'Settings', href: '/app/settings', icon: 'gear', sub: [['publication', 'Publication', '/app/settings'], ['team', 'Team', '/app/settings/team'], ['authors', 'Authors', '/app/settings/authors'], ['email', 'Email & senders', '/app/settings/email'], ['domains', 'Domains', '/app/settings/domains'], ['integrations', 'Integrations', '/app/settings/integrations'], ['api', 'API keys & MCP', '/app/settings/api'], ['webhooks', 'Webhooks', '/app/settings/webhooks'], ['billing', 'Payments & billing', '/app/settings/billing'], ['workspace', 'Workspace', '/app/settings/workspace'], ['audit', 'Audit log', '/app/settings/audit'], ['monitoring', 'Monitoring', '/app/settings/monitoring'], ['profile', 'My profile', '/app/settings/profile']] },
+  { key: 'settings', label: 'Settings', href: '/app/settings', icon: 'gear', sub: [['publication', 'Publication', '/app/settings'], ['team', 'Team', '/app/settings/team'], ['authors', 'Authors', '/app/settings/authors'], ['email', 'Email & senders', '/app/settings/email'], ['domains', 'Domains', '/app/settings/domains'], ['integrations', 'Integrations', '/app/settings/integrations'], ['api', 'API keys & MCP', '/app/settings/api'], ['webhooks', 'Webhooks', '/app/settings/webhooks'], ['plan', 'Plan & usage', '/app/settings/plan'], ['billing', 'Payments & billing', '/app/settings/billing'], ['workspace', 'Workspace', '/app/settings/workspace'], ['audit', 'Audit log', '/app/settings/audit'], ['monitoring', 'Monitoring', '/app/settings/monitoring'], ['profile', 'My profile', '/app/settings/profile']] },
 ];
 
 export interface LayoutProps {
@@ -105,6 +106,8 @@ export function DashLayout(p: LayoutProps) {
                 <div class="usermenu-menu">
                   <a href="/app/settings/profile">My profile</a>
                   <a href="/app/settings/workspace">Workspace</a>
+                  <a href="/app/settings/plan">Plan &amp; usage</a>
+                  {isSuperadmin(c.env, user) && <a href="/app/admin">Platform admin</a>}
                   <a href="/docs" target="_blank">Docs</a>
                   <form method="post" action="/logout"><button type="submit">Sign out</button></form>
                 </div>

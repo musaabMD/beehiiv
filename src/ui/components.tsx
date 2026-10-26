@@ -92,7 +92,7 @@ const STATUS_TONE: Record<string, 'gray' | 'green' | 'amber' | 'red' | 'blue' | 
   draft: 'gray', archived: 'gray', ended: 'gray', canceled: 'gray', cancelled: 'gray', declined: 'gray', hidden: 'gray', exited: 'gray',
   scheduled: 'blue', sending: 'blue', testing: 'purple', trialing: 'purple', pending: 'amber', paused: 'amber', retrying: 'amber', waiting: 'blue', applied: 'amber', available: 'blue', reported: 'amber', open: 'amber',
   failed: 'red', bounced: 'red', unsubscribed: 'gray', complained: 'red', rejected: 'red', banned: 'red', past_due: 'red', refunded: 'gray',
-  premium: 'purple', free: 'gray',
+  premium: 'purple', free: 'gray', pending_approval: 'amber', suspended: 'red', campaign_paused: 'amber', send_blocked: 'amber', usage_warning: 'amber', payment_failed: 'red', plan_changed: 'blue',
 };
 export const Status = (p: { s: string | null | undefined }) => <Badge tone={STATUS_TONE[p.s || ''] || 'gray'}>{(p.s || '—').replace(/_/g, ' ')}</Badge>;
 

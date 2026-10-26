@@ -10,6 +10,7 @@ const t = Date.now();
 console.log(`
 INSERT OR IGNORE INTO users (id, email, name, password_hash, email_verified, is_superadmin, created_at) VALUES ('u_demo', 'demo@openhive.dev', 'Demo Writer', '${hash}', 1, 1, ${t});
 INSERT OR IGNORE INTO workspaces (id, name, owner_id, created_at) VALUES ('w_demo', 'Demo Workspace', 'u_demo', ${t});
+UPDATE workspaces SET plan_id = 'scale', trusted_at = ${t} WHERE id = 'w_demo';
 INSERT OR IGNORE INTO publications (id, workspace_id, slug, name, description, from_name, address, settings, created_at) VALUES ('p_demo', 'w_demo', 'demo', 'The Demo Dispatch', 'A weekly newsletter about building on the open web.', 'The Demo Dispatch', '123 Main St, Springfield', '{"utm_tracking":true}', ${t});
 INSERT OR IGNORE INTO memberships (workspace_id, pub_id, user_id, role, created_at) VALUES ('w_demo', '', 'u_demo', 'owner', ${t});
 INSERT OR IGNORE INTO lists (id, pub_id, name, description, is_default, public, created_at) VALUES ('l_demo', 'p_demo', 'Weekly newsletter', 'The main weekly issue', 1, 1, ${t});

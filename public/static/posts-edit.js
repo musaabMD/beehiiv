@@ -11,7 +11,7 @@
   const json = async (url, body, method = 'POST') => {
     const r = await fetch(url, { method, headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw Object.assign(new Error(j.error || `Request failed (${r.status})`), { status: r.status });
+    if (!r.ok) throw Object.assign(new Error(j.error || `Request failed (${r.status})`), { status: r.status, data: j });
     return j;
   };
   const debounce = (fn, ms) => { let t; const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; d.now = (...a) => { clearTimeout(t); return fn(...a); }; return d; };
@@ -159,9 +159,19 @@
     const el = $('#pe-recipients');
     if (!el || isTemplate) return;
     const m = serializeMeta();
-    try { const r = await json(`${base}/count`, m); el.textContent = r.count.toLocaleString() + ' subscribers'; lastCount = r.count; } catch { el.textContent = '—'; }
+    try { const r = await json(`${base}/count`, m); el.textContent = r.count.toLocaleString() + ' subscribers'; lastCount = r.count; lastPlan = r.plan || null; } catch { el.textContent = '—'; }
   }, 400);
   let lastCount = null;
+  let lastPlan = null;
+  // plan limits (Plan & usage): show why a send is blocked, with an upgrade link, before anything starts
+  function showPlanWarn(p) {
+    const w = $('#pe-send-warn');
+    if (!w) return;
+    if (!p || (p.ok && !p.notice)) { w.classList.add('hide'); w.innerHTML = ''; return; }
+    w.classList.remove('hide');
+    w.classList.toggle('danger', !p.ok);
+    w.innerHTML = p.ok ? esc(p.notice) : `<strong>Can't send yet.</strong> ${esc(p.reason)} <a href="${esc(p.upgrade_url || '/app/settings/plan')}" data-upgrade-link><strong>Upgrade your plan →</strong></a>`;
+  }
 
   // ───────── thumbnail ─────────
   const thumbIn = $('#pe-thumb');
@@ -269,6 +279,8 @@
     if (hasPaywall) items.push([true, 'Paywall break: free readers see an upgrade prompt']);
     if (noAlt) items.push([false, `${noAlt} image${noAlt > 1 ? 's are' : ' is'} missing alt text`, false, true]);
     if (emptyImgs) items.push([false, `${emptyImgs} empty image block${emptyImgs > 1 ? 's' : ''} will be skipped`, false, true]);
+    if (emailing && lastPlan && !lastPlan.ok) items.push([false, 'Plan limit reached — see below', true]);
+    showPlanWarn(emailing ? lastPlan : null);
     $('#pe-checklist').innerHTML = items.map(([good, text, blocking, warn]) => `<li class="${good ? 'ok' : warn ? 'warn' : 'bad'}">${good ? '✓' : warn ? '!' : '✕'} ${esc(text)}</li>`).join('');
     const blocking = items.filter(([good, , block]) => !good && block);
     $('#pe-send-go').disabled = blocking.length > 0;
@@ -295,7 +307,10 @@
       dirty = false;
       toast(r.message);
       setTimeout(() => (location.href = r.redirect || '/app/posts'), 600);
-    } catch (e) { toast(e.message, 5000); btn.disabled = false; }
+    } catch (e) {
+      if (e.data?.upgrade_url) showPlanWarn({ ok: false, reason: e.message, upgrade_url: e.data.upgrade_url });
+      toast(e.message, 5000); btn.disabled = false;
+    }
   });
   $('#pe-test-send')?.addEventListener('click', async () => {
     const btn = $('#pe-test-send');
