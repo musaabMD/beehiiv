@@ -4,6 +4,7 @@ import { parseJSON } from './util';
 import { applySharedSender } from './sharedsender';
 
 export interface PubSettings {
+  simulate_sending?: boolean;          // demo publications: write mail to the outbox instead of sending (try-it samples still send)
   double_opt_in?: boolean;
   welcome_email?: boolean;
   redirect_after_signup?: string;      // url

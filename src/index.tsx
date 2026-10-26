@@ -117,6 +117,16 @@ let lastTick = 0;
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     withMedia(env);
+    // The workers.dev address moved to APP_URL (hive.lnkbase.com): send visitors there. Tracking, unsubscribe and
+    // webhook URLs already in sent emails or provider settings keep working on the old host.
+    {
+      const u = new URL(req.url);
+      const app = (() => { try { return new URL(env.APP_URL); } catch { return null; } })();
+      if (app && u.hostname.endsWith('.workers.dev') && u.hostname !== app.hostname && (req.method === 'GET' || req.method === 'HEAD')
+        && !/^\/(t|u|pref|hooks|media|listen|api|mcp|static|embed|f)\//.test(u.pathname)) {
+        return Response.redirect(app.origin + u.pathname + u.search, 301);
+      }
+    }
     // Fallback scheduler: if cron triggers aren't available (e.g. free/preview accounts), traffic drives the
     // background work at most once a minute per isolate. runPeriodic() guards each task with its own interval.
     if (Date.now() - lastTick > 60_000) {

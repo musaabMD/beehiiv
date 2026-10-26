@@ -152,7 +152,9 @@ export async function sendMail(env: Env, m: MailInput): Promise<MailResult> {
   }
   if (m.campaignId) headers['X-OpenHive-Campaign'] = m.campaignId;
   const text = m.text || htmlToText(m.html);
-  const simulate = !env.EMAIL || (env.EMAIL_MODE === 'simulate' && !m.forceReal);
+  let pubSim = false;
+  try { pubSim = !!(m.pub && JSON.parse((m.pub as any).settings || '{}').simulate_sending); } catch {}
+  const simulate = !env.EMAIL || ((env.EMAIL_MODE === 'simulate' || pubSim) && !m.forceReal);
   let res: MailResult;
   if (simulate) {
     res = { ok: true, status: 'simulated', messageId: 'sim-' + id() };

@@ -16,11 +16,14 @@
   // Workers AI powers the writing assistant. Uncomment after `wrangler login` (it always runs remotely).
   "ai": { "binding": "AI" },
   "images": { "binding": "IMAGES" },
+  "routes": [{ "pattern": "hive.lnkbase.com", "custom_domain": true }],
   "triggers": { "crons": ["* * * * *"] },
   "vars": {
     "APP_NAME": "Lnkbase Newsletter",
-    "APP_URL": "http://localhost:8787",
-    "MAIL_FROM": "newsletter@trstbase.com",
+    "APP_URL": "https://hive.lnkbase.com",
+    "MAIL_FROM": "newsletter@news.lnkbase.com",
+    "SHARED_FROM_DOMAIN": "news.lnkbase.com",
+    "SUPERADMIN_EMAILS": "musaabhq@gmail.com",
     "PURCHASE_URL": "https://lnkbase.com/beehiiv",
     "PRICE_LABEL": "$30 one-time",
     "PLATFORM_FEE_PERCENT": "0",
