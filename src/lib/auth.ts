@@ -106,7 +106,8 @@ export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   const pub = pubs.find((p) => p.id === want) || pubs[0];
   if (!pub) {
     const path = new URL(c.req.url).pathname;
-    if (!path.startsWith('/app/onboarding') && !path.startsWith('/app/settings/workspace')) return c.redirect('/app/onboarding');
+    // platform operators can use /app/admin without a publication of their own
+    if (!path.startsWith('/app/onboarding') && !path.startsWith('/app/settings/workspace') && !path.startsWith('/app/admin')) return c.redirect('/app/onboarding');
   } else {
     c.set('pub', pub);
     c.set('role', pub.role);

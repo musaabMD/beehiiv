@@ -14,6 +14,7 @@ import { Kpi, fmtPct, fmtNum, fmtUsd, DASH_STYLE, TrendChart } from './dashboard
 import { registerAnalytics } from './dashboard/analytics';
 import { registerExplore } from './dashboard/explore';
 import { ago, fmtDate, DAY, stripTags } from '../lib/util';
+import { planStatus, maybeWarnUsage } from '../lib/plans';
 
 const dash = new Hono<AppEnv>();
 const site = new Hono<AppEnv>();
@@ -58,6 +59,8 @@ dash.get('/', async (c) => {
     runReport(c.env, pub.id, { metric: 'subscribers', group: 'time', range: r }), runReport(c.env, pub.id, { metric: 'unsubscribes', group: 'time', range: r }),
     postPerformance(c.env, pub.id, { limit: 5 }), recentActivity(c.env, pub.id, 10), checklist(c),
   ]);
+  const plan = await planStatus(c.env, pub.workspace_id).catch(() => null);
+  if (plan) await maybeWarnUsage(c.env, plan).catch(() => {});
   const drafts = await all<any>(c.env, `SELECT id, title, status, scheduled_at, updated_at FROM posts WHERE pub_id = ? AND status IN ('draft','scheduled') ORDER BY updated_at DESC LIMIT 4`, pub.id);
   let running = subs.activeAtStart;
   const total = growth.rows.map((x, i) => (running += x.value - (unsubs.rows[i]?.value || 0)));
@@ -66,6 +69,12 @@ dash.get('/', async (c) => {
   const doneCount = steps.filter((s) => s.done).length;
   return c.html(
     <DashLayout c={c} title="Home" section="home" head={<style>{raw(DASH_STYLE)}</style>} actions={<LinkBtn href="/app/posts/new" kind="primary">New post</LinkBtn>}>
+      {plan && plan.warnings.length > 0 && (
+        <div class={`callout ${plan.suspended || plan.overSubscribers || plan.emailsLeft === 0 ? 'danger' : 'warn'}`} data-plan-banner>
+          {plan.warnings.map((w) => <div>{w}</div>)}
+          {!plan.suspended && <div style="margin-top:6px"><a href="/app/settings/plan"><strong>See plans &amp; usage →</strong></a></div>}
+        </div>
+      )}
       <div class="hello">
         <div>
           <h2>{greet}, {(user.name || user.email).split(' ')[0]} 👋</h2>

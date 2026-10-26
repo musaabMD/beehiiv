@@ -40,6 +40,8 @@ export interface Env {
   BOUNCE_ADDRESS?: string;      // shown in Settings → Email; default bounces@<MAIL_FROM domain>
   FBL_ADDRESS?: string;         // address you register with mailbox-provider FBLs; default fbl@<MAIL_FROM domain>
   MAIL_FROM_WARMUP?: string;    // 'off' disables warm-up caps for the default MAIL_FROM domain
+  // Hosted service (Lnkbase Newsletter)
+  SHARED_FROM_DOMAIN?: string;  // publications without a verified domain send from <slug>@<this>; default MAIL_FROM's domain
 }
 
 export type Role = 'owner' | 'admin' | 'member' | 'contributor';

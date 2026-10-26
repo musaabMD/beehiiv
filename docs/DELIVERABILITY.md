@@ -118,6 +118,17 @@ Register your sending domain with each provider's complaint program and use `fbl
 
 Complaints Cloudflare receives itself arrive as `message.complained` events (option 1). Every complaint becomes a publication suppression and is linked to the send through the `X-OpenHive-Campaign` header.
 
+## Multi-tenant safety (hosted service)
+
+On a shared sender one bad list can hurt every newsletter, so OpenHive enforces (constants in `src/lib/plans.ts` `LIMITS`):
+
+- **Shared sender** — publications without a verified custom domain send from `<slug>@SHARED_FROM_DOMAIN` with Reply-To set to the publication's reply-to or the owner's email. Verified domains send from their own address.
+- **New-account ramp** — a workspace's first 3 days are capped at 200 marketing emails per rolling 24 hours; larger sends trickle out automatically.
+- **First large campaign review** — a workspace's first campaign to more than 1,000 recipients waits in Platform admin → Campaign review until a superadmin approves it (owner notified both ways).
+- **Campaign auto-pause** — after 200 attempted deliveries, a campaign pauses if hard bounces exceed 2% or complaints exceed 0.08%; owner and operators are emailed, and the post shows why.
+- **Account suspension** — over the last 30 days, bounces above 5% or complaints above 0.3% suspend sending pending review (signups and the website keep working).
+- **List-quality gate** — imports on Free/new accounts require a consent checkbox, and any import where more than 10% of rows are invalid or disposable is rejected.
+
 ## Warmup
 
 New sending domains get a daily cap that doubles each day: 200 → 400 → 800 … and is lifted after day 12. Sends that hit the cap pause and resume automatically the next hour.

@@ -9,6 +9,8 @@ import { emit } from '../../lib/events';
 import { kick } from '../../lib/jobs';
 import { ruleCatalog } from '../../lib/catalog';
 import { countRecipients, publishPost, sendTest, buildEmail, postContent, type SendOptions } from '../../lib/sender';
+import { checkSend, SendBlockedError, LIMITS } from '../../lib/plans';
+import { rampRemaining, needsApproval } from '../../lib/safety';
 import { parseDoc, renderDoc, GMAIL_CLIP_BYTES, htmlToText, parseEmbed, resolveBlueskyDid } from '../../lib/render';
 import { siteUrl, senderFor } from '../../lib/pub';
 import { validateEmail } from '../../lib/guard';
@@ -513,7 +515,19 @@ app.post('/:id/count', async (c) => {
   const pub = c.get('pub');
   const b = await c.req.json<any>().catch(() => ({}));
   const o: SendOptions = { audience: ['free', 'premium'].includes(b.audience) ? b.audience : 'all', tier_ids: arr(b.tier_ids), list_id: str(b.list_id) || null, segment_ids: arr(b.segment_ids), exclude_segment_ids: arr(b.exclude_segment_ids) };
-  return c.json({ count: await countRecipients(c.env, pub.id, o) });
+  const count = await countRecipients(c.env, pub.id, o);
+  // plan check for the send dialog: blocked sends show the reason + upgrade link before anything starts
+  const gate = await checkSend(c.env, pub, count, { dryRun: true });
+  const ramp = gate.ok ? await rampRemaining(c.env, pub.workspace_id) : { remaining: Infinity };
+  const approval = gate.ok && (await needsApproval(c.env, pub, count));
+  return c.json({
+    count,
+    plan: {
+      ok: gate.ok, code: gate.code ?? null, reason: gate.reason ?? null, upgrade_url: gate.upgradeUrl,
+      notice: approval ? `This is your first campaign to more than ${LIMITS.APPROVAL_RECIPIENTS.toLocaleString()} readers, so it gets a one-time review before it goes out (usually within a few hours).`
+        : ramp.remaining !== Infinity && count > ramp.remaining ? `New accounts send up to ${LIMITS.NEW_ACCOUNT_DAILY_CAP} emails a day for their first ${LIMITS.NEW_ACCOUNT_DAYS} days — ${ramp.remaining.toLocaleString()} go out now and the rest follow automatically.` : null,
+    },
+  });
 });
 
 // ───────── Send flow ─────────
@@ -554,7 +568,12 @@ app.post('/:id/publish', async (c) => {
     return c.json({ ok: true, message: `Scheduled for ${fmtDateTime(at, pub.timezone)}`, redirect: `/app/posts?status=scheduled` });
   }
   await snapshot(c.env, post, c.get('user').id);
-  const sendId = await publishPost(c.env, pub, post);
+  let sendId: string | null;
+  try { sendId = await publishPost(c.env, pub, post); }
+  catch (e) {
+    if (e instanceof SendBlockedError) return c.json({ error: e.message, code: e.code, upgrade_url: e.upgradeUrl }, 402);
+    throw e;
+  }
   kick(c.env, c.executionCtx);
   await audit(c, 'post.publish', post.id, { send_id: sendId });
   return c.json({ ok: true, message: post.platform === 'web' ? 'Published to your website' : 'Sending started', redirect: `/app/posts/${post.id}` });

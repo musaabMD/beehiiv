@@ -78,7 +78,15 @@ npx wrangler secret put STRIPE_SECRET_KEY
 npx wrangler secret put STRIPE_WEBHOOK_SECRET
 ```
 
-In the Stripe dashboard add a webhook endpoint `https://YOUR_APP/hooks/stripe` for `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted` and `invoice.payment_failed`. Creators connect their own Stripe account under Settings → Payments (Stripe Connect) so payouts go straight to them.
+In the Stripe dashboard add a webhook endpoint `https://YOUR_APP/hooks/stripe` for `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed` and `invoice.paid`. Creators connect their own Stripe account under Settings → Payments (Stripe Connect) so payouts go straight to them.
+
+### Hosted service plans (Lnkbase Newsletter)
+
+The same key also bills workspaces for their **platform plan** (Free / Starter / Pro / Scale — Settings → Plan & usage) as Stripe subscriptions on your own account (no Connect). Products and prices are created automatically on the first checkout (or paste existing price ids in Platform admin → Plans). Enable the **customer portal** in Stripe (Settings → Billing → Customer portal) so "Manage billing" works. Without a key, plan upgrades use a simulated checkout.
+
+- Plans and limits: `DEFAULT_PLANS` / `LIMITS` in `src/lib/plans.ts`, seeded into `platform_plans` (migration 0022) and editable in **Platform admin** (`/app/admin`, `SUPERADMIN_EMAILS` only).
+- `SHARED_FROM_DOMAIN` (var, e.g. `news.example.com`): publications without a verified domain send from `<slug>@SHARED_FROM_DOMAIN`. Enable it for Email Sending (`npx wrangler email sending enable news.example.com`), add DMARC, and route `*@` replies/bounces as in DELIVERABILITY.md. Defaults to the `MAIL_FROM` domain.
+- The pricing page reads the catalog with `listPlans(env)`.
 
 ## 10. AI features (optional)
 

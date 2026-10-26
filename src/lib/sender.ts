@@ -12,7 +12,10 @@ import { sendMail, recordBounce, classifyBounce } from './email';
 import { compile, recalcSegment, segmentIdsFor, type RuleGroup } from './segments';
 import { settings, siteUrl, senderFor, getPub } from './pub';
 import { subToken, unsubscribeUrl, preferencesUrl, getTags } from './subscribers';
-import { id, now, sha256, parseJSON, mailboxProvider, domainOf, HOUR, DAY, MIN, fmtDate } from './util';
+import { id, now, sha256, parseJSON, mailboxProvider, domainOf, HOUR, DAY, MIN, fmtDate, esc } from './util';
+import { assertCanSend, SendBlockedError, showsBranding, emailBrandingHtml, getWorkspace, ownerOf } from './plans';
+import { needsApproval, requestApproval, checkCampaign, rampRemaining, workspaceSuspended } from './safety';
+import { replyToFor } from './sharedsender';
 
 export interface SendOptions {
   segment_ids?: string[];
@@ -45,6 +48,11 @@ export async function audienceGroup(env: Env, pubId: string, o: SendOptions): Pr
   if (o.segment_ids?.length) rules.push({ op: 'or', rules: o.segment_ids.map((s) => ({ field: 'segment', cmp: 'in', value: s })) });
   for (const s of o.exclude_segment_ids || []) rules.push({ field: 'segment', cmp: 'not_in', value: s });
   return { op: 'and', rules };
+}
+
+/** Recipients a post would go to with its saved targeting. */
+export async function countPostRecipients(env: Env, pub: Publication, post: Post): Promise<number> {
+  return countRecipients(env, pub.id, { segment_ids: parseJSON(post.segment_ids, []), exclude_segment_ids: parseJSON(post.exclude_segment_ids, []), list_id: post.list_id, audience: (post.audience as any) || 'all', tier_ids: parseJSON(post.tier_ids, []) });
 }
 
 export async function countRecipients(env: Env, pubId: string, o: SendOptions): Promise<number> {
@@ -100,7 +108,10 @@ export async function buildEmail(env: Env, pub: Publication, c: Content, sub: Su
   const tok = sub ? await subToken(env, sub.id) : 'preview';
   const unsub = unsubscribeUrl(env, tok);
   const webUrl = c.slug ? `${surl}/p/${c.slug}` : null;
+  // Free plan: small "Sent with Lnkbase Newsletter" line in the footer (removed on paid plans)
+  const branding = pub.workspace_id && (await showsBranding(env, pub.workspace_id)) ? emailBrandingHtml(pub.slug, style.muted) : undefined;
   let html = emailLayout(r.html, {
+    extraFooter: branding,
     pub, style, title: c.hideHeader ? undefined : c.title, subtitle: c.subtitle, byline: c.byline ? `${c.byline} · ${fmtDate(Date.now(), { dateStyle: 'long' }, pub.timezone)}` : undefined,
     preheader: c.preview_text ? applyMerge(c.preview_text, mergeVars(pub, sub, surl)) : undefined, webUrl, unsubscribeUrl: unsub, preferencesUrl: preferencesUrl(env, tok), thumbnail: c.thumbnail, hideHeader: c.hideHeader,
   });
@@ -144,10 +155,19 @@ export async function startSend(env: Env, pub: Publication, post: Post, override
   JSON.stringify(parseDoc(post.content)).replace(/"segment_ids":\[([^\]]*)\]/g, (_m, ids: string) => { ids.replace(/"([^"]+)"/g, (_x, sid: string) => (segIds.add(sid), '')); return ''; });
   for (const sid of segIds) await recalcSegment(env, pub.id, sid);
   const total = o.only_subscriber_ids ? o.only_subscriber_ids.length : await countRecipients(env, pub.id, o);
+  // Plan limits (subscriber cap, monthly email allowance, suspension): blocked before anything is queued.
+  await assertCanSend(env, pub, total);
   o.phase = o.ab ? 'test' : 'main';
   const sendId = id();
-  await insert(env, 'sends', { id: sendId, pub_id: pub.id, post_id: post.id, kind: 'post', subject: o.subject || post.email_subject || post.title, status: o.ab ? 'testing' : 'sending', total, options: JSON.stringify(o), created_at: now(), started_at: now() });
-  await enqueue(env, 'send.batch', { send_id: sendId });
+  const subject = o.subject || post.email_subject || post.title;
+  // A not-yet-trusted workspace's first campaign above the approval threshold waits for a superadmin.
+  const hold = await needsApproval(env, pub, total);
+  await insert(env, 'sends', {
+    id: sendId, pub_id: pub.id, post_id: post.id, kind: 'post', subject, status: hold ? 'pending_approval' : o.ab ? 'testing' : 'sending', total, options: JSON.stringify(o), created_at: now(), started_at: now(),
+    status_reason: hold ? 'Waiting for a one-time review of your first large campaign' : null,
+  });
+  if (hold) await requestApproval(env, pub, { id: sendId, subject, total, post_id: post.id });
+  else await enqueue(env, 'send.batch', { send_id: sendId });
   return sendId;
 }
 
@@ -158,15 +178,25 @@ registerJob('send.batch', async (env, p) => {
   const post = send.post_id ? await one<Post>(env, 'SELECT * FROM posts WHERE id = ?', send.post_id) : null;
   if (!post) { await run(env, `UPDATE sends SET status = 'failed' WHERE id = ?`, send.id); return; }
   const o: SendOptions = parseJSON(send.options, {});
+  // account suspended (pending review) → pause what's in flight
+  const suspended = await workspaceSuspended(env, pub.workspace_id);
+  if (suspended) { await run(env, `UPDATE sends SET status = 'paused', status_reason = ? WHERE id = ? AND status IN ('sending','testing')`, suspended, send.id); return; }
   const from = await senderFor(env, pub, 'newsletter', post.sender_id);
   const warm = await warmupAllowance(env, from.email);
   if (!warm.ok) {
     await logError(env, 'send.warmup', new Error(warm.reason), pub.id);
     return { retryInMs: HOUR };
   }
+  // new accounts: small daily cap for their first days — throttle (resumes as the rolling 24h window frees up)
+  const ramp = await rampRemaining(env, pub.workspace_id);
+  if (ramp.remaining <= 0) {
+    await run(env, 'UPDATE sends SET status_reason = ? WHERE id = ?', ramp.reason ?? null, send.id);
+    return { retryInMs: HOUR };
+  }
+  if (send.status_reason) await run(env, 'UPDATE sends SET status_reason = NULL WHERE id = ?', send.id);
   const cfg = settings(pub);
   const rate = Math.max(BATCH, Number(cfg.send_rate_per_minute) || Number((env as any).SEND_RATE_PER_MINUTE) || DEFAULT_RATE);
-  const limit = Math.min(BATCH, warm.remaining === Infinity ? BATCH : warm.remaining);
+  const limit = Math.min(BATCH, warm.remaining === Infinity ? BATCH : warm.remaining, ramp.remaining);
 
   let recipients: Subscriber[];
   if (o.only_subscriber_ids) {
@@ -217,6 +247,8 @@ registerJob('send.batch', async (env, p) => {
   }
   const exhausted = processed < limit && (recipients.length < limit * 3 || o.only_subscriber_ids);
   await run(env, 'UPDATE sends SET cursor = ?, sent = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'sent\',\'deferred\')), failed = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'failed\',\'bounced\',\'suppressed\')) WHERE id = ?', last, send.id, send.id, send.id);
+  // campaign safety: hard bounces / complaints above the limits pause the send and alert the owner
+  if (await checkCampaign(env, send)) return;
   if (!exhausted && recipients.length) {
     await enqueue(env, 'send.batch', { send_id: send.id }, now() + Math.floor((60_000 * BATCH) / rate));
     return;
@@ -263,7 +295,7 @@ export async function deliver(env: Env, pub: Publication, sendId: string, sub: S
   await insert(env, 'deliveries', { id: did, send_id: sendId, pub_id: pub.id, subscriber_id: sub.id, email: sub.email, variant: o.variant ?? null, status: 'queued', attempts: 0, provider: mailboxProvider(sub.email), created_at: now() });
   const built = await buildEmail(env, pub, content, sub, { deliveryId: did, post: o.post, cohort: o.cohort });
   const subj = applyMerge(subject, mergeVars(pub, sub, siteUrl(env, pub)), false);
-  const res = await sendMail(env, { to: sub.email, subject: subj, html: built.html, text: built.text, from, replyTo: pub.reply_to, pub, kind: o.kind || 'marketing', unsubscribeUrl: built.unsubscribeUrl, campaignId: sendId, forceReal: o.forceReal });
+  const res = await sendMail(env, { to: sub.email, subject: subj, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, kind: o.kind || 'marketing', unsubscribeUrl: built.unsubscribeUrl, campaignId: sendId, forceReal: o.forceReal });
   await applyResult(env, pub, did, sub, res);
   return { deliveryId: did, result: res };
 }
@@ -312,7 +344,7 @@ registerPeriodic('deliveries.retry', 5 * MIN, async (env) => {
       const content: Content = { title: c.title || '', subtitle: c.subtitle || '', doc: c.doc || { blocks: [] }, preview_text: c.preview_text || '', style: c.style ? JSON.stringify(c.style) : null, hideHeader: !c.title };
       const built = await buildEmail(env, pub, content, sub, { deliveryId: d.id });
       const from = await senderFor(env, pub, 'automations', c.sender_id);
-      const res = await sendMail(env, { to: sub.email, subject: d.send_subject, html: built.html, text: built.text, from, replyTo: pub.reply_to, pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
+      const res = await sendMail(env, { to: sub.email, subject: d.send_subject, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
       await applyResult(env, pub, d.id, sub, res);
       continue;
     }
@@ -320,7 +352,7 @@ registerPeriodic('deliveries.retry', 5 * MIN, async (env) => {
     const content = await postContent(env, post);
     const built = await buildEmail(env, pub, content, sub, { deliveryId: d.id, post });
     const from = await senderFor(env, pub, 'newsletter', post.sender_id);
-    const res = await sendMail(env, { to: sub.email, subject: d.send_subject, html: built.html, text: built.text, from, replyTo: pub.reply_to, pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
+    const res = await sendMail(env, { to: sub.email, subject: d.send_subject, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
     await applyResult(env, pub, d.id, sub, res);
   }
 });
@@ -331,17 +363,44 @@ registerPeriodic('posts.scheduled', MIN - 5000, async (env) => {
   for (const post of due) {
     const pub = await getPub(env, post.pub_id);
     if (!pub) continue;
-    await publishPost(env, pub, post);
+    try {
+      await publishPost(env, pub, post);
+    } catch (e) {
+      if (!(e instanceof SendBlockedError)) throw e;
+      // over a plan limit: back to draft (so it doesn't retry every minute) and tell the owner
+      await run(env, `UPDATE posts SET status = 'draft', scheduled_at = NULL, updated_at = ? WHERE id = ? AND status = 'scheduled'`, now(), post.id);
+      await notifyBlocked(env, pub, post, e);
+    }
   }
 });
+
+/** Tell the workspace owner an automatic send (scheduled post, RSS-to-send) was blocked by a plan limit. */
+export async function notifyBlocked(env: Env, pub: Publication, post: Pick<Post, 'id' | 'title'>, e: SendBlockedError) {
+  const ws = await getWorkspace(env, pub.workspace_id);
+  const owner = ws ? await ownerOf(env, ws) : null;
+  if (!owner) return;
+  const { sendTransactional, button } = await import('./email');
+  await sendTransactional(env, owner.email, `"${post.title}" wasn't sent`, `<p>Your post <strong>${esc(post.title)}</strong> (${esc(pub.name)}) wasn't sent automatically:</p><p>${esc(e.message)}</p><p>It's saved as a draft — send it again once you've upgraded.</p>${button('Upgrade your plan', e.upgradeUrl)}`);
+}
 
 /** Publish now: marks published (web) and starts the email send when platform includes email. */
 export async function publishPost(env: Env, pub: Publication, post: Post): Promise<string | null> {
   const t = now();
+  // Plan limits are checked before the post is published, so a blocked send leaves the post as it was.
+  // Throws SendBlockedError (callers show the reason + upgrade link).
+  if (post.platform !== 'web') await assertCanSend(env, pub, await countPostRecipients(env, pub, post));
   const claimed = await run(env, `UPDATE posts SET status = 'published', published_at = COALESCE(published_at, ?), updated_at = ? WHERE id = ? AND status IN ('draft','scheduled')`, t, t, post.id);
   if (!claimed.meta.changes) return null;
   let sendId: string | null = null;
-  if (post.platform !== 'web') sendId = await startSend(env, pub, { ...post, status: 'published' });
+  if (post.platform !== 'web') {
+    try {
+      sendId = await startSend(env, pub, { ...post, status: 'published' });
+    } catch (e) {
+      // lost a race with another send for the last of the allowance: undo the publish
+      await run(env, `UPDATE posts SET status = ?, published_at = ?, updated_at = ? WHERE id = ?`, post.status, post.published_at, now(), post.id);
+      throw e;
+    }
+  }
   await emit(env, { pubId: pub.id, type: 'post.published', refId: post.id, data: { post_id: post.id, title: post.title, slug: post.slug }, activity: false });
   return sendId;
 }

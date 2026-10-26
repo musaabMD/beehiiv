@@ -82,6 +82,12 @@ app.get('/:id', async (c) => {
         <LinkBtn href={`/app/posts/${pid}/edit`}>Edit post</LinkBtn>
       </>}>
       <p class="muted"><Status s={post.status} /> {post.published_at ? `Published ${fmtDateTime(post.published_at, pub.timezone)}` : ''} {sends.map((s) => <span> · <Status s={s.status} /> {s.subject} ({num(s.sent)}/{num(s.total)})</span>)}</p>
+      {sends.filter((s) => s.status_reason && ['paused', 'pending_approval', 'rejected', 'sending'].includes(s.status)).map((s) => (
+        <div class={`callout ${s.status === 'paused' || s.status === 'rejected' ? 'danger' : ''}`} data-send-reason={s.status}>
+          <strong>{s.status === 'paused' ? 'Paused for safety: ' : s.status === 'pending_approval' ? 'Waiting for review: ' : s.status === 'rejected' ? 'Not sent: ' : 'Sending slowly: '}</strong>{s.status_reason}
+          {s.status === 'paused' ? ' Our team has been notified and will review it — clean the list and reply to the email we sent you.' : ''}
+        </div>
+      ))}
       {post.platform === 'web' ? null : (
         <Stats>
           <Stat label="Recipients" value={num(totals.recipients || 0)} sub={`${num(delivered)} delivered (${rate(delivered, totals.recipients)})`} />
@@ -187,7 +193,12 @@ app.post('/:id/resend', async (c) => {
   const segId = id();
   await insert(c.env, 'segments', { id: segId, pub_id: pub.id, name: `Non-openers: ${(post.title || 'Untitled').slice(0, 60)} (${new Date().toISOString().slice(0, 10)})`, description: 'Created automatically for a resend', kind: 'static', rules: '{"op":"and","rules":[]}', created_at: now() });
   await run(c.env, `INSERT OR IGNORE INTO segment_members (segment_id, subscriber_id) SELECT DISTINCT ?, d.subscriber_id FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND d.status = 'sent' AND d.subscriber_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM deliveries d2 JOIN sends s2 ON s2.id = d2.send_id WHERE s2.post_id = ? AND d2.subscriber_id = d.subscriber_id AND d2.opened_at IS NOT NULL)`, segId, post.id, post.id);
-  await startSend(c.env, pub, post, { segment_ids: [segId], exclude_segment_ids: [], list_id: null, audience: 'all', tier_ids: [], ab: null, cohorts: null, subject: str(f.subject, 200) || null });
+  try { await startSend(c.env, pub, post, { segment_ids: [segId], exclude_segment_ids: [], list_id: null, audience: 'all', tier_ids: [], ab: null, cohorts: null, subject: str(f.subject, 200) || null });
+  } catch (e) {
+    const { SendBlockedError } = await import('../../lib/plans');
+    if (e instanceof SendBlockedError) return back(c, `/app/posts/${post.id}`, e.message, 'err');
+    throw e;
+  }
   kick(c.env, c.executionCtx);
   await audit(c, 'post.resend', post.id);
   return back(c, `/app/posts/${post.id}`, 'Resend to non-openers started');

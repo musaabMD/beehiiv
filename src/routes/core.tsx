@@ -8,6 +8,7 @@ import { recordOpen, recordClick } from '../lib/tracking';
 import { verifySubToken, unsubscribe, joinLists, leaveLists, getSubscriber } from '../lib/subscribers';
 import { markPaid, verifyStripeSignature } from '../lib/payments';
 import { processBounceHook, processFblHook } from '../lib/inbound';
+import { handlePlatformStripeEvent } from '../lib/platformbilling';
 import { emit } from '../lib/events';
 import { siteUrl } from '../lib/pub';
 import { PlainLayout } from '../ui/layout';
@@ -168,6 +169,8 @@ root.post('/hooks/stripe', async (c) => {
   if (!(await verifyStripeSignature(c.env, payload, c.req.header('stripe-signature')))) return c.text('bad signature', 400);
   const evt = JSON.parse(payload);
   const obj = evt.data?.object || {};
+  // the hosted service's own plan billing (platform Stripe account) — see lib/platformbilling.ts
+  if (await handlePlatformStripeEvent(c.env, evt)) return c.json({ received: true });
   switch (evt.type) {
     case 'checkout.session.completed': {
       const orderId = obj.metadata?.order_id || obj.client_reference_id;

@@ -159,6 +159,17 @@ export async function processRun(env: Env, runId: string): Promise<void> {
     try {
       switch (step.type) {
         case 'send_email': {
+          // Plan limits / suspension / new-account ramp: pause this step (retry later) with a logged reason — never drop it.
+          const { checkSend } = await import('./plans');
+          const { rampRemaining } = await import('./safety');
+          const gate = await checkSend(env, pub, 1, { cachedMs: 60_000 });
+          const ramp = gate.ok ? await rampRemaining(env, pub.workspace_id) : { remaining: Infinity, reason: undefined as string | undefined };
+          if (!gate.ok || ramp.remaining <= 0) {
+            waitUntil = now() + 3 * HOUR;
+            next = path;
+            result = 'paused: ' + (gate.reason || ramp.reason || 'sending limit reached');
+            break;
+          }
           const sendId = await stepSend(env, pub.id, a.id, step);
           const from = await senderFor(env, pub, 'automations', c.sender_id);
           const content: Content = { title: c.title || '', subtitle: c.subtitle || '', doc: c.doc || { blocks: [] }, preview_text: c.preview_text || '', style: c.style ? JSON.stringify(c.style) : null, hideHeader: !c.title };
