@@ -136,7 +136,7 @@ app.get('/:id/edit', async (c) => {
   const statusLabel = post.status === 'scheduled' ? `Scheduled · ${fmtDateTime(post.scheduled_at, pub.timezone)}` : post.status;
   const primaryLabel = post.status === 'published' ? 'Update' : post.status === 'scheduled' ? 'Scheduled' : post.platform === 'web' ? 'Publish' : 'Send';
   return c.html(
-    <DashLayout c={c} title={post.title || 'Untitled post'} section="posts" sub="posts" bare styles={['/static/editor.css']} scripts={['/static/editor.js', '/static/posts-edit.js']}>
+    <DashLayout c={c} title={post.title || 'Untitled post'} section="posts" sub="posts" bare styles={['/static/editor.css']} scripts={['/static/editor.js', '/static/posts-edit.js', '/static/subject-helper.js']}>
       <div class="pe" id="pe">
         <header class="pe-top">
           <a href="/app/posts" class="btn btn-ghost btn-sm" aria-label="Back to posts">← Posts</a>

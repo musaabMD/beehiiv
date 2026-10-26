@@ -228,3 +228,42 @@ input[type=range].ohe-mini{padding:0;border:0;background:none;width:120px}
 .ohe-gal-cap:focus{border-color:#f59e0b}
 .ohe-gal-cap:empty::before{content:attr(data-ph);color:#9ca3af}
 .ohe-find-hit{outline:2px solid #fde047!important;background:#fefce8!important}
+/* synced snippets */
+.ohe-block[data-type=snippet]>.ohe-body{outline:1.5px dashed #a78bfa;outline-offset:4px;border-radius:6px}
+.ohe-snip-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 8px;margin:0 0 8px;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;font:12.5px/1.3 Inter,-apple-system,sans-serif;color:#4c1d95}
+.ohe-snip-bar .ohe-hint{margin:0;color:#7c3aed;flex:1;min-width:160px}
+.ohe-snip-bar a.ohe-mini-btn{display:inline-flex;align-items:center;text-decoration:none}
+.ohe-snip-tag{font-weight:700;background:#7c3aed;color:#fff;border-radius:999px;padding:1px 8px;font-size:11px}
+.ohe-snip-list{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto;margin:0 0 12px}
+.ohe-snip-i,.ohe-snip-how label{display:flex;gap:10px;align-items:flex-start;padding:9px 11px;border:1px solid #e5e7eb;border-radius:8px;cursor:pointer}
+.ohe-snip-i:has(input:checked),.ohe-snip-how label:has(input:checked){border-color:#7c3aed;background:#faf5ff}
+.ohe-snip-i span,.ohe-snip-how span{display:flex;flex-direction:column;gap:2px}.ohe-snip-i small,.ohe-snip-how small{color:#6b7280;font-size:12.5px}
+.ohe-snip-how{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+/* coded email (html_document) */
+.ohe-doc{border:1px solid #1e293b;border-radius:10px;overflow:hidden;background:#0f172a}
+.ohe-doc .ohe-code-bar{gap:8px;justify-content:flex-start;flex-wrap:wrap}
+.ohe-doc-ta{min-height:420px;max-height:70vh;overflow:auto;white-space:pre;resize:vertical}
+.ohe-doc-ta.hide{display:none}
+.ohe-doc-frame{display:block;width:100%;height:720px;border:0;background:#fff}
+/* subject line helper (post editor → Email tab) */
+.sh{border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:12px;margin:0 0 14px;background:var(--surface,#fff);font-size:13px}
+.sh-head{display:flex;gap:12px;align-items:center}
+.sh-ring{position:relative;width:46px;height:46px;flex:none}.sh-ring svg{width:46px;height:46px;transform:rotate(-90deg)}
+.sh-ring circle{fill:none;stroke-width:3.5}.sh-ring-bg{stroke:#e5e7eb}.sh-ring-fg{stroke:#9ca3af;stroke-linecap:round}
+.sh[data-grade=great] .sh-ring-fg{stroke:#16a34a}.sh[data-grade=good] .sh-ring-fg{stroke:#65a30d}.sh[data-grade=fair] .sh-ring-fg{stroke:#d97706}.sh[data-grade=poor] .sh-ring-fg{stroke:#dc2626}
+.sh-num{position:absolute;inset:0;display:grid;place-items:center;font-size:14px}
+.sh-sum{display:flex;flex-direction:column;gap:1px}.sh-grade{font-weight:600;text-transform:capitalize}
+.sh[data-grade=great] .sh-grade{color:#16a34a}.sh[data-grade=good] .sh-grade{color:#65a30d}.sh[data-grade=fair] .sh-grade{color:#d97706}.sh[data-grade=poor] .sh-grade{color:#dc2626}
+.sh-checks{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:5px}
+.sh-c{display:flex;gap:8px;align-items:flex-start;line-height:1.35}.sh-c i{flex:none;width:17px;height:17px;border-radius:50%;display:grid;place-items:center;font:700 10px/1 Inter,sans-serif;font-style:normal;margin-top:1px}
+.sh-good i{background:#dcfce7;color:#15803d}.sh-warn i{background:#fef3c7;color:#b45309}.sh-bad i{background:#fee2e2;color:#b91c1c}
+.sh-c b{font-weight:600}
+.sh-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.sh-note{margin:8px 0 0;padding:6px 8px;border-radius:6px;background:#fffbeb;color:#92400e}
+.sh-sugs,.sh-tops{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.sh-sugs li,.sh-tops li{display:flex;gap:8px;align-items:center;padding:6px 8px;border:1px solid var(--border,#e5e7eb);border-radius:8px}
+.sh-st{flex:1;display:flex;flex-direction:column;gap:2px;word-break:break-word}.sh-st small{font-size:11.5px}
+.sh-sc{flex:none;min-width:30px;text-align:center;font-weight:700;border-radius:999px;padding:2px 6px;font-size:11.5px;background:#f3f4f6}
+.sh-sc-great{background:#dcfce7;color:#15803d}.sh-sc-good{background:#ecfccb;color:#4d7c0f}.sh-sc-fair{background:#fef3c7;color:#b45309}
+.sh-tops{counter-reset:t}.sh-or{font-weight:700;color:#15803d;font-size:12px}
+.sh-top{margin-top:8px}

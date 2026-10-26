@@ -12,7 +12,9 @@ import { availableTemplates, templateByKey, templateTrigger, outline } from '../
 import { normalizeAb } from '../../lib/sender';
 import { normalizeTiming } from '../../lib/sendtime';
 import { publishPost, sendTest, buildEmail, postContent } from '../../lib/sender';
-import { renderDoc, parseDoc, styleFor, GMAIL_CLIP_BYTES, type Block } from '../../lib/render';
+import { renderDoc, parseDoc, styleFor, GMAIL_CLIP_BYTES, sanitizeEmailDocument, ensureUnsubscribe, hasUnsubscribeLink, type Block } from '../../lib/render';
+import { recommendProducts } from '../../lib/recommend';
+import { scoreSubject } from '../posts/shared';
 import { emit } from '../../lib/events';
 import { WEBHOOK_VERSIONS, LATEST_WEBHOOK_VERSION, isWebhookVersion, deliveryAttempts } from '../../lib/webhooks';
 import { siteUrl } from '../../lib/pub';
@@ -698,6 +700,61 @@ route('GET', '/templates/:id', 'Templates', 'Get a template with content and sty
   if (!t) throw new NotFound('Template not found.');
   return c.json({ data: { id: t.id, name: t.name, kind: t.kind, description: t.description, content: parseDoc(t.content), style: parseJSON(t.style, {}), library: !t.pub_id, updated_at: iso(t.updated_at) } });
 });
+
+route('POST', '/templates/coded', 'Templates', 'Create a custom-coded template from a full HTML email (sanitized; {{unsubscribe_url}} added when missing)', async (c, pub) => {
+  const b = await body(c);
+  const html = String(b.html || '');
+  if (!html.trim()) throw new BadRequest('html is required.');
+  const clean = sanitizeEmailDocument(html.slice(0, 400_000));
+  const added = !hasUnsubscribeLink(clean);
+  const tid = id();
+  await insert(c.env, 'templates', { id: tid, pub_id: pub.id, name: String(b.name || 'Coded template').slice(0, 120), kind: 'post', description: String(b.description || '').slice(0, 500), content: JSON.stringify({ blocks: [{ id: id(8), type: 'html_document', data: { html: ensureUnsubscribe(clean) } }] }), style: '{}', category: 'Coded', created_at: now(), updated_at: now() });
+  return c.json({ data: { id: tid, name: String(b.name || 'Coded template').slice(0, 120), kind: 'post', coded: true, unsubscribe_added: added } }, 201);
+}, { body: { name: 'string', description: 'string', html: 'string (full HTML document or fragment; merge tags + {{unsubscribe_url}}, {{preferences_url}}, {{web_url}})' } });
+
+// ───────── snippets (reusable content blocks) ─────────
+const serSnippet = (s: any, withContent = false) => ({ id: s.id, name: s.name, description: s.description, ...(withContent ? { content: parseDoc(s.content) } : { blocks: parseDoc(s.content).blocks.length }), created_at: iso(s.created_at), updated_at: iso(s.updated_at), synced_block: { type: 'snippet', data: { snippet_id: s.id, name: s.name } } });
+const snippetBlocks = (b: any): Block[] => (Array.isArray(b.blocks) ? b.blocks : Array.isArray(b.content?.blocks) ? b.content.blocks : []).filter((x: any) => x && typeof x.type === 'string' && !['paywall', 'html_document'].includes(x.type)).slice(0, 200).map((x: any) => ({ id: id(8), type: x.type, data: x.data && typeof x.data === 'object' ? x.data : {} }));
+route('GET', '/snippets', 'Snippets', 'List reusable content snippets', async (c, pub) => c.json({ data: (await all<any>(c.env, 'SELECT * FROM snippets WHERE pub_id = ? ORDER BY updated_at DESC', pub.id)).map((s) => serSnippet(s)) }));
+route('GET', '/snippets/:id', 'Snippets', 'Get a snippet with its blocks. Insert `synced_block` into a post to keep it linked, or copy `content.blocks`', async (c, pub) => c.json({ data: serSnippet(await needRow(c, 'snippets', pub, 'Snippet'), true) }));
+route('POST', '/snippets', 'Snippets', 'Create a snippet from editor blocks', async (c, pub) => {
+  const b = await body(c);
+  if (!b.name) throw new BadRequest('name is required.');
+  const blocks = snippetBlocks(b);
+  if (!blocks.length) throw new BadRequest('blocks must contain at least one block.');
+  const sid = id();
+  await insert(c.env, 'snippets', { id: sid, pub_id: pub.id, name: String(b.name).slice(0, 120), description: String(b.description || '').slice(0, 500), content: JSON.stringify({ blocks }), created_at: now(), updated_at: now() });
+  return c.json({ data: serSnippet(await one(c.env, 'SELECT * FROM snippets WHERE id = ?', sid), true) }, 201);
+}, { body: { name: 'string', description: 'string', blocks: 'Block[] (editor document blocks)' } });
+route('PATCH', '/snippets/:id', 'Snippets', 'Update a snippet (synced copies everywhere pick up the change)', async (c, pub) => {
+  const s: any = await needRow(c, 'snippets', pub, 'Snippet');
+  const b = await body(c);
+  const patch: Record<string, unknown> = { updated_at: now() };
+  if (b.name !== undefined) patch.name = String(b.name).slice(0, 120);
+  if (b.description !== undefined) patch.description = String(b.description).slice(0, 500);
+  if (b.blocks || b.content) patch.content = JSON.stringify({ blocks: snippetBlocks(b).filter((x) => !(x.type === 'snippet' && x.data?.snippet_id === s.id)) });
+  await update(c.env, 'snippets', s.id, patch, pub.id);
+  return c.json({ data: serSnippet(await one(c.env, 'SELECT * FROM snippets WHERE id = ?', s.id), true) });
+}, { body: { name: 'string', description: 'string', blocks: 'Block[]' } });
+route('DELETE', '/snippets/:id', 'Snippets', 'Delete a snippet (synced references render nothing afterwards)', async (c, pub) => {
+  const s: any = await needRow(c, 'snippets', pub, 'Snippet');
+  await run(c.env, 'DELETE FROM snippets WHERE id = ? AND pub_id = ?', s.id, pub.id);
+  return c.json({ data: { id: s.id, deleted: true } });
+});
+
+// ───────── subject line check & product recommendations ─────────
+route('POST', '/subject-line/check', 'Posts', 'Score an email subject line (length, preview text, spam words, caps, emoji, personalization) with per-check advice', async (c) => {
+  const b = await body(c);
+  return c.json({ data: scoreSubject(String(b.subject || ''), String(b.preview_text || '')) });
+}, { body: { subject: 'string', preview_text: 'string' } });
+route('GET', '/products/recommendations', 'Commerce', 'Personalized product recommendations for a subscriber (what the recommended_products block would show)', async (c, pub) => {
+  const sid = c.req.query('subscriber_id');
+  const sub = sid ? await one<any>(c.env, 'SELECT id, email FROM subscribers WHERE id = ? AND pub_id = ?', sid, pub.id) : null;
+  if (sid && !sub) throw new NotFound('Subscriber not found.');
+  const tags = sub ? await getTags(c.env, sub.id) : [];
+  const recs = await recommendProducts(c.env, pub.id, sub, { limit: clamp(int(c.req.query('limit'), 3), 1, 6), tags });
+  return c.json({ data: recs.map((r) => ({ id: r.id, name: r.name, slug: r.slug, price_cents: r.price_cents, currency: r.currency, url: `${siteUrl(c.env, pub)}/shop/${r.slug}`, reason: r.reason, because: r.because || null, score: Math.round(r.score * 100) / 100 })) });
+}, { query: { subscriber_id: 'Subscriber id (omit for bestsellers)', limit: '1-6 (default 3)' } });
 
 // ───────── tiers & premium ─────────
 const serTier = (t: any) => ({ id: t.id, name: t.name, description: t.description, currency: t.currency, monthly_cents: t.monthly_cents, annual_cents: t.annual_cents, trial_days: t.trial_days, paid_trial_cents: t.paid_trial_cents, benefits: parseJSON(t.benefits, []), status: t.status, group_enabled: !!t.group_enabled, created_at: iso(t.created_at) });

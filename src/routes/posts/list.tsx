@@ -7,7 +7,8 @@ import { DashLayout } from '../../ui/layout';
 import { Card, Table, Status, Badge, Tabs, LinkBtn, Btn, Empty, Select, Input, back, Pager } from '../../ui/components';
 import { form, fmtDate, num, pct, parseJSON, qs, str, esc } from '../../lib/util';
 import { siteUrl } from '../../lib/pub';
-import { newPost, uniqueSlug } from './shared';
+import { newPost, uniqueSlug, scoreSubject, heuristicSubjects, topSubjects } from './shared';
+import { aiJSON, aiEnabled, AI_DISABLED_MSG } from '../../lib/ai';
 import { GalleryAssets, CategoryFilter, TemplateCard, UseTemplate, CATEGORIES } from './templates';
 
 const app = new Hono<AppEnv>();
@@ -155,6 +156,7 @@ app.get('/new', async (c) => {
   return c.html(
     <DashLayout c={c} title="New post" section="posts" sub="posts" crumbs={[['/app/posts', 'Posts']]} actions={<LinkBtn href="/app/posts/templates" kind="ghost">Manage templates</LinkBtn>}>
       <GalleryAssets />
+      <p class="muted" style="margin-top:0" data-template-count={tpls.length}>Start blank or pick one of <strong>{tpls.length} templates</strong>{tpls.some((t) => t.pub_id) ? ` (${tpls.filter((t) => t.pub_id).length} from your team)` : ''}. Need your own HTML? <a href="/app/posts/templates/coded/new">Create a coded template</a>.</p>
       <CategoryFilter items={tpls} target="#tg-new" />
       <div class="tg-grid" id="tg-new">
         <form method="post" action="/app/posts/new" class="card tg-card" style="margin:0">
@@ -189,6 +191,39 @@ app.post('/new', async (c) => {
   if (tpl) opts = { content: tid ? tpl.content : '{"blocks":[]}', style: '{}', template_id: tpl.id };
   const pid = await newPost(c.env, pub, c.get('user').id, opts);
   return c.redirect(`/app/posts/${pid}/edit`, 303);
+});
+
+// ───────── subject line helper (used by public/static/subject-helper.js in the post editor) ─────────
+app.post('/subject-helper/score', async (c) => {
+  const b = await c.req.json<any>().catch(() => ({}));
+  return c.json(scoreSubject(str(b.subject, 300), str(b.preview_text, 300)));
+});
+
+app.get('/subject-helper/top', async (c) => {
+  const r = await topSubjects(c.env, c.get('pub').id, 8);
+  return c.json({ average_open_rate: r.average_open_rate, sent: r.sent, top: r.top.map((t) => ({ id: t.id, subject: t.subject, open_rate: t.open_rate, recipients: t.recipients, published_at: t.published_at })) });
+});
+
+app.post('/subject-helper/suggest', async (c) => {
+  const pub = c.get('pub');
+  const b = await c.req.json<any>().catch(() => ({}));
+  const subject = str(b.subject, 300), preview = str(b.preview_text, 300), title = str(b.title, 300), text = str(b.text, 3000);
+  if (!subject && !title) return c.json({ error: 'Write a title or subject first' }, 400);
+  const top = await topSubjects(c.env, pub.id, 5, 1);
+  let list: Array<{ subject: string; why?: string }> = [];
+  let ai = false, message = '';
+  if (aiEnabled(c.env)) {
+    const examples = top.top.length ? `\nThis newsletter's best-performing past subject lines (by open rate):\n${top.top.map((t) => `- "${t.subject}" (${Math.round(t.open_rate * 100)}% opens)`).join('\n')}\nMatch their voice where it fits.` : '';
+    const r = await aiJSON<any>(c.env, `Newsletter: ${pub.name}\nPost title: ${title}\nCurrent subject: ${subject || '(none)'}\nPreview text: ${preview || '(none)'}\nPost excerpt: ${text.slice(0, 1500)}${examples}\n\nWrite 5 alternative email subject lines: 30-50 characters, no spam-trigger words, no ALL CAPS, at most one emoji, at least one asking a question, one using a specific number and one using the merge tag {{subscriber.first_name|there}}. Return {"suggestions":[{"subject":"…","why":"5-10 words"}]}.`,
+      'You are an expert email marketer who writes honest, specific, high-open-rate subject lines.');
+    const arr = Array.isArray(r) ? r : Array.isArray(r?.suggestions) ? r.suggestions : [];
+    list = arr.map((x: any) => (typeof x === 'string' ? { subject: x } : { subject: str(x?.subject, 150), why: str(x?.why, 120) })).filter((x: any) => x.subject);
+    ai = list.length > 0;
+    if (!ai) message = 'AI suggestions are unavailable right now — here are rule-based ideas instead.';
+  } else message = AI_DISABLED_MSG;
+  if (!list.length) list = heuristicSubjects(subject, title).map((s) => ({ subject: s, why: 'Rule-based rewrite' }));
+  const suggestions = list.slice(0, 6).map((x) => ({ ...x, score: scoreSubject(x.subject, preview).score })).sort((a, b) => b.score - a.score);
+  return c.json({ ai, message: message || undefined, ai_disabled: !aiEnabled(c.env), suggestions, top: top.top.slice(0, 3).map((t) => ({ subject: t.subject, open_rate: t.open_rate })) });
 });
 
 export default app;

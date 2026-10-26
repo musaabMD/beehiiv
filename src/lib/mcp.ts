@@ -2,7 +2,8 @@
 // Lets Claude, ChatGPT and other AI clients work inside a publication with an API key.
 import type { Env, Publication, Post, Subscriber } from '../types';
 import { one, all, run, val, insert, update } from './db';
-import { parseDoc, type Block } from './render';
+import { parseDoc, sanitizeEmailDocument, ensureUnsubscribe, hasUnsubscribeLink, type Block } from './render';
+import { scoreSubject, topSubjects } from '../routes/posts/shared';
 import { FIELDS, recalcSegment, snapshotToStatic, countMatching, EMPTY_GROUP, type RuleGroup } from './segments';
 import { TRIGGERS, STEP_TYPES, publishDraft, enroll } from './automations';
 import { availableTemplates } from './automation-templates';
@@ -707,6 +708,60 @@ export const TOOLS: Tool[] = [
       const { sendTx, TxError } = await import('./transactional');
       try { return await sendTx(env, pub, a); } catch (e: any) { if (e instanceof TxError) throw new ToolError(e.message); throw e; }
     },
+  },
+  // ───────── snippets, coded templates, subject lines ─────────
+  {
+    name: 'snippets', title: 'Reusable content snippets',
+    description: 'Manage reusable content blocks (signature, sponsor banner, footer CTA…). action: list | get {snippet_id} | create {name, markdown | blocks, description?} | update {snippet_id, name?, markdown? | blocks?, description?} | delete {snippet_id}. To use one in a post, add the block {"type":"snippet","data":{"snippet_id":"…"}} (synced: later snippet edits show up everywhere) or copy its blocks.',
+    inputSchema: S({ action: { type: 'string', enum: ['list', 'get', 'create', 'update', 'delete'] }, snippet_id: str('Snippet id'), name: str('Snippet name'), description: str(''), markdown: str('Content in Markdown'), blocks: { type: 'array', description: 'Editor blocks (alternative to markdown)', items: { type: 'object' } } }, ['action']),
+    run: async (env, pub, a) => {
+      const ser = (s: any, full = false) => ({ id: s.id, name: s.name, description: s.description, blocks: full ? parseDoc(s.content).blocks : parseDoc(s.content).blocks.length, updated_at: iso(s.updated_at), synced_block: { type: 'snippet', data: { snippet_id: s.id, name: s.name } } });
+      const need = async () => { const s = await one<any>(env, 'SELECT * FROM snippets WHERE id = ? AND pub_id = ?', String(a.snippet_id || ''), pub.id); if (!s) throw new ToolError('Snippet not found — use action "list" to see ids.'); return s; };
+      const blocksOf = (): Block[] | null => {
+        const raw: any[] | null = Array.isArray(a.blocks) ? a.blocks : a.markdown ? markdownToBlocks(String(a.markdown)) : null;
+        return raw ? raw.filter((b) => b && typeof b.type === 'string' && !['paywall', 'html_document'].includes(b.type)).slice(0, 200).map((b) => ({ id: id(8), type: b.type, data: b.data || {} })) : null;
+      };
+      if (a.action === 'list') return (await all<any>(env, 'SELECT * FROM snippets WHERE pub_id = ? ORDER BY updated_at DESC', pub.id)).map((s) => ser(s));
+      if (a.action === 'get') return ser(await need(), true);
+      if (a.action === 'create') {
+        const blocks = blocksOf();
+        if (!a.name || !blocks?.length) throw new ToolError('name and markdown (or blocks) are required.');
+        const sid = id();
+        await insert(env, 'snippets', { id: sid, pub_id: pub.id, name: String(a.name).slice(0, 120), description: String(a.description || '').slice(0, 500), content: JSON.stringify({ blocks }), created_at: now(), updated_at: now() });
+        return ser(await one(env, 'SELECT * FROM snippets WHERE id = ?', sid), true);
+      }
+      if (a.action === 'update') {
+        const s = await need();
+        const f: Record<string, unknown> = { updated_at: now() };
+        if (a.name !== undefined) f.name = String(a.name).slice(0, 120);
+        if (a.description !== undefined) f.description = String(a.description).slice(0, 500);
+        const blocks = blocksOf();
+        if (blocks) f.content = JSON.stringify({ blocks: blocks.filter((b) => !(b.type === 'snippet' && b.data?.snippet_id === s.id)) });
+        await update(env, 'snippets', s.id, f, pub.id);
+        return ser(await one(env, 'SELECT * FROM snippets WHERE id = ?', s.id), true);
+      }
+      if (a.action === 'delete') { const s = await need(); await run(env, 'DELETE FROM snippets WHERE id = ? AND pub_id = ?', s.id, pub.id); return { id: s.id, deleted: true }; }
+      throw new ToolError('Unknown action.');
+    },
+  },
+  {
+    name: 'create_coded_template', title: 'Create a coded (HTML) template',
+    description: 'Create a custom-coded email template from a full HTML document. Scripts/unsafe attributes are removed; merge tags work ({{subscriber.first_name|there}}, {{publication.name}}); {{unsubscribe_url}} is required and added automatically when missing. Posts created from it are sent exactly as written (links tracked).',
+    inputSchema: S({ name: str('Template name'), description: str(''), html: str('Full HTML email document') }, ['name', 'html']),
+    run: async (env, pub, a) => {
+      const clean = sanitizeEmailDocument(String(a.html || '').slice(0, 400_000));
+      if (!clean.trim()) throw new ToolError('html is empty after sanitizing.');
+      const added = !hasUnsubscribeLink(clean);
+      const tid = id();
+      await insert(env, 'templates', { id: tid, pub_id: pub.id, name: String(a.name).slice(0, 120), kind: 'post', description: String(a.description || '').slice(0, 500), content: JSON.stringify({ blocks: [{ id: id(8), type: 'html_document', data: { html: ensureUnsubscribe(clean) } }] }), style: '{}', category: 'Coded', created_at: now(), updated_at: now() });
+      return { id: tid, name: a.name, unsubscribe_added: added, edit_url: `${env.APP_URL.replace(/\/$/, '')}/app/posts/templates/${tid}/code`, note: 'Use template_id with draft_post to start a post from it.' };
+    },
+  },
+  {
+    name: 'check_subject_line', title: 'Check a subject line',
+    description: 'Score an email subject line 0-100 with advice: length (30-50 chars), words, preview text, spam-trigger words, ALL CAPS / !!!, emoji count, personalization merge tag, question/number. Also returns the publication’s top past subject lines by open rate.',
+    inputSchema: S({ subject: str('Subject line'), preview_text: str('Preview text (optional)') }, ['subject']), annotations: { readOnlyHint: true },
+    run: async (env, pub, a) => ({ ...scoreSubject(String(a.subject || ''), String(a.preview_text || '')), top_subjects: (await topSubjects(env, pub.id, 5)).top.map((t) => ({ subject: t.subject, open_rate: Math.round(t.open_rate * 1000) / 10 })) }),
   },
   // ───────── docs ─────────
   {

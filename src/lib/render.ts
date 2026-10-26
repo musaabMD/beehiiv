@@ -5,6 +5,7 @@ import { all, one } from './db';
 import { inline, sanitizeHtml } from './sanitize';
 import { esc, parseJSON, slugify, stripTags, fmtDate } from './util';
 import { fillSlot, autoInsert } from './programmatic';
+import { recommendProducts, formatPrice } from './recommend';
 
 export interface Block { id?: string; type: string; data: any }
 export interface Doc { blocks: Block[] }
@@ -178,7 +179,7 @@ function emailEmbed(e: { provider: string; id: string; url: string }, caption: s
 }
 
 // ───────── main renderer ─────────
-interface State { ctx: RenderCtx; s: StyleTokens; footnotes: string[]; headings: Rendered['headings']; paywalled: boolean; usedIds: Set<string>; adsShown: string[] }
+interface State { ctx: RenderCtx; s: StyleTokens; footnotes: string[]; headings: Rendered['headings']; paywalled: boolean; usedIds: Set<string>; adsShown: string[]; snippets?: string[] }
 
 function headingId(st: State, text: string) {
   let base = slugify(stripTags(text), 60), i = 2, idv = base;
@@ -313,6 +314,8 @@ async function renderBlock(st: State, b: Block): Promise<string> {
     }
     case 'image': {
       if (!d.src) return '';
+      // library templates ship sample images under /static/ — make them absolute (inboxes need full URLs)
+      if (/^\/static\//.test(String(d.src))) d.src = ctx.env.APP_URL.replace(/\/$/, '') + d.src;
       const alt = esc(d.alt || ''), title = d.title ? ` title="${esc(d.title)}"` : '';
       const w = Math.min(Number(d.width) || 100, 100);
       const cap = d.caption ? rich(st, d.caption) : '';
@@ -325,7 +328,7 @@ async function renderBlock(st: State, b: Block): Promise<string> {
         : `<figure class="oh-figure oh-align-${esc(d.align || 'center')}">${linked}${cap ? `<figcaption>${cap}</figcaption>` : ''}</figure>`;
     }
     case 'gallery': {
-      const imgs = (d.images || []) as Array<{ src: string; alt?: string; caption?: string }>;
+      const imgs = ((d.images || []) as Array<{ src: string; alt?: string; caption?: string }>).map((im) => (/^\/static\//.test(String(im?.src)) ? { ...im, src: ctx.env.APP_URL.replace(/\/$/, '') + im.src } : im));
       if (!imgs.length) return '';
       if (E) {
         const cols = Math.min(Number(d.columns) || 2, 3);
@@ -543,9 +546,110 @@ async function renderBlock(st: State, b: Block): Promise<string> {
       if (E) return '';
       return `<form class="oh-subscribe-inline" method="post" action="${esc(ctx.siteUrl)}/subscribe"><input type="email" name="email" placeholder="you@example.com" required><input type="text" name="website" class="oh-hp" tabindex="-1" autocomplete="off"><input type="hidden" name="_t" value="${Date.now()}"><button class="oh-btn">${esc(d.label || 'Subscribe')}</button></form>`;
     }
+    case 'snippet': {
+      // Synced snippet: the snippet's current blocks rendered in place, so edits reach every post that uses it.
+      const sid = String(d.snippet_id || '');
+      const chain = st.snippets || [];
+      if (!sid || chain.includes(sid) || chain.length >= 3) return '';
+      const sn = await one<{ content: string }>(ctx.env, 'SELECT content FROM snippets WHERE id = ? AND pub_id = ?', sid, ctx.pub.id);
+      if (!sn) return ctx.preview && !E ? `<div class="oh-paywall-marker">Snippet “${esc(d.name || sid)}” was deleted</div>` : '';
+      st.snippets = [...chain, sid];
+      try { return await renderBlocks(st, parseDoc(sn.content).blocks); } finally { st.snippets = chain; }
+    }
+    case 'recommended_products': {
+      const recs = await recommendProducts(ctx.env, ctx.pub.id, ctx.subscriber, { limit: Number(d.limit) || 3, tags: ctx.tags || [], exclude: Array.isArray(d.exclude) ? d.exclude : [], cache: !!ctx.deliveryId });
+      if (!recs.length) return ctx.preview && !E ? `<div class="oh-paywall-marker">Recommended products — add products in Monetize → Shop</div>` : '';
+      const title = d.title || 'Picked for you';
+      const cta = d.cta || 'View';
+      const attrib = (slug: string) => {
+        const q = new URLSearchParams({ utm_source: ctx.pub.slug, utm_medium: E ? 'email' : 'web', utm_campaign: ctx.post?.slug || 'newsletter', utm_content: 'recommended_products' });
+        return `${ctx.siteUrl}/shop/${slug}?${q.toString()}`;
+      };
+      const why = (r: (typeof recs)[number]) => (d.show_reason === false ? '' : r.reason === 'also_bought' && r.because ? `Readers who bought ${r.because} also got this` : r.reason === 'interest' ? 'Matches your interests' : 'Reader favorite');
+      if (E) {
+        const cols = d.layout === 'list' ? 1 : Math.min(3, recs.length);
+        const cell = (r: (typeof recs)[number]) => {
+          const url = attrib(r.slug);
+          const img = r.cover_url ? `<a href="${esc(url)}"><img src="${esc(r.cover_url)}" alt="" width="${Math.floor((s.width - 90) / cols)}" style="display:block;width:100%;height:auto;border:0;border-radius:${Math.max(0, s.radius - 2)}px;margin:0 0 10px"></a>` : '';
+          const reason = why(r);
+          return `${img}${reason ? `<p style="margin:0 0 4px;font-family:${s.font};font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:${s.muted}">${esc(reason)}</p>` : ''}<p style="margin:0 0 4px;font-family:${s.heading_font};font-size:16px;line-height:1.3;font-weight:700;color:${s.text}"><a href="${esc(url)}" style="color:${s.text};text-decoration:none">${esc(r.name)}</a></p>${cols === 1 && r.description ? `<p style="margin:0 0 8px;font-family:${s.font};font-size:14px;line-height:1.5;color:${s.muted}">${esc(r.description)}</p>` : ''}<p style="margin:0;font-family:${s.font};font-size:14px;color:${s.text}"><strong>${esc(formatPrice(r.price_cents, r.currency))}</strong> · <a href="${esc(url)}" style="color:${s.link};font-weight:600">${esc(cta)} →</a></p>`;
+        };
+        const rows: string[] = [];
+        for (let i = 0; i < recs.length; i += cols) {
+          const chunk = recs.slice(i, i + cols);
+          rows.push(`<tr>${chunk.map((r, j) => `<td class="oh-col" width="${Math.floor(100 / cols)}%" valign="top" style="padding:0 ${j < cols - 1 ? 8 : 0}px 16px ${j > 0 ? 8 : 0}px">${cell(r)}</td>`).join('')}${'<td></td>'.repeat(cols - chunk.length)}</tr>`);
+        }
+        return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${s.spacing}px;border:1px solid ${s.border};border-radius:${s.radius}px"><tr><td style="padding:18px 18px 2px"><p style="margin:0 0 14px;font-family:${s.heading_font};font-size:18px;font-weight:700;color:${s.text}">${esc(title)}</p><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${rows.join('')}</table></td></tr></table>`;
+      }
+      // inline styles: rendered on publication sites (site.css) and in editor previews alike
+      return `<section class="oh-recprod" style="margin:0 0 1.2em;padding:18px;border:1px solid var(--border,#e5e7eb);border-radius:var(--radius,12px)"><h4 style="margin:0 0 12px">${esc(title)}</h4><div class="oh-recprod-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(${d.layout === 'list' ? '100%' : '170px'},1fr));gap:14px">${recs.map((r) => `<a class="oh-recprod-i" href="${esc(attrib(r.slug))}" style="display:flex;flex-direction:column;gap:4px;text-decoration:none;color:inherit">${r.cover_url ? `<img src="${esc(r.cover_url)}" alt="" loading="lazy" style="width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:8px;margin:0 0 6px">` : ''}${why(r) ? `<small style="font-size:11px;letter-spacing:.04em;text-transform:uppercase;opacity:.65">${esc(why(r))}</small>` : ''}<strong>${esc(r.name)}</strong><span style="font-size:.9em;opacity:.85">${esc(formatPrice(r.price_cents, r.currency))} · <span style="color:var(--accent,#b45309);font-weight:600">${esc(cta)} →</span></span></a>`).join('')}</div></section>`;
+    }
+    case 'html_document': {
+      // Custom-coded email: a whole HTML document. Email: passed through as-is by emailLayout (markers below);
+      // web: shown in a sandboxed iframe (no scripts, its CSS can't leak into the site).
+      const doc = prepareHtmlDocument(String(d.html || ''));
+      if (!doc.trim()) return ctx.preview && !E ? '<div class="oh-paywall-marker">Empty coded email — paste your HTML</div>' : '';
+      if (E) return `<!--OH_DOC_START-->${doc}<!--OH_DOC_END-->`;
+      const webDoc = doc.replace(/%%OH_UNSUB%%|%%OH_PREFS%%/g, `${ctx.siteUrl}/account`).replace(/%%OH_WEB%%/g, ctx.post ? `${ctx.siteUrl}/p/${ctx.post.slug}` : ctx.siteUrl)
+        .replace(/<head([^>]*)>/i, '<head$1><base target="_blank">');
+      return `<div class="oh-htmldoc"><iframe class="oh-htmldoc-frame" title="Email" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" srcdoc="${esc(webDoc)}" style="width:100%;min-height:640px;border:0;display:block;background:#fff" onload="try{this.style.height=(this.contentDocument.documentElement.scrollHeight+4)+'px'}catch(e){}"></iframe></div>`;
+    }
     default:
       return '';
   }
+}
+
+// ───────── custom-coded (raw HTML) emails ─────────
+const DOC_TOKENS: Array<[RegExp, string]> = [[/\{\{\s*unsubscribe_url\s*\}\}/gi, '%%OH_UNSUB%%'], [/\{\{\s*preferences_url\s*\}\}/gi, '%%OH_PREFS%%'], [/\{\{\s*web_url\s*\}\}/gi, '%%OH_WEB%%']];
+
+/**
+ * Sanitize a full email HTML document: drops scripts, frames, objects, forms, event handlers, javascript:/vbscript:
+ * URLs, <base> and meta refresh. Keeps <style>, tables, inline styles, MSO conditionals and images.
+ */
+export function sanitizeEmailDocument(input: string): string {
+  let h = String(input || '').slice(0, 400_000);
+  h = h.replace(/<(script|iframe|frame|frameset|object|embed|applet|noscript|template|portal)\b[\s\S]*?<\/\1\s*>/gi, '');
+  h = h.replace(/<\/?(script|iframe|frame|frameset|object|embed|applet|form|input|button|select|textarea|base|portal)\b[^>]*>/gi, '');
+  h = h.replace(/<link\b(?![^>]*rel\s*=\s*["']?stylesheet)[^>]*>/gi, '');
+  h = h.replace(/<meta\b[^>]*http-equiv\s*=\s*["']?refresh[^>]*>/gi, '');
+  h = h.replace(/\s(on[a-z]+)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  h = h.replace(/\s(href|src|action|formaction|background|poster|xlink:href)\s*=\s*(["']?)\s*(?:javascript|vbscript|data:text\/html)[^"'\s>]*\2/gi, ' $1="#"');
+  h = h.replace(/expression\s*\(/gi, 'x(').replace(/url\(\s*["']?\s*javascript:[^)]*\)/gi, 'none');
+  return h;
+}
+
+/** True when the document links to the unsubscribe merge tag. */
+export function hasUnsubscribeLink(html: string): boolean {
+  return /\{\{\s*unsubscribe_url\s*\}\}|%%OH_UNSUB%%/i.test(html);
+}
+
+/** Make sure a coded email can be unsubscribed from: adds a small footer before </body> when the tag is missing. */
+export function ensureUnsubscribe(html: string): string {
+  if (hasUnsubscribeLink(html)) return html;
+  const footer = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" style="padding:24px 16px;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.6;color:#6b7280">You’re receiving this because you subscribed to {{publication.name}}.<br><a href="{{unsubscribe_url}}" style="color:#6b7280;text-decoration:underline">Unsubscribe</a> · <a href="{{preferences_url}}" style="color:#6b7280;text-decoration:underline">Manage preferences</a></td></tr></table>`;
+  return /<\/body>/i.test(html) ? html.replace(/<\/body>/i, footer + '</body>') : html + footer;
+}
+
+/** Sanitize, wrap a fragment in a document, guarantee the unsubscribe link, protect link tokens from merging. */
+export function prepareHtmlDocument(raw: string): string {
+  let h = sanitizeEmailDocument(raw).trim();
+  if (!h) return '';
+  if (!/<html[\s>]/i.test(h)) h = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0">${h}</body></html>`;
+  h = ensureUnsubscribe(h);
+  for (const [re, tok] of DOC_TOKENS) h = h.replace(re, tok);
+  return h;
+}
+
+/** Is this doc a custom-coded email (an html_document block at the top level)? */
+export function isCodedDoc(doc: Doc | null | undefined): boolean {
+  return !!doc && Array.isArray(doc.blocks) && doc.blocks.some((b) => b && b.type === 'html_document');
+}
+
+function codedDocument(body: string): string | null {
+  const a = body.indexOf('<!--OH_DOC_START-->');
+  if (a < 0) return null;
+  const b = body.indexOf('<!--OH_DOC_END-->', a);
+  return body.slice(a + 19, b < 0 ? undefined : b);
 }
 
 function dynamicLabel(d: any): string {
@@ -630,6 +734,14 @@ export interface EmailShell {
 /** Wrap rendered body in a full table-based email document (Outlook-safe). */
 export function emailLayout(body: string, o: EmailShell): string {
   const s = o.style || styleFor(o.pub);
+  const coded = codedDocument(body);
+  if (coded !== null) {
+    // Custom-coded email: sent as written. Only link tokens, the preheader and (free plan) branding are filled in.
+    let d = coded.replace(/%%OH_UNSUB%%/g, esc(o.unsubscribeUrl || '#')).replace(/%%OH_PREFS%%/g, esc(o.preferencesUrl || o.unsubscribeUrl || '#')).replace(/%%OH_WEB%%/g, esc(o.webUrl || '#'));
+    if (o.preheader) d = d.replace(/<body([^>]*)>/i, `<body$1><div style="display:none;max-height:0;max-width:0;overflow:hidden;mso-hide:all">${esc(o.preheader)}${'&#847;&zwnj;&nbsp;'.repeat(60)}</div>`);
+    if (o.extraFooter) d = d.replace(/<\/body>/i, `<div style="text-align:center;padding:8px 0 16px;font-family:Arial,sans-serif;font-size:12px">${o.extraFooter}</div></body>`);
+    return d;
+  }
   const pre = o.preheader ? `<div style="display:none;max-height:0;max-width:0;overflow:hidden;mso-hide:all">${esc(o.preheader)}${'&#847;&zwnj;&nbsp;'.repeat(60)}</div>` : '';
   const header = o.hideHeader
     ? ''
