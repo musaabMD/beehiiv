@@ -8,7 +8,8 @@ import { one, all, run, insert, val, stmt, batch } from './db';
 import { emit } from './events';
 import { registerJob, registerPeriodic, enqueue, logError } from './jobs';
 import { renderDoc, emailLayout, parseDoc, styleFor, applyMerge, mergeVars, type Doc, type StyleTokens } from './render';
-import { sendMail, recordBounce, classifyBounce } from './email';
+import { sendMail, sendMailRecorded, recordBounce, classifyBounce, type MailResult } from './email';
+import { loadThrottles, cachedThrottles, factorFrom, holdReason, reserveProvider, providerWindowMs, providerOf, nextPace, type Provider, type Throttles } from './throttle';
 import { compile, recalcSegment, segmentIdsFor, type RuleGroup } from './segments';
 import { settings, siteUrl, senderFor, getPub } from './pub';
 import { subToken, unsubscribeUrl, preferencesUrl, getTags } from './subscribers';
@@ -36,6 +37,8 @@ export interface SendOptions {
   ab_decided_at?: number;
   /** override subject line for this send (e.g. resend to non-openers) */
   subject?: string | null;
+  /** custom headers from the send API (validated by lib/email sanitizeHeaders) */
+  headers?: Record<string, string> | null;
 }
 
 /**
@@ -258,6 +261,10 @@ registerJob('send.batch', async (env, p) => {
   // account suspended (pending review) → pause what's in flight
   const suspended = await workspaceSuspended(env, pub.workspace_id);
   if (suspended) { await run(env, `UPDATE sends SET status = 'paused', status_reason = ? WHERE id = ? AND status IN ('sending','testing')`, suspended, send.id); return; }
+  // kill switch / guardian pause: wait (re-check every minute), never drop
+  const thr = await loadThrottles(env);
+  const held = holdReason(thr, pub.workspace_id);
+  if (held) { await run(env, 'UPDATE sends SET status_reason = ? WHERE id = ?', held, send.id); return { retryInMs: MIN }; }
   // Timed sends (send-time optimization / time zones): first park every recipient as a 'scheduled' delivery — nothing
   // leaves yet, so no warm-up/ramp allowance is used. The A/B test phase always goes out immediately.
   const timed = !!o.timing && o.phase !== 'test';
@@ -277,10 +284,16 @@ registerJob('send.batch', async (env, p) => {
   if (send.status_reason) await run(env, 'UPDATE sends SET status_reason = NULL WHERE id = ?', send.id);
   const cfg = settings(pub);
   const rate = Math.max(BATCH, Number(cfg.send_rate_per_minute) || Number((env as any).SEND_RATE_PER_MINUTE) || DEFAULT_RATE);
-  const limit = Math.min(BATCH, warm.remaining === Infinity ? BATCH : warm.remaining, ramp.remaining);
+  // pace = guardian/workspace throttle factor x this send's adaptive pace (drops on deferrals/errors, recovers slowly)
+  const pace = Math.max(0.1, Math.min(1, Number(send.pace) || 1));
+  const ctx: BatchCtx = { thr, ws: pub.workspace_id, parallel: Math.max(1, Math.round(PARALLEL * pace)), rate: rate * factorFrom(thr, pub.workspace_id, null), pace };
+  let limit = Math.min(BATCH, warm.remaining === Infinity ? BATCH : warm.remaining, ramp.remaining);
   const main = await postContent(env, post);
   const base = { content: main, alt: altContent(post, main), from };
-  if (timed) { await deliverDue(env, pub, post, send, o, base, limit, rate); return; }
+  if (timed) { await deliverDue(env, pub, post, send, o, base, limit, ctx); return; }
+  // recipients held back by a provider limit in an earlier batch go first
+  const early = await runDue(env, pub, post, send, o, base, limit, ctx);
+  limit -= early.claimed;
 
   let recipients: Subscriber[];
   if (o.only_subscriber_ids) {
@@ -292,26 +305,42 @@ registerJob('send.batch', async (env, p) => {
 
   let processed = 0;
   let last = send.cursor as string | null;
-  const queue: Array<{ sub: Subscriber; subject: string; variant: string | null; cohort: string | null; letter: string | null }> = [];
-  const held = await (await import('./holdout')).holdoutSet(env, send, recipients); // holdout group: deliberately not sent (lib/holdout)
-  for (const sub of recipients) {
+  const picked: Array<{ sub: Subscriber; subject: string; variant: string | null; cohort: string | null; letter: string | null }> = [];
+  const holdoutIds = await (await import('./holdout')).holdoutSet(env, send, recipients); // holdout group: deliberately not sent (lib/holdout)
+  if (limit > 0) for (const sub of recipients) {
     last = sub.id;
-    if (held.has(sub.id)) continue;
+    if (holdoutIds.has(sub.id)) continue;
     // A/B: test phase only takes the sample; main phase takes the rest
     const pick = await assignVariant(send.id, sub.id, o, o.subject || post.email_subject || post.title);
     if (!pick) continue;
-    queue.push({ sub, ...pick });
+    picked.push({ sub, ...pick });
     processed++;
     if (processed >= limit) break;
   }
-  for (let i = 0; i < queue.length; i += PARALLEL) {
-    const res = await Promise.allSettled(queue.slice(i, i + PARALLEL).map((q) => {
+  // per-mailbox-provider rate limits: whoever doesn't fit this minute's window is parked as 'scheduled' for the next one
+  const grants = await grantProviders(env, ctx, picked.map((q) => providerOf(q.sub.email)));
+  const queue: typeof picked = [];
+  const parked: typeof picked = [];
+  for (const q of picked) (take(grants, providerOf(q.sub.email)) ? queue : parked).push(q);
+  if (parked.length) {
+    const waits = new Map<Provider, number>();
+    for (const q of parked) { const p = providerOf(q.sub.email); if (!waits.has(p)) waits.set(p, await providerWindowMs(env, p)); }
+    const t = now();
+    const stmts = parked.map((q) => stmt(env, `INSERT INTO deliveries (id, send_id, pub_id, subscriber_id, email, variant, status, attempts, next_attempt_at, provider, created_at) VALUES (?, ?, ?, ?, ?, ?, 'scheduled', 0, ?, ?, ?)`,
+      id(20), send.id, pub.id, q.sub.id, q.sub.email, q.variant, t + (waits.get(providerOf(q.sub.email)) || MIN), mailboxProvider(q.sub.email), t));
+    for (let i = 0; i < stmts.length; i += 50) await batch(env, stmts.slice(i, i + 50));
+  }
+  let attempted = early.attempted, troubled = early.troubled;
+  for (let i = 0; i < queue.length; i += ctx.parallel) {
+    const res = await Promise.allSettled(queue.slice(i, i + ctx.parallel).map((q) => {
       const v = variantParts(o, q.letter, base);
-      return deliver(env, pub, send.id, q.sub, q.subject, v.content, v.from, { variant: q.variant, cohort: q.cohort, post });
+      return deliver(env, pub, send.id, q.sub, q.subject, v.content, v.from, { variant: q.variant, cohort: q.cohort, post, headers: o.headers });
     }));
     for (let k = 0; k < res.length; k++) {
       const r = res[k];
-      if (r.status !== 'rejected') continue;
+      attempted++;
+      if (r.status === 'fulfilled') { if (isTroubled(r.value.result)) troubled++; continue; }
+      troubled++;
       await logError(env, 'send.deliver', r.reason, pub.id);
       // A transient database error must not silently skip this reader: the cursor has already moved past them.
       // If no delivery row was written, try once more now; a row left half-done is picked up by the retry job below.
@@ -320,17 +349,25 @@ registerJob('send.batch', async (env, p) => {
       if (!has) {
         await new Promise((ok) => setTimeout(ok, 250));
         const v = variantParts(o, q.letter, base);
-        await deliver(env, pub, send.id, q.sub, q.subject, v.content, v.from, { variant: q.variant, cohort: q.cohort, post }).catch((e) => logError(env, 'send.deliver.retry', e, pub.id));
+        await deliver(env, pub, send.id, q.sub, q.subject, v.content, v.from, { variant: q.variant, cohort: q.cohort, post, headers: o.headers }).catch((e) => logError(env, 'send.deliver.retry', e, pub.id));
       }
     }
   }
   await requeueStuck(env, send.id);
-  const exhausted = processed < limit && (recipients.length < limit * 3 || o.only_subscriber_ids);
-  await run(env, 'UPDATE sends SET cursor = ?, sent = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'sent\',\'deferred\')), failed = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'failed\',\'bounced\',\'suppressed\')) WHERE id = ?', last, send.id, send.id, send.id);
+  const exhausted = limit > 0 && processed < limit && (recipients.length < limit * 3 || o.only_subscriber_ids);
+  const newPace = nextPace(pace, attempted, troubled);
+  const gap = Math.floor((60_000 * BATCH) / Math.max(1, ctx.rate * newPace));
+  await run(env, 'UPDATE sends SET pace = ?, cursor = ?, sent = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'sent\',\'deferred\')), failed = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'failed\',\'bounced\',\'suppressed\')) WHERE id = ?', newPace, last, send.id, send.id, send.id);
   // campaign safety: hard bounces / complaints above the limits pause the send and alert the owner
   if (await checkCampaign(env, send)) return;
-  if (!exhausted && recipients.length) {
-    await enqueue(env, 'send.batch', { send_id: send.id }, now() + Math.floor((60_000 * BATCH) / rate));
+  if (limit <= 0 || (!exhausted && recipients.length)) {
+    await enqueue(env, 'send.batch', { send_id: send.id }, now() + gap);
+    return;
+  }
+  // provider-throttled recipients still waiting: come back when the first is due
+  const waiting = await one<{ n: number; t: number | null }>(env, `SELECT COUNT(*) AS n, MIN(next_attempt_at) AS t FROM deliveries WHERE send_id = ? AND status = 'scheduled'`, send.id);
+  if (waiting?.n) {
+    await enqueue(env, 'send.batch', { send_id: send.id }, Math.max(now() + gap, waiting.t || 0));
     return;
   }
   if (o.phase === 'test' && o.ab) {
@@ -405,35 +442,79 @@ async function planTimed(env: Env, pub: Publication, send: any, o: SendOptions) 
   await enqueue(env, 'send.batch', { send_id: send.id }, Math.max(now(), first?.t || now()));
 }
 
-/** Timed send, phase 2: deliver the scheduled deliveries that are due — through the same warm-up / ramp / safety gates as any batch. */
-async function deliverDue(env: Env, pub: Publication, post: Post, send: any, o: SendOptions, base: { content: Content; alt: Content | null; from: { email: string; name: string } }, limit: number, rate: number) {
-  const due = await all<any>(env, `SELECT id, subscriber_id, variant FROM deliveries WHERE send_id = ? AND status = 'scheduled' AND next_attempt_at <= ? ORDER BY next_attempt_at LIMIT ?`, send.id, now(), limit);
-  const subs = due.length ? await all<Subscriber>(env, `SELECT * FROM subscribers WHERE id IN (${due.map(() => '?').join(',')})`, ...due.map((d) => d.subscriber_id)) : [];
+interface BatchCtx { thr: Throttles; ws: string; parallel: number; rate: number; pace: number }
+const isTroubled = (r: MailResult | undefined) => !!r && !r.ok && r.status === 'failed' && (!!r.retry || !r.bounce);
+
+/** Provider window grants for a batch: how many recipients per mailbox provider may go this minute. */
+async function grantProviders(env: Env, ctx: BatchCtx, providers: Provider[]): Promise<Map<Provider, number>> {
+  const want = new Map<Provider, number>();
+  for (const p of providers) want.set(p, (want.get(p) || 0) + 1);
+  const out = new Map<Provider, number>();
+  for (const [p, n] of want) out.set(p, await reserveProvider(env, p, n, factorFrom(ctx.thr, ctx.ws, p)));
+  return out;
+}
+function take(grants: Map<Provider, number>, p: Provider): boolean {
+  const n = grants.get(p) || 0;
+  if (n <= 0) return false;
+  grants.set(p, n - 1);
+  return true;
+}
+
+/**
+ * Deliver this send's 'scheduled' deliveries that are due (timed sends, and recipients a provider limit held back),
+ * through the same provider windows. Rows that don't fit stay scheduled for the provider's next window.
+ */
+async function runDue(env: Env, pub: Publication, post: Post, send: any, o: SendOptions, base: { content: Content; alt: Content | null; from: { email: string; name: string } }, limit: number, ctx: BatchCtx) {
+  const due = limit > 0 ? await all<any>(env, `SELECT id, subscriber_id, variant, email FROM deliveries WHERE send_id = ? AND status = 'scheduled' AND next_attempt_at <= ? ORDER BY next_attempt_at LIMIT ?`, send.id, now(), limit) : [];
+  if (!due.length) return { claimed: 0, attempted: 0, troubled: 0, due: 0 };
+  const subs = await all<Subscriber>(env, `SELECT * FROM subscribers WHERE id IN (${due.map(() => '?').join(',')})`, ...due.map((d) => d.subscriber_id));
   const byId = new Map(subs.map((s) => [s.id, s]));
   const defaultSubject = o.subject || post.email_subject || post.title;
-  const work: Array<() => Promise<unknown>> = [];
+  const grants = await grantProviders(env, ctx, due.map((d) => providerOf(d.email)));
+  const waits = new Map<Provider, number>();
+  const work: Array<() => Promise<{ result: MailResult }>> = [];
+  let claimedN = 0;
   for (const d of due) {
+    const p = providerOf(d.email);
+    if (!take(grants, p)) {
+      if (!waits.has(p)) waits.set(p, await providerWindowMs(env, p));
+      await run(env, `UPDATE deliveries SET next_attempt_at = ? WHERE id = ? AND status = 'scheduled'`, now() + waits.get(p)!, d.id);
+      continue;
+    }
     // claim it, so overlapping batch jobs never send the same email twice
     const claimed = await run(env, `UPDATE deliveries SET status = 'queued', next_attempt_at = ? WHERE id = ? AND status = 'scheduled'`, now(), d.id); // claim time, so stuck-row recovery never grabs an in-flight send
     if (!claimed.meta.changes) continue;
+    claimedN++;
     const sub = byId.get(d.subscriber_id);
     if (!sub || sub.status !== 'active') { await run(env, `UPDATE deliveries SET status = 'skipped', error = 'subscriber no longer active' WHERE id = ?`, d.id); continue; }
     const letter = o.ab && d.variant && /^[A-E](\/|$)/.test(d.variant) ? d.variant[0] : null;
     const cohort = d.variant ? (d.variant.includes('/') ? d.variant.split('/')[1] : letter ? null : d.variant) : null;
     const v = variantParts(o, letter, base);
-    work.push(() => sendExisting(env, pub, send.id, d.id, sub, v.subject || defaultSubject, v.content, v.from, { cohort, post }));
+    work.push(() => sendExisting(env, pub, send.id, d.id, sub, v.subject || defaultSubject, v.content, v.from, { cohort, post, headers: o.headers }));
   }
-  for (let i = 0; i < work.length; i += PARALLEL) {
-    const res = await Promise.allSettled(work.slice(i, i + PARALLEL).map((f) => f()));
-    for (const r of res) if (r.status === 'rejected') await logError(env, 'send.deliver', r.reason, pub.id);
+  let attempted = 0, troubled = 0;
+  for (let i = 0; i < work.length; i += ctx.parallel) {
+    const res = await Promise.allSettled(work.slice(i, i + ctx.parallel).map((f) => f()));
+    for (const r of res) {
+      attempted++;
+      if (r.status === 'rejected') { troubled++; await logError(env, 'send.deliver', r.reason, pub.id); }
+      else if (isTroubled(r.value.result)) troubled++;
+    }
   }
+  return { claimed: claimedN, attempted, troubled, due: due.length };
+}
+
+/** Timed send, phase 2: deliver the scheduled deliveries that are due — through the same warm-up / ramp / safety gates as any batch. */
+async function deliverDue(env: Env, pub: Publication, post: Post, send: any, o: SendOptions, base: { content: Content; alt: Content | null; from: { email: string; name: string } }, limit: number, ctx: BatchCtx) {
+  const st = await runDue(env, pub, post, send, o, base, limit, ctx);
   await requeueStuck(env, send.id);
-  await run(env, 'UPDATE sends SET sent = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'sent\',\'deferred\')), failed = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN (\'failed\',\'bounced\',\'suppressed\')) WHERE id = ?', send.id, send.id, send.id);
+  const newPace = nextPace(ctx.pace, st.attempted, st.troubled);
+  await run(env, `UPDATE sends SET pace = ?, sent = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN ('sent','deferred')), failed = (SELECT COUNT(*) FROM deliveries WHERE send_id = ? AND status IN ('failed','bounced','suppressed')) WHERE id = ?`, newPace, send.id, send.id, send.id);
   if (await checkCampaign(env, send)) return;
   const rest = await one<{ n: number; t: number | null }>(env, `SELECT COUNT(*) AS n, MIN(next_attempt_at) AS t FROM deliveries WHERE send_id = ? AND status = 'scheduled'`, send.id);
   if (!rest?.n) { await finishSend(env, pub, post, send.id); return; }
-  const pace = now() + Math.floor((60_000 * BATCH) / rate);
-  await enqueue(env, 'send.batch', { send_id: send.id }, due.length >= limit ? pace : Math.max(pace, rest.t || pace));
+  const pace = now() + Math.floor((60_000 * BATCH) / Math.max(1, ctx.rate * newPace));
+  await enqueue(env, 'send.batch', { send_id: send.id }, st.due >= limit ? pace : Math.max(pace, rest.t || pace));
 }
 
 registerJob('send.ab_winner', async (env, p) => {
@@ -467,17 +548,23 @@ async function finishSend(env: Env, pub: Publication, post: Post, sendId: string
 }
 
 /** Create a delivery and send it. Used by newsletters, automations and test sends. */
-export async function deliver(env: Env, pub: Publication, sendId: string, sub: Subscriber, subject: string, content: Content, from: { email: string; name: string }, o: { variant?: string | null; cohort?: string | null; post?: Post | null; kind?: 'marketing' | 'transactional'; forceReal?: boolean } = {}) {
+export async function deliver(env: Env, pub: Publication, sendId: string, sub: Subscriber, subject: string, content: Content, from: { email: string; name: string }, o: { variant?: string | null; cohort?: string | null; post?: Post | null; kind?: 'marketing' | 'transactional'; forceReal?: boolean; headers?: Record<string, string> | null } = {}) {
   const did = id(20);
   await insert(env, 'deliveries', { id: did, send_id: sendId, pub_id: pub.id, subscriber_id: sub.id, email: sub.email, variant: o.variant ?? null, status: 'queued', attempts: 0, provider: mailboxProvider(sub.email), created_at: now() });
   return sendExisting(env, pub, sendId, did, sub, subject, content, from, o);
 }
 
 /** Render + send for a delivery row that already exists (fresh deliveries, and timed sends' 'scheduled' rows). */
-export async function sendExisting(env: Env, pub: Publication, sendId: string, did: string, sub: Subscriber, subject: string, content: Content, from: { email: string; name: string }, o: { cohort?: string | null; post?: Post | null; kind?: 'marketing' | 'transactional'; forceReal?: boolean } = {}) {
+export async function sendExisting(env: Env, pub: Publication, sendId: string, did: string, sub: Subscriber, subject: string, content: Content, from: { email: string; name: string }, o: { cohort?: string | null; post?: Post | null; kind?: 'marketing' | 'transactional'; forceReal?: boolean; headers?: Record<string, string> | null } = {}) {
+  // kill switch (platform or this account): the delivery waits on the retry path instead of going out
+  const held = holdReason(await cachedThrottles(env), pub.workspace_id);
+  if (held) {
+    await run(env, `UPDATE deliveries SET status = 'deferred', next_attempt_at = ?, error = ? WHERE id = ?`, now() + 5 * MIN, 'waiting: ' + held.slice(0, 200), did);
+    return { deliveryId: did, result: { ok: false, status: 'held', error: held } as MailResult };
+  }
   const built = await buildEmail(env, pub, content, sub, { deliveryId: did, post: o.post, cohort: o.cohort });
   const subj = applyMerge(subject, mergeVars(pub, sub, siteUrl(env, pub)), false);
-  const res = await sendMail(env, { to: sub.email, subject: subj, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, kind: o.kind || 'marketing', unsubscribeUrl: built.unsubscribeUrl, campaignId: sendId, forceReal: o.forceReal });
+  const res = await sendMailRecorded(env, did, { to: sub.email, subject: subj, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, kind: o.kind || 'marketing', unsubscribeUrl: built.unsubscribeUrl, campaignId: sendId, forceReal: o.forceReal, headers: o.headers || undefined });
   await applyResult(env, pub, did, sub, res);
   return { deliveryId: did, result: res };
 }
@@ -512,10 +599,17 @@ registerPeriodic('deliveries.retry', 5 * MIN, async (env) => {
   // Anything still 'queued' two minutes after it was created was interrupted mid-send: hand it to the retry path.
   await run(env, `UPDATE deliveries SET status = 'deferred', next_attempt_at = ?, error = COALESCE(error, 'retry after a temporary error') WHERE status = 'queued' AND COALESCE(next_attempt_at, created_at) < ?`, now(), now() - 2 * MIN).catch(() => {});
   const due = await all<any>(env, `SELECT d.*, se.post_id, se.subject AS send_subject, se.automation_id, se.step_id FROM deliveries d JOIN sends se ON se.id = d.send_id WHERE d.status = 'deferred' AND d.next_attempt_at <= ? LIMIT 100`, now());
+  const thr = await loadThrottles(env);
   for (const d of due) {
     const pub = await getPub(env, d.pub_id);
     const sub = await one<Subscriber>(env, 'SELECT * FROM subscribers WHERE id = ?', d.subscriber_id);
     if (!pub || !sub || sub.status !== 'active') { await run(env, `UPDATE deliveries SET status = 'failed', error = 'subscriber inactive' WHERE id = ?`, d.id); continue; }
+    // stopped (kill switch / guardian pause) or over the provider's window: try again later, never drop
+    const p = providerOf(sub.email);
+    if (holdReason(thr, pub.workspace_id) || !(await reserveProvider(env, p, 1, factorFrom(thr, pub.workspace_id, p)))) {
+      await run(env, `UPDATE deliveries SET next_attempt_at = ? WHERE id = ?`, now() + 5 * MIN, d.id);
+      continue;
+    }
     const post = d.post_id ? await one<Post>(env, 'SELECT * FROM posts WHERE id = ?', d.post_id) : null;
     if (!post && d.automation_id && d.step_id) {
       // automation email: re-render from the live step config
@@ -528,7 +622,7 @@ registerPeriodic('deliveries.retry', 5 * MIN, async (env) => {
       const content: Content = { title: c.title || '', subtitle: c.subtitle || '', doc: c.doc || { blocks: [] }, preview_text: c.preview_text || '', style: c.style ? JSON.stringify(c.style) : null, hideHeader: !c.title };
       const built = await buildEmail(env, pub, content, sub, { deliveryId: d.id });
       const from = await senderFor(env, pub, 'automations', c.sender_id);
-      const res = await sendMail(env, { to: sub.email, subject: d.send_subject, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
+      const res = await sendMailRecorded(env, d.id, { to: sub.email, subject: d.send_subject, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
       await applyResult(env, pub, d.id, sub, res);
       continue;
     }
@@ -541,7 +635,7 @@ registerPeriodic('deliveries.retry', 5 * MIN, async (env) => {
     const built = await buildEmail(env, pub, v.content, sub, { deliveryId: d.id, post });
     const from = v.from;
     const subject = v.subject ? applyMerge(v.subject, mergeVars(pub, sub, siteUrl(env, pub)), false) : d.send_subject;
-    const res = await sendMail(env, { to: sub.email, subject, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id });
+    const res = await sendMailRecorded(env, d.id, { to: sub.email, subject, html: built.html, text: built.text, from, replyTo: await replyToFor(env, pub), pub, unsubscribeUrl: built.unsubscribeUrl, campaignId: d.send_id, headers: so.headers || undefined });
     await applyResult(env, pub, d.id, sub, res);
   }
 });
@@ -573,7 +667,7 @@ export async function notifyBlocked(env: Env, pub: Publication, post: Pick<Post,
 }
 
 /** Publish now: marks published (web) and starts the email send when platform includes email. */
-export async function publishPost(env: Env, pub: Publication, post: Post): Promise<string | null> {
+export async function publishPost(env: Env, pub: Publication, post: Post, overrides: Partial<SendOptions> = {}): Promise<string | null> {
   const t = now();
   // Plan limits are checked before the post is published, so a blocked send leaves the post as it was.
   // Throws SendBlockedError (callers show the reason + upgrade link).
@@ -583,7 +677,7 @@ export async function publishPost(env: Env, pub: Publication, post: Post): Promi
   let sendId: string | null = null;
   if (post.platform !== 'web') {
     try {
-      sendId = await startSend(env, pub, { ...post, status: 'published' });
+      sendId = await startSend(env, pub, { ...post, status: 'published' }, overrides);
     } catch (e) {
       // lost a race with another send for the last of the allowance: undo the publish
       await run(env, `UPDATE posts SET status = ?, published_at = ?, updated_at = ? WHERE id = ?`, post.status, post.published_at, now(), post.id);

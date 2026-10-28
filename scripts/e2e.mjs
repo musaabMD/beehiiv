@@ -1573,5 +1573,158 @@ const errs14 = sql(`SELECT source, message FROM error_log ORDER BY created_at DE
 ok(errs14.length === 0, 'no server errors logged (section 14)', JSON.stringify(errs14).slice(0, 800));
 console.log(`  (section 14 took ${Math.round((Date.now() - t14) / 1000)}s)`);
 }
+__restore();
+{ // sending engine: batch + scheduled/expiring transactional, priority queue, provider throttles, attempts, idempotency, headers, IDN, kill switch, queues
+console.log('14. Sending engine');
+const raw = async (method, path, json, headers = {}) => { const x = await fetch(`${BASE}/api/v2/publication${path}`, { method, headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', ...headers }, body: json ? JSON.stringify(json) : undefined }); return { status: x.status, headers: x.headers, body: await x.json().catch(() => ({})) }; };
+const runCron = async (n = 4, until = () => false) => { for (let i = 0; i < n; i++) { await cron(); await sleep(1200); if (until()) break; } };
+sql(`DELETE FROM sending_stops; DELETE FROM send_throttles; DELETE FROM rate_limits WHERE key LIKE 'tx%' OR key LIKE 'prov:%'`);
+const em = `eng.${rnd}@gmail.com`;
+
+// ── batch transactional ──
+let b = await raw('POST', '/transactional/batch', { messages: [{ to: em, subject: 'Batch one', text: 'one', idempotency_key: `b1-${rnd}` }, { to: 'not-an-email', subject: 'x', text: 'x' }, { to: `eng2.${rnd}@outlook.com`, subject: 'Batch three', text: 'three' }] });
+ok(b.status === 207 && b.body.data?.length === 3 && b.body.data[0].ok && b.body.data[0].data.status === 'simulated' && !b.body.data[1].ok && b.body.data[1].error.code === 'invalid_recipient' && b.body.data[2].ok && b.body.summary.accepted === 2, 'batch: per-message results (207 with one invalid)', JSON.stringify(b.body).slice(0, 300));
+const b2 = await raw('POST', '/transactional/batch', { messages: [{ to: em, subject: 'Batch one', text: 'one', idempotency_key: `b1-${rnd}` }] });
+ok(b2.status === 200 && b2.body.data[0].data.duplicate === true && b2.body.data[0].data.id === b.body.data[0].data.id && sql(`SELECT COUNT(*) AS n FROM tx_messages WHERE idempotency_key = 'b1-${rnd}'`)[0].n === 1, 'batch: idempotency per message');
+b = await raw('POST', '/transactional/batch', { messages: Array.from({ length: 101 }, () => ({ to: em, subject: 's', text: 't' })) });
+ok(b.status === 400 && b.body.error?.code === 'bad_request', 'batch: more than 100 messages rejected');
+
+// ── scheduled, cancel, expiry ──
+let tx = await raw('POST', '/transactional/send', { to: em, subject: `Later ${rnd}`, text: 'later', scheduled_at: new Date(Date.now() + 3600e3).toISOString() });
+ok(tx.status === 201 && tx.body.data?.status === 'scheduled' && !!tx.body.data.scheduled_at, 'scheduled transactional send accepted', JSON.stringify(tx.body).slice(0, 200));
+let cx = await raw('POST', `/transactional/messages/${tx.body.data.id}/cancel`);
+ok(cx.status === 200 && cx.body.data?.status === 'cancelled', 'scheduled message cancelled');
+cx = await raw('POST', `/transactional/messages/${tx.body.data.id}/cancel`);
+ok(cx.status === 409 && cx.body.error?.code === 'not_cancellable', 'cancelling twice → 409');
+const sched = await raw('POST', '/transactional/send', { to: em, subject: `Scheduled ${rnd}`, text: 'go', scheduled_at: Date.now() + 3600e3 });
+const expiring = await raw('POST', '/transactional/send', { to: em, subject: `Expiring ${rnd}`, text: 'too late', scheduled_at: Date.now() + 3600e3, expires_at: Date.now() + 7200e3 });
+sql(`UPDATE tx_messages SET expires_at = ${Date.now() - 1000} WHERE id = '${expiring.body.data.id}'; UPDATE jobs SET run_at = 0 WHERE kind = 'tx.send' AND status = 'pending' AND (payload LIKE '%${sched.body.data.id}%' OR payload LIKE '%${expiring.body.data.id}%')`);
+await runCron(4, () => sql(`SELECT COUNT(*) AS n FROM tx_messages WHERE id IN ('${sched.body.data.id}','${expiring.body.data.id}') AND status IN ('simulated','expired')`)[0].n === 2);
+const sRow = sql(`SELECT status, sent_at FROM tx_messages WHERE id = '${sched.body.data.id}'`)[0];
+ok(sRow.status === 'simulated' && !!sRow.sent_at, 'scheduled message sent by the job runner when due', JSON.stringify(sRow));
+ok(sql(`SELECT status FROM tx_messages WHERE id = '${expiring.body.data.id}'`)[0].status === 'expired' && sql(`SELECT COUNT(*) AS n FROM outbox WHERE subject = 'Expiring ${rnd}'`)[0].n === 0, 'message past expires_at → expired, not sent');
+tx = await raw('POST', '/transactional/send', { to: em, subject: 'Already late', text: 'x', expires_at: new Date(Date.now() - 60000).toISOString() });
+ok(tx.body.data?.status === 'expired', 'expires_at in the past → expired immediately');
+
+// ── priority: transactional never waits behind a big newsletter ──
+fakeSubs(300, 'pq');
+sql(`UPDATE publications SET settings = json_set(settings, '$.send_rate_per_minute', 300) WHERE id = '${pubId}'`); // a slow, large newsletter
+const pqPost = await newPost('Priority');
+const pqSend = (await api(key, 'POST', `/posts/${pqPost}/send`, {})).body?.data?.send_id;
+const pri = await raw('POST', '/transactional/send', { to: em, subject: `Priority ${rnd}`, text: 'fast', scheduled_at: Date.now() + 3600e3 });
+await sleep(1500);
+sql(`WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < 40) INSERT INTO jobs (id, kind, payload, run_at, status, attempts, priority, created_at) SELECT 'dq' || i || '${rnd}', 'send.batch', '{"send_id":"none-${rnd}"}', 0, 'pending', 0, 5, 0 FROM k; UPDATE jobs SET run_at = 1 WHERE kind = 'tx.send' AND status = 'pending' AND payload LIKE '%${pri.body.data.id}%'`);
+await runCron(3, () => sql(`SELECT status FROM tx_messages WHERE id = '${pri.body.data.id}'`)[0].status === 'simulated');
+const txJob = sql(`SELECT finished_at FROM jobs WHERE kind = 'tx.send' AND payload LIKE '%${pri.body.data.id}%'`)[0];
+const before = sql(`SELECT COUNT(*) AS n FROM jobs WHERE id LIKE 'dq%${rnd}' AND finished_at IS NOT NULL AND finished_at < ${txJob?.finished_at || 0}`)[0].n;
+const pqState = sql(`SELECT status, completed_at FROM sends WHERE id = '${pqSend}'`)[0];
+ok(txJob?.finished_at && before <= 2 && sql(`SELECT priority FROM jobs WHERE kind = 'tx.send' LIMIT 1`)[0].priority === 0, `scheduled transactional job ran ahead of 40 queued newsletter jobs (${before} ran first)`);
+ok(pqState.status === 'sending' || (pqState.completed_at && pqState.completed_at >= sql(`SELECT sent_at FROM tx_messages WHERE id = '${pri.body.data.id}'`)[0].sent_at), 'transactional went out while the large newsletter was still sending', JSON.stringify(pqState));
+sql(`UPDATE publications SET settings = json_remove(settings, '$.send_rate_per_minute') WHERE id = '${pubId}'; UPDATE sends SET status = 'cancelled' WHERE id = '${pqSend}'; DELETE FROM jobs WHERE id LIKE 'dq%${rnd}'; DELETE FROM subscribers WHERE id LIKE 'pq%${rnd}'`);
+
+// ── per-provider throttle (guardian row) + attempt history ──
+sql([1, 2, 3].map((i) => `INSERT INTO subscribers (id, pub_id, email, name, status, tier, source, referral_code, custom, confirmed_at, created_at, updated_at) VALUES ('po${i}${rnd}', '${pubId}', 'po${i}.${rnd}@outlook.com', '', 'active', 'free', 'import', 'po${i}${rnd}', '{}', 0, 0, 0)`).join('; ') + `; INSERT INTO send_throttles (scope, factor, reason, until, created_at) VALUES ('provider:outlook', 0, 'e2e: Outlook deferring', ${Date.now() + 600000}, ${Date.now()})`);
+const thPost = await newPost('Throttled');
+const thSend = (await api(key, 'POST', `/posts/${thPost}/send`, {})).body?.data?.send_id;
+await runCron(6, () => sql(`SELECT COUNT(*) AS n FROM deliveries WHERE send_id = '${thSend}' AND status = 'scheduled'`)[0].n >= 3 && sql(`SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending' AND kind = 'send.batch' AND payload LIKE '%${thSend}%' AND run_at > ${Date.now() + 20000}`)[0].n > 0);
+const thRows = sql(`SELECT email, status FROM deliveries WHERE send_id = '${thSend}'`);
+const outl = thRows.filter((x) => x.email.endsWith('@outlook.com') && x.email.startsWith('po'));
+ok(outl.length === 3 && outl.every((x) => x.status === 'scheduled') && thRows.filter((x) => x.email.endsWith('@gmail.com')).every((x) => x.status === 'sent') && sql(`SELECT status FROM sends WHERE id = '${thSend}'`)[0].status === 'sending', 'provider:outlook factor 0 holds Outlook recipients while Gmail goes out', JSON.stringify(thRows.slice(0, 4)));
+sql(`DELETE FROM send_throttles; UPDATE deliveries SET next_attempt_at = 0 WHERE send_id = '${thSend}' AND status = 'scheduled'; UPDATE jobs SET run_at = 0 WHERE status = 'pending' AND kind = 'send.batch' AND payload LIKE '%${thSend}%'`);
+await runCron(5, () => sql(`SELECT status FROM sends WHERE id = '${thSend}'`)[0].status === 'sent');
+ok(sql(`SELECT status FROM sends WHERE id = '${thSend}'`)[0].status === 'sent' && sql(`SELECT COUNT(*) AS n FROM deliveries WHERE send_id = '${thSend}' AND email LIKE 'po%' AND status = 'sent'`)[0].n === 3, 'throttle lifted → held recipients delivered and the send completes');
+// a deferred delivery retried by the retry job: two attempts recorded
+const dlv = sql(`SELECT id, email FROM deliveries WHERE send_id = '${thSend}' AND status = 'sent' AND email LIKE 'po1.%'`)[0];
+sql(`UPDATE deliveries SET status = 'deferred', next_attempt_at = 0, error = 'e2e: 421 try again' WHERE id = '${dlv.id}'; DELETE FROM rate_limits WHERE key = 'periodic:deliveries.retry'`);
+await runCron(3, () => sql(`SELECT status FROM deliveries WHERE id = '${dlv.id}'`)[0].status === 'sent');
+const att = await raw('GET', `/deliveries/${dlv.id}/attempts`);
+ok(att.status === 200 && att.body.data?.length === 2 && att.body.data.every((a) => a.status === 'simulated' && a.response && a.duration_ms >= 0) && att.body.delivery.email === dlv.email, 'GET /deliveries/:id/attempts lists both attempts (retry included)', JSON.stringify(att.body).slice(0, 300));
+const txAtt = await raw('GET', `/deliveries/${sched.body.data.id}/attempts`);
+ok(txAtt.status === 200 && txAtt.body.data?.length === 1, 'attempt history for a transactional message');
+ok((await raw('GET', `/deliveries/nope${rnd}/attempts`)).status === 404, 'unknown delivery → 404');
+r = await req(`/app/posts/${thPost}/recipients?q=po1.${rnd}`); let rh = await r.text();
+ok(r.status === 200 && rh.includes(dlv.email) && rh.includes(`/app/posts/${thPost}/d/${dlv.id}`), 'post report: recipient lookup');
+r = await req(`/app/posts/${thPost}/d/${dlv.id}`); rh = await r.text();
+ok(r.status === 200 && rh.includes('Attempts (2)') && rh.includes('data-attempt-response'), 'post report: per-recipient attempt drill-down');
+r = await req(`/app/settings/transactional/m/${sched.body.data.id}`); rh = await r.text();
+ok(r.status === 200 && rh.includes('Delivery attempts (1)'), 'transactional message log shows attempts');
+sql(`DELETE FROM subscribers WHERE id LIKE 'po%${rnd}'`);
+
+// ── Idempotency-Key on the broadcast send API + custom headers on API sends ──
+const idPost = await newPost('Idem');
+const ik = `send-${rnd}`;
+const s1 = await raw('POST', `/posts/${idPost}/send`, { headers: { 'X-Campaign-Ref': `ref-${rnd}` } }, { 'Idempotency-Key': ik });
+const s2 = await raw('POST', `/posts/${idPost}/send`, { headers: { 'X-Campaign-Ref': `ref-${rnd}` } }, { 'Idempotency-Key': ik });
+ok(s1.status === 202 && s2.status === 202 && s2.headers.get('idempotency-replayed') === 'true' && s2.body.data?.send_id === s1.body.data?.send_id && sql(`SELECT COUNT(*) AS n FROM sends WHERE post_id = '${idPost}'`)[0].n === 1, 'Idempotency-Key replays the original send response', JSON.stringify(s2.body).slice(0, 160));
+const s3 = await raw('POST', `/posts/${idPost}/send`, { audience: 'free' }, { 'Idempotency-Key': ik });
+ok(s3.status === 422 && s3.body.error?.code === 'idempotency_key_reused', 'same key with a different body → 422');
+await runCron(4, () => sql(`SELECT COUNT(*) AS n FROM outbox WHERE subject = 'Idem ${rnd}'`)[0].n > 0);
+ok((sql(`SELECT headers FROM outbox WHERE subject = 'Idem ${rnd}' LIMIT 1`)[0]?.headers || '').includes(`ref-${rnd}`), 'custom X- header on a broadcast API send');
+const bad = await raw('POST', `/posts/${await newPost('BadHdr')}/send`, { headers: { 'Return-Path': 'x@example.com' } });
+ok(bad.status === 400, 'Return-Path header rejected on the send API');
+tx = await raw('POST', '/transactional/send', { to: em, subject: `Hdr ${rnd}`, html: '<p><img src="cid:logo" alt="logo"></p>', headers: { 'X-Order-Id': '42', 'List-Id': '<orders.example.com>', 'In-Reply-To': '<abc@example.com>' }, attachments: [{ filename: 'logo.png', content: 'iVBORw0KGgo=', type: 'image/png', content_id: 'logo' }] }, { 'Idempotency-Key': `hdr-${rnd}` });
+const hob = sql(`SELECT headers FROM outbox WHERE subject = 'Hdr ${rnd}'`)[0]?.headers || '';
+ok(tx.status === 201 && hob.includes('X-Order-Id') && hob.includes('List-Id') && hob.includes('In-Reply-To') && tx.body.data.attachments[0]?.disposition === 'inline' && tx.body.data.attachments[0]?.content_id === 'logo', 'transactional custom headers + inline image (Content-ID)', JSON.stringify(tx.body).slice(0, 200));
+ok(tx.body.data.idempotency_key === `hdr-${rnd}`, 'Idempotency-Key header used for transactional sends');
+for (const h of ['Feedback-ID', 'Return-Path', 'X-OpenHive-Campaign', 'Subject']) { const x = await raw('POST', '/transactional/send', { to: em, subject: 'x', text: 'x', headers: { [h]: 'v' } }); if (x.status !== 400) ok(false, `header ${h} should be rejected`, x.status); }
+ok(true, 'platform-controlled headers (Feedback-ID, Return-Path, X-OpenHive-*, Subject) rejected');
+
+// ── international email ──
+tx = await raw('POST', '/transactional/send', { to: `müller.${rnd}@bücher.de`, subject: 'Grüße 🎉 日本語 {{name}}', from_name: 'Zoë Ñandú', text: 'Привет, мир', merge_vars: { name: 'José' } });
+const ob = sql(`SELECT subject, from_email, to_email, html FROM outbox WHERE to_email = 'müller.${rnd}@xn--bcher-kva.de'`)[0];
+ok(tx.status === 201 && tx.body.data.to === `müller.${rnd}@xn--bcher-kva.de` && ob?.subject === 'Grüße 🎉 日本語 José' && ob.from_email.startsWith('Zoë Ñandú') && ob.html.includes('Привет, мир'), 'IDN domain → punycode, UTF-8 local part, subject and sender name intact', JSON.stringify(ob || tx.body).slice(0, 200));
+tx = await raw('POST', '/transactional/send', { to: `x.${rnd}@gmаil.com`, subject: 'x', text: 'x' });
+ok(tx.status === 400 && /gmail\.com/.test(tx.body.error?.message || ''), 'homograph of gmail.com (Cyrillic а) rejected with a suggestion', JSON.stringify(tx.body));
+tx = await raw('POST', '/transactional/send', { to: `ü.${rnd}@mailinator.com`, subject: 'x', text: 'x' });
+ok(tx.status === 400, 'disposable domain still blocked with a UTF-8 local part');
+ok((await raw('POST', '/transactional/send', { to: `a..b@bücher.de`, subject: 'x', text: 'x' })).status === 400, 'invalid UTF-8 local part rejected');
+
+// ── kill switch: owner stop / resume ──
+r = await req('/app/sending/stop', { form: { reason: 'e2e wrong list' } });
+ok(sql(`SELECT COUNT(*) AS n FROM sending_stops WHERE scope = 'workspace:${wsId}'`)[0].n === 1, 'owner stops sending for the account');
+const qtx = await raw('POST', '/transactional/send', { to: em, subject: `Held ${rnd}`, text: 'wait' });
+ok(qtx.body.data?.status === 'queued', 'transactional mail queued (not dropped) while stopped', JSON.stringify(qtx.body).slice(0, 160));
+const ksPost = await newPost('Killswitch');
+const ksSend = (await api(key, 'POST', `/posts/${ksPost}/send`, {})).body?.data?.send_id;
+await runCron(3);
+ok(sql(`SELECT COUNT(*) AS n FROM deliveries WHERE send_id = '${ksSend}'`)[0].n === 0 && /stopped/i.test(sql(`SELECT status_reason FROM sends WHERE id = '${ksSend}'`)[0].status_reason || ''), 'newsletter waits while stopped (nothing delivered, reason shown)');
+r = await req('/app/sending'); rh = await r.text();
+ok(r.status === 200 && rh.includes('data-stop-banner="workspace"') && rh.includes('Resume sending'), 'sending page shows the stop banner and a resume button');
+r = await req(`/app/posts/${ksPost}`); ok((await r.text()).includes('data-stop-banner'), 'post report shows the stop banner');
+await req('/app/sending/resume', { form: {} });
+sql(`UPDATE jobs SET run_at = 0 WHERE status = 'pending' AND ((kind = 'tx.send' AND payload LIKE '%${qtx.body.data.id}%') OR (kind = 'send.batch' AND payload LIKE '%${ksSend}%'))`);
+await runCron(6, () => sql(`SELECT status FROM sends WHERE id = '${ksSend}'`)[0].status === 'sent' && sql(`SELECT status FROM tx_messages WHERE id = '${qtx.body.data.id}'`)[0].status === 'simulated');
+ok(sql(`SELECT status FROM sends WHERE id = '${ksSend}'`)[0].status === 'sent' && sql(`SELECT status FROM tx_messages WHERE id = '${qtx.body.data.id}'`)[0].status === 'simulated', 'resume: the waiting newsletter and transactional message go out');
+
+// ── superadmin: platform-wide stop + Queues page ──
+const ownerCookies = cookies; cookies = {};
+await req('/login', { form: { email: opsEmail, password: 'correct-horse-9' } });
+r = await req('/app/admin/queues/stop', { form: { reason: 'e2e incident' } });
+ok(sql(`SELECT COUNT(*) AS n FROM sending_stops WHERE scope = 'global'`)[0].n === 1, 'superadmin stops all sending');
+cookies = ownerCookies;
+const gtx = await raw('POST', '/transactional/send', { to: em, subject: `Global ${rnd}`, text: 'wait' });
+ok(gtx.body.data?.status === 'queued', 'platform stop holds transactional API mail');
+cookies = {}; await req('/login', { form: { email: opsEmail, password: 'correct-horse-9' } });
+sql(`INSERT INTO jobs (id, kind, payload, run_at, status, attempts, priority, error, created_at, finished_at) VALUES ('dl1${rnd}', 'e2e.nohandler', '{}', 0, 'failed', 8, 2, 'Error: e2e dead letter ${rnd}', 0, ${Date.now()}), ('dl2${rnd}', 'social.post', '{}', 0, 'failed', 8, 3, 'boom', 0, ${Date.now()})`);
+r = await req('/app/admin/queues'); rh = await r.text();
+ok(r.status === 200 && rh.includes('data-kill-switch="on"') && rh.includes('data-stop-banner="global"') && rh.includes(`e2e dead letter ${rnd}`) && rh.includes('Pending jobs by kind') && rh.includes('Sends in progress'), 'Queues page: kill switch state, banner, dead-letter jobs, pending + sends');
+await req(`/app/admin/queues/jobs/dl1${rnd}/retry`, { form: {} });
+await req(`/app/admin/queues/jobs/dl2${rnd}/discard`, { form: {} });
+const dls = sql(`SELECT id, status, attempts FROM jobs WHERE id IN ('dl1${rnd}','dl2${rnd}') ORDER BY id`);
+ok(dls[0].attempts <= 1 && dls[1].status === 'discarded', 'dead-letter retry + discard', JSON.stringify(dls));
+await req('/app/admin/queues/resume', { form: {} });
+ok(sql(`SELECT COUNT(*) AS n FROM sending_stops`)[0].n === 0, 'superadmin resumes all sending');
+await req(`/app/admin/w/${wsId}/stop-sending`, { form: { reason: 'e2e ws' } });
+ok(sql(`SELECT COUNT(*) AS n FROM sending_stops WHERE scope = 'workspace:${wsId}'`)[0].n === 1, 'superadmin can stop one workspace');
+await req(`/app/admin/w/${wsId}/resume-sending`, { form: {} });
+ok(sql(`SELECT COUNT(*) AS n FROM sending_stops`)[0].n === 0, '…and resume it');
+cookies = ownerCookies;
+sql(`UPDATE jobs SET run_at = 0 WHERE kind = 'tx.send' AND status = 'pending' AND payload LIKE '%${gtx.body.data.id}%'`);
+await runCron(3, () => sql(`SELECT status FROM tx_messages WHERE id = '${gtx.body.data.id}'`)[0].status === 'simulated');
+ok(sql(`SELECT status FROM tx_messages WHERE id = '${gtx.body.data.id}'`)[0].status === 'simulated', 'held transactional message sent after the platform resumes');
+sql(`DELETE FROM jobs WHERE id LIKE 'dl%${rnd}'`);
+const errs14 = sql(`SELECT source, message FROM error_log WHERE created_at > ${Date.now() - 600000} ORDER BY created_at DESC LIMIT 10`);
+ok(errs14.length === 0, 'no server errors logged (section 14)', JSON.stringify(errs14).slice(0, 800));
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

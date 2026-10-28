@@ -20,12 +20,13 @@ export interface MailInput {
   unsubscribeUrl?: string;      // https URL; also used for one-click POST
   campaignId?: string;          // send id → Feedback-ID
   headers?: Record<string, string>;
-  attachments?: Array<{ content: string; filename: string; type: string; disposition: 'attachment' | 'inline' }>;
+  /** inline parts need contentId (referenced from the HTML as src="cid:<contentId>") */
+  attachments?: Array<{ content: string; filename: string; type: string; disposition: 'attachment' | 'inline'; contentId?: string }>;
   /** Send for real even when EMAIL_MODE=simulate (used only by the demo's "send me a sample" page). */
   forceReal?: boolean;
 }
 
-export interface MailResult { ok: boolean; status: 'sent' | 'simulated' | 'failed' | 'suppressed'; messageId?: string; error?: string; code?: string; bounce?: BounceType | null; retry?: boolean }
+export interface MailResult { ok: boolean; status: 'sent' | 'simulated' | 'failed' | 'suppressed' | 'held'; messageId?: string; error?: string; code?: string; bounce?: BounceType | null; retry?: boolean }
 
 export type BounceType = 'hard' | 'soft' | 'mailbox_full' | 'dns' | 'policy' | 'complaint';
 
@@ -192,6 +193,63 @@ export async function sendMail(env: Env, m: MailInput): Promise<MailResult> {
     await recordBounce(env, to, m.pub?.id ?? null, res.bounce, res.error || '', 'transactional').catch(() => {});
   }
   return res;
+}
+
+// ───────── custom headers (API sends) ─────────
+/**
+ * Cloudflare Email Sending accepts X-* headers plus an allowlist; it rejects the whole send (E_HEADER_NOT_ALLOWED /
+ * E_HEADER_USE_API_FIELD) for platform-controlled ones such as Feedback-ID, Return-Path, Date or Message-ID, and for
+ * From/To/Subject/Reply-To (API fields). Limits: name ≤ 100 bytes, value ≤ 2,048 bytes, 16 KB total, 20 non-X headers.
+ */
+export const HEADER_ALLOWLIST = ['List-Id', 'References', 'In-Reply-To', 'Thread-Index', 'Thread-Topic'];
+const PLATFORM_HEADERS = /^(feedback-id|return-path|date|message-id|dkim-signature|received|mime-version|content-type|content-transfer-encoding|list-unsubscribe|list-unsubscribe-post|from|to|cc|bcc|subject|reply-to|sender|x-openhive-.*)$/i;
+
+/** Validate API-supplied headers. Returns the cleaned headers or an error message naming the offending header. */
+export function sanitizeHeaders(input: unknown): { ok: true; headers: Record<string, string> } | { ok: false; error: string } {
+  if (input === undefined || input === null) return { ok: true, headers: {} };
+  if (typeof input !== 'object' || Array.isArray(input)) return { ok: false, error: 'headers must be an object of name → value.' };
+  const out: Record<string, string> = {};
+  let total = 0, listed = 0;
+  const enc = new TextEncoder();
+  for (const [rawName, rawVal] of Object.entries(input as Record<string, unknown>)) {
+    const name = String(rawName).trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(name)) return { ok: false, error: `Header name "${name.slice(0, 60)}" is invalid.` };
+    if (PLATFORM_HEADERS.test(name)) return { ok: false, error: `Header "${name}" can't be set: it is controlled by the platform or set through its own field.` };
+    const allowed = HEADER_ALLOWLIST.find((h) => h.toLowerCase() === name.toLowerCase());
+    if (!/^X-/i.test(name) && !allowed) return { ok: false, error: `Header "${name}" is not allowed. Use X-* headers or one of: ${HEADER_ALLOWLIST.join(', ')}.` };
+    if (typeof rawVal !== 'string' && typeof rawVal !== 'number') return { ok: false, error: `Header "${name}" must have a string value.` };
+    const value = String(rawVal).trim();
+    if (!value || /[\r\n\0]/.test(value)) return { ok: false, error: `Header "${name}" has an empty or multi-line value.` };
+    const bytes = enc.encode(value).length;
+    if (bytes > 2048) return { ok: false, error: `Header "${name}" is longer than 2,048 bytes.` };
+    total += bytes + name.length;
+    if (allowed) listed++;
+    out[allowed || name] = value;
+  }
+  if (total > 16_000) return { ok: false, error: 'Custom headers may total at most 16 KB.' };
+  if (listed > 20) return { ok: false, error: 'At most 20 non-X custom headers.' };
+  return { ok: true, headers: out };
+}
+
+// ───────── delivery attempt history ─────────
+/** Record one attempt (attempt number = previous attempts + 1). Never throws. */
+export async function recordAttempt(env: Env, deliveryId: string, kind: 'marketing' | 'transactional', res: MailResult, durationMs: number, status?: string) {
+  const st = status || (res.ok ? res.status : res.status === 'failed' && res.retry ? 'deferred' : res.status === 'failed' && res.bounce ? 'bounced' : res.status);
+  await run(env, `INSERT INTO delivery_attempts (id, delivery_id, kind, attempt, status, response, duration_ms, created_at)
+    SELECT ?, ?, ?, COALESCE(MAX(attempt), 0) + 1, ?, ?, ?, ? FROM delivery_attempts WHERE delivery_id = ?`,
+    id(), deliveryId, kind, st, String(res.ok ? res.messageId || '' : res.error || res.status).slice(0, 1000), Math.max(0, Math.round(durationMs)), now(), deliveryId).catch(() => {});
+}
+
+/** sendMail + attempt history for a delivery / transactional message. */
+export async function sendMailRecorded(env: Env, deliveryId: string, m: MailInput): Promise<MailResult> {
+  const t0 = Date.now();
+  const res = await sendMail(env, m);
+  await recordAttempt(env, deliveryId, m.kind || 'marketing', res, Date.now() - t0);
+  return res;
+}
+
+export async function attemptsFor(env: Env, deliveryId: string) {
+  return all<{ attempt: number; status: string; response: string | null; duration_ms: number; created_at: number; kind: string }>(env, 'SELECT attempt, status, response, duration_ms, created_at, kind FROM delivery_attempts WHERE delivery_id = ? ORDER BY attempt', deliveryId);
 }
 
 /** Transactional helper with a simple branded layout. */

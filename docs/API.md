@@ -102,10 +102,30 @@ When a post is created from a template, the template's current content is copied
 | Polls & surveys | list, live results/aggregates, individual responses; `POST /polls` (incl. trivia), `PATCH /polls/{id}` (close/reopen), `POST /surveys`, `PATCH /surveys/{id}` |
 | Webhooks | list, create (returns signing secret), update/upgrade version (`PATCH`), delete, `GET /webhooks/versions`, delivery log with every attempt (`?expand=attempts`, `GET /webhooks/{id}/deliveries/{did}`) |
 | Commerce | orders, products |
-| Transactional | `POST /transactional/send`, message log (`GET /transactional/messages`, `/transactional/messages/{id}`), templates (`GET`/`POST /transactional/templates`) — see below |
+| Transactional | `POST /transactional/send`, `POST /transactional/batch` (up to 100), `POST /transactional/messages/{id}/cancel`, message log (`GET /transactional/messages`, `/transactional/messages/{id}`), templates (`GET`/`POST /transactional/templates`) — see below |
+| Deliveries | `GET /deliveries/{id}/attempts` — every attempt to hand one email (newsletter/automation delivery or transactional message) to the provider, retries included |
 | Podcasts | shows, episodes with downloads |
 | Stats | summary (with plain-English sentence), growth series, earnings |
 | Templates | list, get |
+
+## Idempotency
+
+`POST /posts/{id}/send` accepts an `Idempotency-Key` header (up to 200 characters). The first response (status and body) is stored for 24 hours; repeating the request with the same key returns it again with `Idempotency-Replayed: true` instead of sending twice. The same key with a different body returns `422 idempotency_key_reused`; a repeat while the first is still running returns `409 idempotency_in_progress`. Server errors (5xx) are not stored, so you can retry them with the same key.
+
+On `POST /transactional/send` the header is the same as the body's `idempotency_key` (a repeat returns the original message with `"duplicate": true`); in a batch, give each message its own `idempotency_key`.
+
+## Custom headers
+
+`POST /posts/{id}/send` (immediate sends) and transactional sends accept `"headers": {"X-Order-Id": "42"}`. Allowed: any `X-*` header (except `X-OpenHive-*`) plus `List-Id`, `References`, `In-Reply-To`, `Thread-Index`, `Thread-Topic`. Platform-controlled headers (`Feedback-ID`, `Return-Path`, `Date`, `Message-ID`, `List-Unsubscribe`, …) and headers that have their own field (`From`, `To`, `Subject`, `Reply-To`) return `400 bad_request`, because Cloudflare Email Sending would reject the whole message. Limits: values up to 2,048 bytes, 16 KB in total, at most 20 non-`X-` headers.
+
+## Sending pipeline
+
+- **Priority queues.** Background jobs run by priority: transactional (scheduled sends and retries) first, then automations, webhooks, other work, newsletter batches, and bulk work (imports). Transactional mail never waits behind a large newsletter.
+- **Mailbox provider limits.** Each newsletter batch is split by provider (Gmail 3,000/min, Microsoft 1,200, Yahoo 1,200, Apple 1,000, other 3,000, shared platform-wide); recipients that don't fit this minute go out in the next window.
+- **Adaptive pace.** When more than 10% of a batch is deferred or fails temporarily, the send halves its pace and parallelism (down to 10%) and recovers by 10% per clean batch.
+- **Throttles.** The deliverability guardian can slow or pause sending globally, per provider or per workspace (`send_throttles`); paused mail waits, it is never dropped.
+- **Emergency stop.** The account owner (Settings → `/app/sending`) or the operators can stop all sending for an account, and operators can stop the whole platform. It takes effect within one batch; queued newsletters, automation emails and transactional messages wait and continue on resume. Account emails such as login links are not stopped.
+- **Attempt history.** Every attempt is recorded with its result, the provider's response or error, and duration: `GET /deliveries/{id}/attempts`, the post report (Recipients) and the transactional message log.
 
 ## Automations
 
@@ -150,12 +170,26 @@ curl -X POST $API/transactional/send -H "$AUTH" -H 'content-type: application/js
   "reply_to": "support@example.com", "tags": ["receipt"],
   "idempotency_key": "order-1001",                # a repeat returns the original message (200, "duplicate": true)
   "track": true,                                  # open + click tracking (off by default)
-  "attachments": [{"filename": "receipt.pdf", "content": "<base64>", "type": "application/pdf"}]
+  "attachments": [{"filename": "receipt.pdf", "content": "<base64>", "type": "application/pdf"},
+                  {"filename": "logo.png", "content": "<base64>", "type": "image/png", "content_id": "logo"}],  # inline: <img src="cid:logo">
+  "headers": {"X-Order-Id": "1001"},
+  "scheduled_at": "2026-11-01T09:00:00Z",         # optional: send later (≤ 30 days); cancel with POST /transactional/messages/{id}/cancel
+  "expires_at": "2026-11-01T10:00:00Z"            # optional: not handed to the provider by then → "expired", never sent
 }'
-# → 201 {"data": {"id": "tx_…", "status": "sent", "message_id": "…", …}}
+# → 201 {"data": {"id": "tx_…", "status": "sent", "message_id": "…", "attempts": 1, …}}
+
+# up to 100 messages per call; one result per message, same order (200 all accepted, 207 some failed, 400 none)
+curl -X POST $API/transactional/batch -H "$AUTH" -H 'content-type: application/json' -d '{
+  "messages": [{"to": "a@example.com", "subject": "Hi", "text": "…", "idempotency_key": "m-1"}, {"to": "b@example.com", "template_id": "order-receipt"}]
+}'
+# → {"data": [{"index": 0, "ok": true, "status": 201, "data": {…}}, {"index": 1, "ok": false, "status": 400, "error": {"code": "invalid_recipient", …}}], "summary": {…}}
 ```
 
-Errors: `400 invalid_recipient | bad_request`, `404 not_found` (template), `402 suspended`, `429 rate_limited` (60/min per key) or `429 daily_cap` (200 per 24 h on Free, 5,000 on paid plans). Transactional mail does not count toward the plan's monthly newsletter emails; newsletter unsubscribes don't block it, transactional bounces/complaints do. Details: [Store sync, transactional email & Inbox](/docs/commerce).
+Statuses: `sent` / `simulated`, `scheduled`, `queued` (sending is stopped; goes out on resume), `deferred` (temporary provider error, retried with backoff up to 5 attempts, never past `expires_at`), `expired`, `cancelled`, `failed`, `suppressed`, `bounced`, `complained`.
+
+Recipients may use internationalized domains (`müller@bücher.de` is stored and sent as `müller@xn--bcher-kva.de`) and UTF-8 local parts; lookalikes of big providers (`gmаil.com` with a Cyrillic "а") are rejected like typos. UTF-8 subjects and sender names are sent as-is.
+
+Errors: `400 invalid_recipient | bad_request`, `404 not_found` (template), `402 suspended`, `429 rate_limited` (60/min per key; batch calls 10/min per key) or `429 daily_cap` (200 per 24 h on Free, 5,000 on paid plans). Transactional mail does not count toward the plan's monthly newsletter emails; newsletter unsubscribes don't block it, transactional bounces/complaints do. Details: [Store sync, transactional email & Inbox](/docs/commerce).
 
 ## Segment rules
 

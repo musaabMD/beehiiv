@@ -5,17 +5,19 @@
 // resume/cancel safety-paused campaigns, suspend/unsuspend sending, change plans, edit the plan catalog.
 import { Hono } from 'hono';
 import type { AppEnv, Ctx, Module } from '../types';
-import { one, all, run } from '../lib/db';
+import { one, all, run, insert } from '../lib/db';
+import { loadThrottles, factorFrom, stopSending, resumeSending, getStop, PROVIDERS, PROVIDER_RATES } from '../lib/throttle';
+import { retryJob, discardJob, kick } from '../lib/jobs';
 import { currentUser } from '../lib/auth';
 import { DashLayout, PlainLayout } from '../ui/layout';
 import { Card, Field, Input, Select, Btn, ActionForm, Table, Badge, Status, Help, Tabs, Stats, Stat, Muted, back, flash } from '../ui/components';
 import { listPlans, getPlan, planStatus, isSuperadmin, monthStart, clearPlanCache, LIMITS, FREE_PLAN_ID, effectivePlanId } from '../lib/plans';
 import { accountStats, suspendWorkspace, unsuspendWorkspace, approveSend, rejectSend, resumeSend } from '../lib/safety';
 import { setPlan, completeCheckout } from '../lib/platformbilling';
-import { id, now, num, money, ago, fmtDate, fmtDateTime, form, str, int, esc, DAY } from '../lib/util';
+import { id, now, num, money, ago, fmtDate, fmtDateTime, form, str, int, esc, parseJSON, DAY } from '../lib/util';
 import { audit } from '../lib/auth';
 import { runGuardian, activeThrottles, setManualThrottle, clearThrottle, mtaHealth, worstWorkspaces } from '../lib/guardian';
-import { metricsByProvider, fmtDuration, PROVIDER_NAME, PROVIDERS } from '../lib/deliverymetrics';
+import { metricsByProvider, fmtDuration, PROVIDER_NAME, PROVIDERS as GUARD_PROVIDERS } from '../lib/deliverymetrics';
 import { domainPassRates } from '../lib/dmarc';
 import { HOUR } from '../lib/util';
 
@@ -27,9 +29,16 @@ dash.use('*', async (c, next) => {
   await next();
 });
 
-const TABS: Array<[string, string]> = [['/app/admin', 'Workspaces'], ['/app/admin/sends', 'Campaign review'], ['/app/admin/plans', 'Plans'], ['/app/admin/events', 'Activity']];
-function page(c: Ctx, active: string, title: string, body: any, crumbs?: Array<[string, string]>) {
-  return c.html(<DashLayout c={c} title={title} section="admin" crumbs={crumbs} wide><Tabs items={TABS} active={active} />{body}</DashLayout>);
+const TABS: Array<[string, string]> = [['/app/admin', 'Workspaces'], ['/app/admin/sends', 'Campaign review'], ['/app/admin/queues', 'Queues'], ['/app/admin/plans', 'Plans'], ['/app/admin/events', 'Activity']];
+async function page(c: Ctx, active: string, title: string, body: any, crumbs?: Array<[string, string]>) {
+  const stop = await getStop(c.env, 'global');
+  const banner = stop ? (
+    <div class="callout danger row" data-stop-banner="global" style="justify-content:space-between;gap:12px">
+      <span><strong>All sending is stopped</strong> ({ago(stop.created_at)} by {stop.stopped_by || 'an operator'}{stop.reason ? `: ${stop.reason}` : ''}). Queued email is waiting.</span>
+      <form method="post" action="/app/admin/queues/resume"><Btn kind="primary" small confirm="Resume sending on the whole platform?">Resume sending</Btn></form>
+    </div>
+  ) : null;
+  return c.html(<DashLayout c={c} title={title} section="admin" crumbs={crumbs} wide>{banner}<Tabs items={TABS} active={active} />{body}</DashLayout>);
 }
 const rate = (n: number, d: number, digits = 2) => (d ? `${((n / d) * 100).toFixed(digits)}%` : '—');
 const actor = (c: Ctx) => c.get('user').email;
@@ -96,6 +105,7 @@ dash.get('/w/:id', async (c) => {
   const st = await planStatus(c.env, c.req.param('id'));
   if (!st) return c.notFound();
   const ws = st.ws;
+  const wsStop = await getStop(c.env, `workspace:${c.req.param('id')}`);
   const [owner, pubs, sends, events, acct, plans] = await Promise.all([
     one<any>(c.env, 'SELECT email, name FROM users WHERE id = ?', ws.owner_id),
     all<any>(c.env, `SELECT p.id, p.slug, p.name, p.status, (SELECT COUNT(*) FROM subscribers s WHERE s.pub_id = p.id AND s.status = 'active') AS subs FROM publications p WHERE p.workspace_id = ? ORDER BY p.created_at`, ws.id),
@@ -124,6 +134,9 @@ dash.get('/w/:id', async (c) => {
         {ws.sending_status === 'suspended'
           ? <form method="post" action={`/app/admin/w/${ws.id}/unsuspend`} class="stack"><Input name="note" placeholder="Note to the owner (optional)" /><Btn small>Unsuspend sending</Btn></form>
           : <form method="post" action={`/app/admin/w/${ws.id}/suspend`} class="stack"><Input name="note" placeholder="Reason (shown to the owner)" required /><Btn kind="danger" small confirm="Suspend sending for this workspace? In-flight campaigns pause.">Suspend sending</Btn></form>}
+        {wsStop
+          ? <form method="post" action={`/app/admin/w/${ws.id}/resume-sending`} class="stack" style="margin-top:10px" data-ws-stop="on"><span class="small">Emergency stop since {ago(wsStop.created_at)} by {wsStop.stopped_by}{wsStop.reason ? `: ${wsStop.reason}` : ''}</span><Btn small>Resume sending</Btn></form>
+          : <form method="post" action={`/app/admin/w/${ws.id}/stop-sending`} class="row" style="margin-top:10px;gap:6px" data-ws-stop="off"><Input name="reason" placeholder="Emergency stop reason" /><Btn kind="danger" small confirm="Stop all sending for this workspace now? Queued email waits.">Stop sending</Btn></form>}
         <div class="row" style="gap:8px;margin-top:10px">
           {!ws.trusted_at ? <ActionForm action={`/app/admin/w/${ws.id}/trust`} label="Trust (skip first-campaign review)" /> : <ActionForm action={`/app/admin/w/${ws.id}/untrust`} label="Require review again" />}
         </div>
@@ -285,6 +298,194 @@ dash.get('/events', async (c) => {
   ));
 });
 
+// ───────── queues, dead-letter jobs, sends in progress, kill switch ─────────
+dash.get('/queues', async (c) => {
+  const t = now();
+  const [groups, failed, stuck, sends, thr, stops, windows] = await Promise.all([
+    all<any>(c.env, `SELECT kind, priority, COUNT(*) AS n, SUM(CASE WHEN run_at <= ? THEN 1 ELSE 0 END) AS due, SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running, MIN(CASE WHEN run_at <= ? THEN run_at END) AS oldest_due, MIN(run_at) AS next_at FROM jobs WHERE status IN ('pending','running') GROUP BY kind, priority ORDER BY priority, kind`, t, t),
+    all<any>(c.env, `SELECT id, kind, priority, payload, attempts, error, created_at, finished_at FROM jobs WHERE status = 'failed' ORDER BY COALESCE(finished_at, created_at) DESC LIMIT 100`),
+    one<{ n: number }>(c.env, `SELECT COUNT(*) AS n FROM jobs WHERE status = 'running' AND locked_until < ?`, t),
+    all<any>(c.env, `SELECT s.id, s.subject, s.status, s.status_reason, s.total, s.sent, s.failed, s.pace, s.started_at, p.name AS pub_name, p.settings AS pub_settings, w.id AS ws_id, w.name AS ws_name,
+        (SELECT COUNT(*) FROM deliveries d WHERE d.send_id = s.id AND d.status = 'scheduled') AS waiting,
+        (SELECT COUNT(*) FROM deliveries d WHERE d.send_id = s.id AND d.created_at > ?) AS last5
+      FROM sends s JOIN publications p ON p.id = s.pub_id LEFT JOIN workspaces w ON w.id = p.workspace_id WHERE s.status IN ('sending','testing') AND s.kind = 'post' ORDER BY s.started_at LIMIT 100`, t - 5 * 60_000),
+    loadThrottles(c.env),
+    all<any>(c.env, `SELECT st.*, w.name AS ws_name FROM sending_stops st LEFT JOIN workspaces w ON 'workspace:' || w.id = st.scope ORDER BY st.created_at DESC`),
+    all<any>(c.env, `SELECT key, count, reset_at FROM rate_limits WHERE key LIKE 'prov:%'`),
+  ]);
+  const global = stops.find((s) => s.scope === 'global');
+  const pending = groups.reduce((a, g) => a + g.n, 0);
+  const oldest = groups.reduce((m, g) => (g.oldest_due && (!m || g.oldest_due < m) ? g.oldest_due : m), 0 as number);
+  const prio = (p: number) => (p <= 0 ? 'transactional' : p === 1 ? 'automation' : p === 2 ? 'webhook' : p <= 3 ? 'normal' : p <= 5 ? 'newsletter' : 'bulk');
+  const age = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : `${(ms / 3_600_000).toFixed(1)} h`);
+  return page(c, '/app/admin/queues', 'Queues', <>
+    <Stats>
+      <Stat label="Pending jobs" value={num(pending)} sub={`${num(groups.reduce((a, g) => a + (g.due || 0), 0))} due now`} />
+      <Stat label="Oldest due job" value={oldest ? age(t - oldest) : '—'} sub="waiting past its run time" />
+      <Stat label="Dead-letter (failed)" value={num(failed.length)} sub={stuck?.n ? `${num(stuck.n)} stuck running` : 'gave up after 8 attempts'} />
+      <Stat label="Sends in progress" value={num(sends.length)} />
+    </Stats>
+    <Card title="Emergency stop" actions={global ? <Badge tone="red">all sending stopped</Badge> : <Badge tone="green">sending normally</Badge>}>
+      {global ? (
+        <form method="post" action="/app/admin/queues/resume" class="row" data-kill-switch="on">
+          <span>Stopped {ago(global.created_at)} by {global.stopped_by || 'an operator'}{global.reason ? `: ${global.reason}` : ''}. Newsletters, automations and API transactional mail are waiting in the queue; account emails (login links) still go out.</span>
+          <Btn kind="primary" confirm="Resume sending on the whole platform?">Resume all sending</Btn>
+        </form>
+      ) : (
+        <form method="post" action="/app/admin/queues/stop" class="row" data-kill-switch="off">
+          <input class="input grow" name="reason" placeholder="Reason (shown to every workspace)" required maxlength={300} />
+          <Btn kind="danger" confirm="Stop ALL sending on the platform? Queued email waits until you resume.">Stop all sending</Btn>
+        </form>
+      )}
+      <Help>Takes effect at the next batch of every send (within about a minute). Nothing is dropped: queued campaigns, automation emails and transactional messages wait and continue on resume. Per-workspace stops are on each workspace's page (owners can also stop their own account in Settings).</Help>
+      {stops.filter((s) => s.scope !== 'global').length > 0 && (
+        <Table<any> rows={stops.filter((s) => s.scope !== 'global')} cols={[
+          { h: 'Stopped workspace', r: (s) => <a href={`/app/admin/w/${s.scope.slice(10)}`}>{s.ws_name || s.scope.slice(10)}</a> },
+          { h: 'Reason', r: (s) => s.reason || '—' },
+          { h: 'By', r: (s) => s.stopped_by || '—' },
+          { h: 'Since', r: (s) => ago(s.created_at) },
+          { h: '', r: (s) => <ActionForm action={`/app/admin/w/${s.scope.slice(10)}/resume-sending`} label="Resume" /> },
+        ]} />
+      )}
+    </Card>
+    <Card title="Throttles (deliverability guardian)" pad={false}>
+      <Table<any> rows={[...thr.rows.values()]} empty="No active throttles: everything at full speed." cols={[
+        { h: 'Scope', r: (r) => <code>{r.scope}</code> },
+        { h: 'Factor', r: (r) => (r.factor <= 0 ? <Badge tone="red">paused</Badge> : `${Math.round(r.factor * 100)}%`) },
+        { h: 'Reason', r: (r) => r.reason || '—' },
+        { h: 'Until', r: (r) => (r.until ? fmtDateTime(r.until) : 'until lifted') },
+      ]} />
+    </Card>
+    <Card title="Mailbox provider windows (this minute)" pad={false}>
+      <Table<any> rows={PROVIDERS.map((p) => { const w = windows.find((x) => x.key === 'prov:' + p && x.reset_at > t); const f = factorFrom(thr, null, p); return { p, used: w?.count || 0, cap: Math.floor(PROVIDER_RATES[p] * f), base: PROVIDER_RATES[p] }; })} cols={[
+        { h: 'Provider', r: (r) => <span style="text-transform:capitalize">{r.p}</span> },
+        { h: 'Sent this minute', r: (r) => num(r.used), class: 'right' },
+        { h: 'Limit / min', r: (r) => <>{num(r.cap)}{r.cap !== r.base ? <Muted> (of {num(r.base)})</Muted> : null}</>, class: 'right' },
+      ]} />
+    </Card>
+    <Card title="Pending jobs by kind" pad={false}>
+      <Table<any> rows={groups} empty="The queue is empty." cols={[
+        { h: 'Kind', r: (g) => <code>{g.kind}</code> },
+        { h: 'Priority', r: (g) => <>{g.priority} <Muted>{prio(g.priority)}</Muted></> },
+        { h: 'Pending', r: (g) => num(g.n), class: 'right' },
+        { h: 'Due now', r: (g) => num(g.due || 0), class: 'right' },
+        { h: 'Running', r: (g) => num(g.running || 0), class: 'right' },
+        { h: 'Oldest due', r: (g) => (g.oldest_due ? age(t - g.oldest_due) : <Muted>next {g.next_at ? ago(g.next_at) : '—'}</Muted>) },
+      ]} />
+    </Card>
+    <Card title="Sends in progress" pad={false}>
+      <Table<any> rows={sends} empty="No newsletter is sending right now." cols={[
+        { h: 'Campaign', r: (s) => <><strong>{s.subject}</strong><div class="small muted">{s.pub_name}{s.ws_id ? <> · <a href={`/app/admin/w/${s.ws_id}`}>{s.ws_name}</a></> : null}</div></> },
+        { h: 'Progress', r: (s) => <>{num(s.sent)} / {num(s.total)}{s.waiting ? <div class="small muted">{num(s.waiting)} waiting (scheduled / provider limit)</div> : null}</> },
+        { h: 'Pace', r: (s) => { const rate = Number(parseJSON<any>(s.pub_settings, {}).send_rate_per_minute) || Number((c.env as any).SEND_RATE_PER_MINUTE) || 1200; const f = factorFrom(thr, s.ws_id, null); return <span data-pace={s.pace}>{Math.round((s.pace || 1) * 100)}%{f < 1 ? <> × {Math.round(f * 100)}% throttle</> : null}<div class="small muted">~{num(Math.round(rate * (s.pace || 1) * f))}/min target · {num(s.last5)} in last 5 min</div></span>; } },
+        { h: 'Status', r: (s) => <><Status s={s.status} />{s.status_reason ? <div class="small muted" style="max-width:300px">{s.status_reason}</div> : null}</> },
+        { h: 'Started', r: (s) => (s.started_at ? ago(s.started_at) : '—') },
+      ]} />
+    </Card>
+    <Card title={`Failed jobs — dead letter (${failed.length})`} pad={false}>
+      <Table<any> rows={failed} empty="No failed jobs." cols={[
+        { h: 'Job', r: (j) => <><code>{j.kind}</code><div class="small muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{j.payload}</div></> },
+        { h: 'Attempts', r: (j) => num(j.attempts), class: 'right' },
+        { h: 'Error', r: (j) => <span class="small" style="display:block;max-width:420px;white-space:pre-wrap;word-break:break-word" data-job-error={j.id}>{String(j.error || '').split('\n')[0].slice(0, 300)}</span> },
+        { h: 'Failed', r: (j) => ago(j.finished_at || j.created_at) },
+        { h: '', r: (j) => <div class="row" style="gap:6px"><ActionForm action={`/app/admin/queues/jobs/${j.id}/retry`} label="Retry" /><ActionForm action={`/app/admin/queues/jobs/${j.id}/discard`} label="Discard" kind="ghost" confirm="Discard this job? It won't run again." /></div> },
+      ]} />
+    </Card>
+  </>, [['/app/admin', 'Platform admin']]);
+});
+
+dash.post('/queues/stop', async (c) => {
+  const f = await form(c.req);
+  await stopSending(c.env, 'global', str(f.reason, 300) || 'Emergency stop', actor(c));
+  await insert(c.env, 'platform_events', { id: id(), workspace_id: null, send_id: null, kind: 'sending_stopped', detail: 'Platform-wide stop: ' + (str(f.reason, 300) || 'Emergency stop'), actor: actor(c), created_at: now() });
+  await audit(c, 'platform.stop_sending', 'global', { reason: str(f.reason, 300) });
+  return back(c, '/app/admin/queues', 'All sending stopped. Queued email waits until you resume.');
+});
+dash.post('/queues/resume', async (c) => {
+  await resumeSending(c.env, 'global');
+  await insert(c.env, 'platform_events', { id: id(), workspace_id: null, send_id: null, kind: 'sending_resumed', detail: 'Platform-wide stop lifted', actor: actor(c), created_at: now() });
+  await audit(c, 'platform.resume_sending', 'global');
+  kick(c.env, c.executionCtx);
+  return back(c, '/app/admin/queues', 'Sending resumed.');
+});
+dash.post('/queues/jobs/:id/retry', async (c) => {
+  const r = await retryJob(c.env, c.req.param('id'));
+  await audit(c, 'platform.job_retry', c.req.param('id'));
+  if (r.meta.changes) kick(c.env, c.executionCtx);
+  return back(c, '/app/admin/queues', r.meta.changes ? 'Job queued again.' : 'That job is no longer in the dead-letter list.');
+});
+dash.post('/queues/jobs/:id/discard', async (c) => {
+  const r = await discardJob(c.env, c.req.param('id'));
+  await audit(c, 'platform.job_discard', c.req.param('id'));
+  return back(c, '/app/admin/queues', r.meta.changes ? 'Job discarded.' : 'Job not found.');
+});
+dash.post('/w/:id/stop-sending', async (c) => {
+  const f = await form(c.req);
+  const wid = c.req.param('id');
+  await stopSending(c.env, `workspace:${wid}`, str(f.reason, 300) || 'Stopped by the platform team', actor(c));
+  await insert(c.env, 'platform_events', { id: id(), workspace_id: wid, send_id: null, kind: 'sending_stopped', detail: str(f.reason, 300) || 'Stopped by the platform team', actor: actor(c), created_at: now() });
+  await audit(c, 'platform.stop_sending', wid);
+  return back(c, `/app/admin/w/${wid}`, 'Sending stopped for this workspace. Queued email waits.');
+});
+dash.post('/w/:id/resume-sending', async (c) => {
+  const wid = c.req.param('id');
+  await resumeSending(c.env, `workspace:${wid}`);
+  await insert(c.env, 'platform_events', { id: id(), workspace_id: wid, send_id: null, kind: 'sending_resumed', detail: 'Stop lifted', actor: actor(c), created_at: now() });
+  await audit(c, 'platform.resume_sending', wid);
+  kick(c.env, c.executionCtx);
+  return back(c, c.req.header('referer')?.includes('/queues') ? '/app/admin/queues' : `/app/admin/w/${wid}`, 'Sending resumed for this workspace.');
+});
+
+// ───────── owner: stop / resume this account's sending ─────────
+async function ownerCtx(c: Ctx) {
+  const pub = c.get('pub');
+  const user = c.get('user');
+  if (!pub || !user) return null;
+  const ws = await one<any>(c.env, 'SELECT id, name, owner_id FROM workspaces WHERE id = ?', pub.workspace_id);
+  if (!ws) return null;
+  const allowed = ws.owner_id === user.id || c.get('role') === 'owner' || isSuperadmin(c.env, user);
+  return { ws, allowed };
+}
+root.get('/app/sending', async (c) => {
+  const o = await ownerCtx(c);
+  if (!o) return c.notFound();
+  const [mine, global] = await Promise.all([getStop(c.env, `workspace:${o.ws.id}`), getStop(c.env, 'global')]);
+  const waiting = await one<any>(c.env, `SELECT (SELECT COUNT(*) FROM sends s JOIN publications p ON p.id = s.pub_id WHERE p.workspace_id = ? AND s.status IN ('sending','testing')) AS sends, (SELECT COUNT(*) FROM tx_messages m JOIN publications p ON p.id = m.pub_id WHERE p.workspace_id = ? AND m.status IN ('queued','scheduled','deferred')) AS tx`, o.ws.id, o.ws.id);
+  return c.html(<DashLayout c={c} title="Sending" section="settings">
+    {global && <div class="callout danger" data-stop-banner="global"><strong>Sending is stopped platform-wide</strong> by the operators{global.reason ? `: ${global.reason}` : ''}. Your queued email will go out automatically when it resumes.</div>}
+    {mine && <div class="callout danger" data-stop-banner="workspace"><strong>Sending is stopped for {o.ws.name}</strong> since {fmtDateTime(mine.created_at)}{mine.reason ? ` — ${mine.reason}` : ''}. Newsletters, automation emails and API transactional mail wait in the queue ({num(waiting?.sends || 0)} campaigns, {num(waiting?.tx || 0)} transactional messages).</div>}
+    <Card title="Emergency stop">
+      <p>Stop every email this account sends — newsletters, automation emails and API transactional mail — right away (it takes effect within one sending batch). Nothing is lost: queued email waits and continues when you resume. Account emails such as login links still go out.</p>
+      {!o.allowed ? <p class="muted">Only the account owner can stop or resume sending.</p> : mine ? (
+        <form method="post" action="/app/sending/resume"><Btn kind="primary" confirm="Resume sending for this account?">Resume sending</Btn></form>
+      ) : (
+        <form method="post" action="/app/sending/stop" class="row">
+          <input class="input grow" name="reason" placeholder="Reason (optional, e.g. wrong list selected)" maxlength={300} />
+          <Btn kind="danger" confirm="Stop all sending for this account? Queued email waits until you resume.">Stop all sending</Btn>
+        </form>
+      )}
+    </Card>
+  </DashLayout>);
+});
+root.post('/app/sending/stop', async (c) => {
+  const o = await ownerCtx(c);
+  if (!o?.allowed) return c.text('Only the account owner can stop sending.', 403);
+  const f = await form(c.req);
+  await stopSending(c.env, `workspace:${o.ws.id}`, str(f.reason, 300), c.get('user').email);
+  await insert(c.env, 'platform_events', { id: id(), workspace_id: o.ws.id, send_id: null, kind: 'sending_stopped', detail: 'Stopped by the owner' + (str(f.reason, 300) ? ': ' + str(f.reason, 300) : ''), actor: c.get('user').email, created_at: now() });
+  await audit(c, 'sending.stop', o.ws.id);
+  return back(c, '/app/sending', 'Sending stopped. Queued email waits until you resume.');
+});
+root.post('/app/sending/resume', async (c) => {
+  const o = await ownerCtx(c);
+  if (!o?.allowed) return c.text('Only the account owner can resume sending.', 403);
+  await resumeSending(c.env, `workspace:${o.ws.id}`);
+  await insert(c.env, 'platform_events', { id: id(), workspace_id: o.ws.id, send_id: null, kind: 'sending_resumed', detail: 'Resumed by the owner', actor: c.get('user').email, created_at: now() });
+  await audit(c, 'sending.resume', o.ws.id);
+  kick(c.env, c.executionCtx);
+  return back(c, '/app/sending', 'Sending resumed.');
+});
+
 // ───────── simulated plan checkout (no STRIPE_SECRET_KEY) ─────────
 async function checkoutFor(c: Ctx) {
   const co = await one<any>(c.env, 'SELECT * FROM platform_checkouts WHERE id = ?', c.req.param('id'));
@@ -374,7 +575,7 @@ dash.get('/guardian', async (c) => {
           { h: '', r: (t) => <ActionForm action="/app/admin/guardian/throttle/clear" fields={{ scope: t.scope }} label="Lift" small kind="ghost" /> },
         ]} />
         <form method="post" action="/app/admin/guardian/throttle" class="row" style="gap:6px;flex-wrap:wrap;padding:12px">
-          <Select name="scope" options={[['global', 'Global'], ...PROVIDERS.map((p) => [`provider:${p}`, `Provider: ${p}`] as [string, string])]} />
+          <Select name="scope" options={[['global', 'Global'], ...GUARD_PROVIDERS.map((p) => [`provider:${p}`, `Provider: ${p}`] as [string, string])]} />
           <input class="input" name="workspace" placeholder="or workspace id" style="max-width:150px" />
           <Select name="factor" options={[['0.5', 'Half speed'], ['0.25', 'Quarter speed'], ['0', 'Pause']]} />
           <Select name="hours" options={[['1', '1 hour'], ['2', '2 hours'], ['6', '6 hours'], ['24', '24 hours']]} />

@@ -3,7 +3,8 @@
 import type { Ctx, Publication, Post, Subscriber } from '../../types';
 import { one, all, run, val, insert, update, encodeCursor, decodeCursor } from '../../lib/db';
 import { apiError, keyFromRequest } from '../../lib/apiauth';
-import { sendTx, searchTx, serializeTx, saveTemplate, serializeTemplate, TxError } from '../../lib/transactional';
+import { sendTx, sendTxBatch, cancelTx, searchTx, serializeTx, saveTemplate, serializeTemplate, TxError, TX_BATCH_MAX } from '../../lib/transactional';
+import { sanitizeHeaders, attemptsFor } from '../../lib/email';
 import { validateEmail } from '../../lib/guard';
 import { subscribe, getSubscriber, unsubscribe, deleteSubscriber, addTags, removeTags, getTags, setFields, joinLists, leaveLists } from '../../lib/subscribers';
 import { recalcSegment, listMatching, countMatching, EMPTY_GROUP, type RuleGroup } from '../../lib/segments';
@@ -20,7 +21,7 @@ import { WEBHOOK_VERSIONS, LATEST_WEBHOOK_VERSION, isWebhookVersion, deliveryAtt
 import { siteUrl } from '../../lib/pub';
 import { markdownToBlocks } from '../../lib/markdown';
 import { postStats, providerStats, summary, growthSeries, earnings } from '../../lib/stats';
-import { id, now, slugify, parseJSON, clamp, int, token, DAY } from '../../lib/util';
+import { id, now, slugify, parseJSON, clamp, int, token, DAY, sha256 } from '../../lib/util';
 import { trackEvent, trackBatch, listEvents, eventNames, serializeEvent, EventError, MAX_BATCH } from '../../lib/customevents';
 import { timeline, CATEGORIES } from '../../lib/timeline';
 import { revenueSummary, revenueByEmail, revenueByCampaign, attributedOrders, postRevenue, automationRevenue, setWindowDays, modelOf, MODELS } from '../../lib/attribution';
@@ -54,6 +55,35 @@ async function body(c: Ctx): Promise<Record<string, any>> {
 
 export class BadRequest extends Error {}
 export class NotFound extends Error {}
+
+/**
+ * Idempotency-Key header: the first request's response (status + body) is stored and returned for any repeat with the
+ * same key (header Idempotency-Replayed: true). A repeat with a different body → 422; while the first is still running → 409.
+ * 5xx results aren't stored, so a failed request can be retried with the same key. Keys are kept for 24 hours.
+ */
+async function idempotent(c: Ctx, pub: Publication, endpoint: string, fn: () => Promise<Response>): Promise<Response> {
+  const key = (c.req.header('Idempotency-Key') || '').trim();
+  if (!key) return fn();
+  if (key.length > 200) throw new BadRequest('Idempotency-Key must be at most 200 characters.');
+  const fp = await sha256(c.req.method + ' ' + endpoint + ' ' + JSON.stringify(await body(c)));
+  const replay = async () => {
+    const prev = await one<any>(c.env, 'SELECT * FROM api_idempotency WHERE pub_id = ? AND endpoint = ? AND key = ? AND created_at > ?', pub.id, endpoint, key, now() - DAY);
+    if (!prev) return null;
+    if (prev.fingerprint !== fp) return apiError(c, 422, 'idempotency_key_reused', 'This Idempotency-Key was already used with a different request body.');
+    if (!prev.status_code) return apiError(c, 409, 'idempotency_in_progress', 'A request with this Idempotency-Key is still being processed. Retry shortly.');
+    return new Response(prev.response, { status: prev.status_code, headers: { 'content-type': 'application/json; charset=UTF-8', 'Idempotency-Replayed': 'true' } });
+  };
+  const r0 = await replay();
+  if (r0) return r0;
+  await run(c.env, 'DELETE FROM api_idempotency WHERE pub_id = ? AND endpoint = ? AND key = ? AND created_at <= ?', pub.id, endpoint, key, now() - DAY);
+  try { await insert(c.env, 'api_idempotency', { pub_id: pub.id, endpoint, key, fingerprint: fp, status_code: 0, response: null, created_at: now() }); }
+  catch { const r1 = await replay(); if (r1) return r1; throw new Error('idempotency reservation failed'); }
+  let res: Response;
+  try { res = await fn(); } catch (e) { await run(c.env, 'DELETE FROM api_idempotency WHERE pub_id = ? AND endpoint = ? AND key = ?', pub.id, endpoint, key); throw e; }
+  if (res.status >= 500) await run(c.env, 'DELETE FROM api_idempotency WHERE pub_id = ? AND endpoint = ? AND key = ?', pub.id, endpoint, key);
+  else await run(c.env, 'UPDATE api_idempotency SET status_code = ?, response = ? WHERE pub_id = ? AND endpoint = ? AND key = ?', res.status, await res.clone().text(), pub.id, endpoint, key);
+  return res;
+}
 
 const PAGE_Q = { limit: 'Page size 1-100 (default 50)', cursor: 'Opaque cursor from next_cursor' };
 
@@ -634,9 +664,11 @@ route('DELETE', '/posts/:id', 'Posts', 'Delete a post', async (c, pub) => {
   await run(c.env, 'DELETE FROM posts WHERE id = ? AND pub_id = ?', post.id, pub.id);
   return c.json({ data: { id: post.id, deleted: true } });
 });
-route('POST', '/posts/:id/send', 'Send API', 'Publish/send now or schedule (targeting + subject A/B test)', async (c, pub) => {
+route('POST', '/posts/:id/send', 'Send API', 'Publish/send now or schedule (targeting + subject A/B test). Idempotency-Key header: a repeat returns the original response', async (c, pub) => idempotent(c, pub, 'posts.send:' + c.req.param('id'), async () => {
   const post = await needPost(c, pub);
   const b = await body(c);
+  let headers: Record<string, string> | null = null;
+  if (b.headers !== undefined && b.headers !== null) { const h = sanitizeHeaders(b.headers); if (!h.ok) throw new BadRequest(h.error); headers = Object.keys(h.headers).length ? h.headers : null; }
   if (!['draft', 'scheduled'].includes(post.status)) return apiError(c, 409, 'already_published', 'This post has already been published.');
   const patch: Record<string, unknown> = {};
   if (b.segment_ids) patch.segment_ids = b.segment_ids;
@@ -656,12 +688,13 @@ route('POST', '/posts/:id/send', 'Send API', 'Publish/send now or schedule (targ
   if (b.list_id) { await run(c.env, 'UPDATE posts SET list_id = ? WHERE id = ?', b.list_id, p.id); p = { ...p, list_id: b.list_id }; }
   const at = b.scheduled_at ? Date.parse(b.scheduled_at) : NaN;
   if (!isNaN(at) && at > now() + 30_000) {
+    if (headers) throw new BadRequest('Custom headers are supported for immediate sends only (omit scheduled_at).');
     await run(c.env, `UPDATE posts SET status = 'scheduled', scheduled_at = ?, updated_at = ? WHERE id = ?`, at, now(), p.id);
     await emit(c.env, { pubId: pub.id, type: 'post.scheduled', refId: p.id, data: { post_id: p.id, title: p.title, scheduled_at: iso(at) }, activity: false });
     return c.json({ data: { post_id: p.id, status: 'scheduled', scheduled_at: iso(at) } }, 202);
   }
   let sendId: string | null;
-  try { sendId = await publishPost(c.env, pub, p); }
+  try { sendId = await publishPost(c.env, pub, p, headers ? { headers } : {}); }
   catch (e) {
     const { SendBlockedError } = await import('../../lib/plans');
     if (e instanceof SendBlockedError) return c.json({ error: { code: e.code, message: e.message, upgrade_url: e.upgradeUrl } }, 402);
@@ -669,7 +702,7 @@ route('POST', '/posts/:id/send', 'Send API', 'Publish/send now or schedule (targ
   }
   try { const { kick } = await import('../../lib/jobs'); kick(c.env, c.executionCtx); } catch {}
   return c.json({ data: { post_id: p.id, status: 'published', send_id: sendId, email: p.platform !== 'web' } }, 202);
-}, { body: { scheduled_at: 'ISO datetime (omit to send now)', segment_ids: 'string[] send to', exclude_segment_ids: 'string[]', list_id: 'string', audience: 'all|free|premium', platform: 'email|web|both', email_subject: 'string', ab_test: '{subjects: string[2-5] | variants: [{subject?, preview_text?, from_name?, content: a|b}] (2-4), sample_pct, wait_minutes, metric: opens|clicks}', alt_markdown: 'string — Variant B content for content tests', send_timing: '{mode: sto} (each subscriber at their usual open hour, within 24h) | {mode: timezone, local_time: "09:00"} | null' } });
+}), { body: { headers: 'Custom headers {name: value} for immediate sends: X-* plus List-Id, References, In-Reply-To, Thread-Index, Thread-Topic', scheduled_at: 'ISO datetime (omit to send now)', segment_ids: 'string[] send to', exclude_segment_ids: 'string[]', list_id: 'string', audience: 'all|free|premium', platform: 'email|web|both', email_subject: 'string', ab_test: '{subjects: string[2-5] | variants: [{subject?, preview_text?, from_name?, content: a|b}] (2-4), sample_pct, wait_minutes, metric: opens|clicks}', alt_markdown: 'string — Variant B content for content tests', send_timing: '{mode: sto} (each subscriber at their usual open hour, within 24h) | {mode: timezone, local_time: "09:00"} | null' } });
 route('POST', '/posts/:id/unschedule', 'Send API', 'Cancel a scheduled post (back to draft)', async (c, pub) => {
   const post = await needPost(c, pub);
   if (post.status !== 'scheduled') return apiError(c, 409, 'not_scheduled', 'Post is not scheduled.');
@@ -1002,13 +1035,29 @@ route('GET', '/podcasts/:id/episodes', 'Podcasts', 'List episodes with download 
 
 // ───────── transactional email (lib/transactional) ─────────
 const txFail = (c: Ctx, e: unknown) => { if (e instanceof TxError) return apiError(c, e.status, e.code, e.message); throw e; };
-route('POST', '/transactional/send', 'Transactional', 'Send one transactional email (template or subject + html/markdown/text) with merge vars; idempotent with idempotency_key', async (c, pub) => {
+route('POST', '/transactional/send', 'Transactional', 'Send one transactional email (template or subject + html/markdown/text) with merge vars; idempotent with idempotency_key (or the Idempotency-Key header); optional scheduled_at / expires_at', async (c, pub) => {
   try {
     const k = await keyFromRequest(c.env, c.req.raw);
-    const r = await sendTx(c.env, pub, (await body(c)) as any, { keyId: k?.keyId });
+    const input = (await body(c)) as any;
+    const hk = (c.req.header('Idempotency-Key') || '').trim();
+    if (hk && !input.idempotency_key) input.idempotency_key = hk;
+    const r = await sendTx(c.env, pub, input, { keyId: k?.keyId });
+    if (r.status === 'scheduled' || r.status === 'queued') { try { const { kick } = await import('../../lib/jobs'); kick(c.env, c.executionCtx); } catch {} }
     return c.json({ data: r }, (r as any).duplicate ? 200 : 201);
   } catch (e) { return txFail(c, e); }
-}, { body: { to: 'Recipient email (required)', template_id: 'Template id or slug', subject: 'Subject (required without a template)', html: 'HTML body', markdown: 'Markdown body', text: 'Plain-text body', merge_vars: 'Object; {{key}} / {{nested.key}} in subject and body', reply_to: 'Reply-To address', from_name: 'Sender name override', attachments: '[{filename, content (base64), type}] — 5 MB total', tags: 'string[] for searching the log', idempotency_key: 'Repeat-safe key; a repeat returns the original message', track: 'boolean — open/click tracking (default false)' } });
+}, { body: { to: 'Recipient email (required)', template_id: 'Template id or slug', subject: 'Subject (required without a template)', html: 'HTML body', markdown: 'Markdown body', text: 'Plain-text body', merge_vars: 'Object; {{key}} / {{nested.key}} in subject and body', reply_to: 'Reply-To address', from_name: 'Sender name override', attachments: '[{filename, content (base64), type}] — 5 MB total', tags: 'string[] for searching the log', idempotency_key: 'Repeat-safe key; a repeat returns the original message', track: 'boolean — open/click tracking (default false)', headers: 'Custom headers {name: value}: X-* plus List-Id, References, In-Reply-To, Thread-Index, Thread-Topic', scheduled_at: 'ISO date or epoch ms: send later (≤ 30 days)', expires_at: 'ISO date or epoch ms: not delivered by then → status expired, never sent' } });
+route('POST', '/transactional/batch', 'Transactional', `Send up to ${TX_BATCH_MAX} transactional emails in one call; per-message results (each message may carry its own idempotency_key)`, async (c, pub) => {
+  try {
+    const k = await keyFromRequest(c.env, c.req.raw);
+    const b = await body(c);
+    const r = await sendTxBatch(c.env, pub, b.messages, { keyId: k?.keyId });
+    if (r.results.some((x: any) => x.ok && ['scheduled', 'queued', 'deferred'].includes(x.data?.status))) { try { const { kick } = await import('../../lib/jobs'); kick(c.env, c.executionCtx); } catch {} }
+    return c.json({ data: r.results, summary: r.summary }, r.summary.accepted ? (r.summary.failed ? 207 : 200) : 400);
+  } catch (e) { return txFail(c, e); }
+}, { body: { messages: `Array of 1-${TX_BATCH_MAX} message objects, each with the same fields as /transactional/send` } });
+route('POST', '/transactional/messages/:id/cancel', 'Transactional', 'Cancel a scheduled, queued or retrying transactional message', async (c, pub) => {
+  try { return c.json({ data: await cancelTx(c.env, pub.id, c.req.param('id') || '') }); } catch (e) { return txFail(c, e); }
+});
 route('GET', '/transactional/messages', 'Transactional', 'Search the transactional message log', async (c, pub) => {
   const rows = await searchTx(c.env, pub.id, { q: c.req.query('q'), status: c.req.query('status'), tag: c.req.query('tag'), limit: int(c.req.query('limit'), 50), before: c.req.query('before') ? Date.parse(c.req.query('before')!) : undefined });
   return c.json({ data: rows.map(serializeTx) });
@@ -1017,6 +1066,14 @@ route('GET', '/transactional/messages/:id', 'Transactional', 'One transactional 
   const m = await one<any>(c.env, 'SELECT * FROM tx_messages WHERE pub_id = ? AND (id = ? OR message_id = ?)', pub.id, c.req.param('id'), c.req.param('id'));
   if (!m) throw new NotFound('Message not found.');
   return c.json({ data: serializeTx(m) });
+});
+route('GET', '/deliveries/:id/attempts', 'Deliveries', 'Every attempt to hand one email to the provider (newsletter/automation delivery id or transactional message id), including retries', async (c, pub) => {
+  const did = c.req.param('id') || '';
+  const d = await one<any>(c.env, 'SELECT id, email, status, attempts, error FROM deliveries WHERE id = ? AND pub_id = ?', did, pub.id)
+    || await one<any>(c.env, 'SELECT id, to_email AS email, status, attempts, error FROM tx_messages WHERE id = ? AND pub_id = ?', did, pub.id);
+  if (!d) throw new NotFound('Delivery not found.');
+  const rows = await attemptsFor(c.env, d.id);
+  return c.json({ data: rows.map((a) => ({ attempt: a.attempt, status: a.status, response: a.response, duration_ms: a.duration_ms, kind: a.kind, at: iso(a.created_at) })), delivery: { id: d.id, email: d.email, status: d.status, error: d.error || null } });
 });
 route('GET', '/transactional/templates', 'Transactional', 'List transactional templates', async (c, pub) => c.json({ data: (await all<any>(c.env, 'SELECT * FROM tx_templates WHERE pub_id = ? ORDER BY name', pub.id)).map(serializeTemplate) }));
 route('POST', '/transactional/templates', 'Transactional', 'Create or update (pass id) a transactional template', async (c, pub) => {
