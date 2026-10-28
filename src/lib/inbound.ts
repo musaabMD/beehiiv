@@ -11,6 +11,7 @@ import { classifyBounce, recordBounce, type BounceType } from './email';
 import { verifySubToken, unsubscribe } from './subscribers';
 import { senderFor, getPub } from './pub';
 import { id, now, DAY } from './util';
+import { dmarcRecipient, handleDmarcEmail } from './dmarc';
 
 export type MailKind = 'marketing' | 'transactional';
 export type ReportSource = 'email' | 'queue' | 'hook';
@@ -21,6 +22,7 @@ export interface MimePart {
   type: string;                    // lower-case media type, e.g. multipart/report
   params: Record<string, string>;  // content-type parameters (boundary, report-type, charset…)
   body: string;                    // decoded body (text) for leaf parts
+  rawBody?: string;                // undecoded body of base64 leaf parts (binary attachments: DMARC .zip / .gz)
   parts: MimePart[];               // children for multipart/* and message/rfc822
 }
 
@@ -89,6 +91,7 @@ export function parseMime(raw: string, depth = 0): MimePart {
     part.parts.push(parseMime(decodeBody(rawBody, headers['content-transfer-encoding']), depth + 1));
   } else {
     part.body = decodeBody(rawBody, headers['content-transfer-encoding']);
+    if ((headers['content-transfer-encoding'] || '').toLowerCase() === 'base64' && !type.startsWith('text/')) part.rawBody = rawBody;
   }
   return part;
 }
@@ -401,11 +404,26 @@ export interface InboundMessage {
 }
 
 const MAX_INBOUND = 4 * 1024 * 1024;
+const MAX_DMARC = 20 * 1024 * 1024; // big senders' reports (base64 zip) can be several MB
 
 /** Worker email() handler body: Email Routing delivers bounces@ / fbl@ / sender-address mail here. */
 export async function handleInboundEmail(env: Env, message: InboundMessage): Promise<{ type: string; processed: number }> {
   const rcpt = (message.to || '').toLowerCase();
   const raw = typeof message.raw === 'string' ? message.raw : await new Response(message.raw).text();
+  // DMARC aggregate reports to dmarc@ / dmarc+<domain id>@ (lib/dmarc): stored, never forwarded or bounced.
+  const dm = dmarcRecipient(rcpt);
+  if (dm) {
+    const res = await handleDmarcEmail(env, parseMime(raw.length > MAX_DMARC ? raw.slice(0, MAX_DMARC) : raw), rcpt, dm.domainId);
+    await logInbound(env, { source: 'email', kind: res.processed ? 'dmarc' : 'ignored', email: message.from, detail: `DMARC report to ${rcpt}: ${res.results.join('; ') || 'no aggregate report found'}` });
+    return { type: 'dmarc', processed: res.processed };
+  }
+  // Seed-test replies (seed+<token>@): "inbox" / "promotions" / "spam" as the first word records placement (lib/guardian).
+  if (/^seed\+[a-z0-9]+@/i.test(rcpt)) {
+    const word = /\b(inbox|primary|promotions?|spam|junk)\b/i.exec(`${parseHeaders(splitHead(raw)[0])['subject'] || ''}`)?.[1] || /^\s*(inbox|primary|promotions?|spam|junk)\b/im.exec(splitHead(raw)[1])?.[1];
+    const ok = word ? await (await import('./guardian')).markSeed(env, rcpt.slice(5, rcpt.indexOf('@')), word) : false;
+    await logInbound(env, { source: 'email', kind: ok ? 'seed' : 'ignored', email: message.from, detail: `seed placement reply to ${rcpt}: ${word || 'no placement word'}` });
+    return { type: 'seed', processed: ok ? 1 : 0 };
+  }
   const r = parseReport(raw.length > MAX_INBOUND ? raw.slice(0, MAX_INBOUND) : raw, message.from || '');
   // Reader replies to reply+<slug>.<delivery>@SHARED_FROM_DOMAIN land in the publication's Inbox (lib/inbox).
   if ((r.type === 'other' || r.type === 'unsubscribe') && rcpt.startsWith('reply+')) return (await import('./inbox')).handleInboundReply(env, message, raw.length > MAX_INBOUND ? raw.slice(0, MAX_INBOUND) : raw, rcpt);

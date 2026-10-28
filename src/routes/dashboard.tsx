@@ -13,6 +13,7 @@ import { Card, Table, Empty, LinkBtn } from '../ui/components';
 import { Kpi, fmtPct, fmtNum, fmtUsd, DASH_STYLE, TrendChart } from './dashboard/parts';
 import { registerAnalytics } from './dashboard/analytics';
 import { registerExplore } from './dashboard/explore';
+import { registerGuardian } from './dashboard/guardian';
 import { ago, fmtDate, DAY, stripTags } from '../lib/util';
 import { planStatus, maybeWarnUsage } from '../lib/plans';
 import { registerIntel, AnomalyAlerts, NextSteps } from './dashboard/intel';
@@ -167,6 +168,7 @@ dash.get('/', async (c) => {
 registerExplore(dash);
 registerIntel(dash);
 registerAnalytics(dash);
+registerGuardian(dash, root); // Analytics → Deliverability → Guardian (+ /seed/* placement links)
 
 // ───────── AI assistant (⌘J) ─────────
 const STATS_RE = /\b(open rate|opens?|ctr|click|clicks|click-through|revenue|mrr|arr|earn|money|sales|subscriber|subscribers|growth|grow|unsubscrib|churn|stats|statistics|perform|performance|how (did|is|are|many|much)|traffic|visitors|views|best post|top post|worst|compare|analytics|numbers|report|deliverab|bounce)\b/i;

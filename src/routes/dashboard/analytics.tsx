@@ -348,7 +348,8 @@ export function registerAnalytics(dash: App) {
       ]} />
     );
     return c.html(
-      <Page c={c} title="Deliverability" sub="deliverability">
+      <Page c={c} title="Deliverability" sub="deliverability" actions={<LinkBtn href="/app/analytics/guardian" small>Guardian</LinkBtn>}>
+        <div class="callout" style="margin-bottom:12px"><strong>Deliverability Guardian</strong> watches your sending every 10 minutes, slows things down when providers push back, and shows your health score, time to delivery, DMARC results and inbox placement tests. <a href="/app/analytics/guardian">Open the Guardian →</a></div>
         <RangeBar c={c} range={r} keep={['post']} />
         <Stats>
           <Stat label="Delivery rate" value={fmtPct(d.deliveryRate, 2)} sub={`${fmtNum(d.delivered)} of ${fmtNum(d.total)}`} tone={d.total && d.deliveryRate < 97 ? 'down' : 'up'} />

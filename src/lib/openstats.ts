@@ -2,11 +2,15 @@
 // Counted: every real send (issues, automation steps, welcome/confirmation and other transactional mail).
 // Left out: test sends. Delivery rate = delivered / (delivered + hard bounced); bounce and complaint
 // rates are out of emails sent. Open/click rates are medians across publications with enough mail.
+// Deferral rate = deliveries that needed at least one retry, out of emails sent. Time to delivery = queued (or planned,
+// for timed sends) → accepted, median and p95. Authentication pass rate = DMARC-aligned pass in the aggregate reports
+// mailbox providers sent us (lib/dmarc). Each shows only once there's enough data behind it.
 import type { Env } from '../types';
 import { all, one } from './db';
 
 const DAY = 86_400_000;
-export const MIN_EMAILS = 500;      // below this the page says "not enough email yet"
+export const MIN_EMAILS = 500;
+export const MIN_AUTH_MESSAGES = 200; // DMARC-reported messages before the auth pass rate shows      // below this the page says "not enough email yet"
 const MIN_PUB_DELIVERED = 200;      // a publication needs this many delivered to count in the medians
 
 export interface Week { start: number; sent: number; delivered: number; hard: number; complaints: number; opened: number; clicked: number }
@@ -18,6 +22,9 @@ export interface OpenStats {
   weeks: Week[];
   rejections: Record<string, number>;
   suppressed: number;
+  deferred: number; deferralRate: number | null;
+  ttdMedianMs: number | null; ttdP95Ms: number | null; ttdCount: number;
+  authMessages: number; authPassRate: number | null;
   simulated: boolean;
   tryIt?: boolean;
   enough: boolean;
@@ -42,10 +49,22 @@ export async function openStats(env: Env, now = Date.now()): Promise<OpenStats> 
       SUM(CASE WHEN d.status IN ('sent','complained') THEN 1 ELSE 0 END) AS delivered,
       SUM(CASE WHEN d.status = 'bounced' AND d.bounce_type = 'hard' THEN 1 ELSE 0 END) AS hard,
       SUM(CASE WHEN d.status = 'bounced' AND COALESCE(d.bounce_type,'') <> 'hard' THEN 1 ELSE 0 END) AS soft,
-      SUM(CASE WHEN d.status = 'complained' THEN 1 ELSE 0 END) AS complaints
-    FROM deliveries d WHERE d.created_at >= ? AND d.status NOT IN ('queued','suppressed') AND ${real}`, from);
+      SUM(CASE WHEN d.status = 'complained' THEN 1 ELSE 0 END) AS complaints,
+      SUM(CASE WHEN d.status = 'deferred' OR d.attempts > 1 THEN 1 ELSE 0 END) AS deferred
+    FROM deliveries d WHERE d.created_at >= ? AND d.status NOT IN ('queued','suppressed','scheduled') AND ${real}`, from);
   const sent = Number(tot?.sent || 0), delivered = Number(tot?.delivered || 0), hard = Number(tot?.hard || 0);
-  const complaints = Number(tot?.complaints || 0), soft = Number(tot?.soft || 0);
+  const complaints = Number(tot?.complaints || 0), soft = Number(tot?.soft || 0), deferred = Number(tot?.deferred || 0);
+
+  // Time to delivery (queued or planned → accepted)
+  const TTD = `(d.sent_at - CASE WHEN d.attempts <= 1 AND d.next_attempt_at IS NOT NULL AND d.next_attempt_at > d.created_at AND d.next_attempt_at <= d.sent_at THEN d.next_attempt_at ELSE d.created_at END)`;
+  const ttdWhere = `d.created_at >= ? AND d.status IN ('sent','complained') AND d.sent_at IS NOT NULL AND ${real}`;
+  const ttdCount = Number((await one<any>(env, `SELECT COUNT(*) AS n FROM deliveries d WHERE ${ttdWhere}`, from))?.n || 0);
+  const ttdAt = async (q: number) => (ttdCount ? Math.max(0, Number((await one<any>(env, `SELECT ${TTD} AS t FROM deliveries d WHERE ${ttdWhere} ORDER BY t LIMIT 1 OFFSET ?`, from, Math.floor((ttdCount - 1) * q)))?.t ?? 0)) : null);
+  const [ttdMedianMs, ttdP95Ms] = [await ttdAt(0.5), await ttdAt(0.95)];
+
+  // DMARC aggregate reports (all sending domains on this install)
+  const auth = await one<any>(env, `SELECT SUM(count) AS m, SUM(CASE WHEN dkim = 'pass' OR spf = 'pass' THEN count ELSE 0 END) AS p FROM dmarc_records WHERE day >= ?`, new Date(from).toISOString().slice(0, 10)).catch(() => null);
+  const authMessages = Number(auth?.m || 0);
 
   // Weekly track record, last 12 weeks
   const wFrom = weekStart(now) - 11 * 7 * DAY;
@@ -85,6 +104,9 @@ export async function openStats(env: Env, now = Date.now()): Promise<OpenStats> 
     weeks,
     rejections: Object.fromEntries(rej.map((r) => [r.reason, Number(r.n)])),
     suppressed,
+    deferred, deferralRate: sent ? deferred / sent : null,
+    ttdMedianMs, ttdP95Ms, ttdCount,
+    authMessages, authPassRate: authMessages ? Number(auth?.p || 0) / authMessages : null,
     simulated: env.EMAIL_MODE === 'simulate' || !env.EMAIL,
     tryIt: env.TRY_IT === '1' && !!env.EMAIL,
     enough: sent >= MIN_EMAILS,

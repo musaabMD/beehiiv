@@ -1,7 +1,7 @@
 // Marketing pages: features, deliverability (/open) and changelog. Compare pages live in compare.ts.
 import { esc } from '../../lib/util';
 import type { OpenStats, Week } from '../../lib/openstats';
-import { MIN_EMAILS } from '../../lib/openstats';
+import { MIN_EMAILS, MIN_AUTH_MESSAGES } from '../../lib/openstats';
 import { FEATURE_AREAS, featureCounts, norm, type FeatureArea } from './features-data';
 import { CHANGELOG } from './changelog-data';
 import { ic, tick } from './marketing';
@@ -113,6 +113,8 @@ function chart(weeks: Week[], value: (w: Week) => number | null, o: { kind: 'bar
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Weekly chart">${axis}${guides}${marks}${labels}</svg>`;
 }
 
+const dur = (ms: number | null) => (ms == null ? '—' : ms < 1000 ? `${Math.round(ms)} ms` : ms < 60_000 ? `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : `${(ms / 3_600_000).toFixed(1)} h`);
+
 export function openPage(c: PageCtx, s: OpenStats) {
   const rate = (a: number, b: number) => (b ? a / b : null);
   const until = new Date(s.to).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
@@ -137,6 +139,11 @@ export function openPage(c: PageCtx, s: OpenStats) {
     ${stat('Emails delivered', show ? n(s.delivered) : '—', 'Accepted by readers\' mailbox providers')}
     ${stat('Spam complaint rate', show ? pct(s.complaintRate, 3) : '—', 'Marked as spam, out of emails sent')}
   </div>
+  ${show ? `<div class="grid" style="margin-top:16px">
+    ${stat('Deferred, then retried', pct(s.deferralRate, 1), 'Emails a provider asked us to retry later, out of emails sent')}
+    ${stat('Time to delivery', s.ttdCount ? dur(s.ttdMedianMs) : '—', s.ttdCount ? `Median from queued to accepted; 95% within ${dur(s.ttdP95Ms)}` : 'Shows once emails have been accepted')}
+    ${stat('Authentication pass rate', s.authMessages >= MIN_AUTH_MESSAGES ? pct(s.authPassRate, 1) : '—', s.authMessages >= MIN_AUTH_MESSAGES ? `DMARC-aligned, from mailbox providers' reports on ${n(s.authMessages)} messages` : 'Shows once mailbox providers\' DMARC reports cover enough mail')}
+  </div>` : ''}
   <p class="muted small" style="margin-top:12px">The last 30 days, to ${until}. <a href="#how-we-count" style="text-decoration:underline">How we count</a></p>
 </div></section>
 
@@ -171,6 +178,7 @@ ${show ? `<section style="padding-top:8px"><div class="wrap">
 <section id="how-we-count" style="padding-top:8px"><div class="wrap narrow">
   <h2>How we count</h2>
   <p class="muted"><b style="color:var(--text)">Counted:</b> every real email we sent in the last 30 days: newsletter issues, automation emails, welcome and confirmation emails and other account email. <b style="color:var(--text)">Left out:</b> test emails, and emails that were never sent because the address was suppressed.</p>
+  <p class="muted">Deferred counts emails that a provider answered with "try again later" at least once, out of emails sent; they're retried for up to 26 hours. Time to delivery runs from when an email was queued (or its planned time, for timed sends) to when the reader's provider accepted it. The authentication pass rate comes from the DMARC aggregate reports Gmail, Microsoft, Yahoo and others send about every message claiming to be from our sending domains: a message passes when DKIM or SPF passes and matches the From domain.</p>
   <p class="muted">The delivery rate is delivered out of delivered and hard bounced. Bounce and complaint rates are out of emails sent. Complaints come from mailbox providers' feedback loops; Gmail doesn't report complaints one by one, so Gmail complaints only show here when they reach the install through a feedback report. Open and click rates are medians across newsletters with 200 or more emails delivered in the period, with bot opens and clicks left out. Numbers show once ${n(MIN_EMAILS)} emails are behind them. Weeks start on Monday, in UTC.</p>
 </div></section>
 ${buyCta(c, 'Run your own newsletter platform', 'With this page included, showing your own numbers.')}`;

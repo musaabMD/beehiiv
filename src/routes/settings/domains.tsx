@@ -8,6 +8,8 @@ import { warmupAllowance } from '../../lib/sender';
 import { id, now, token, form, str, ago, fmtDateTime, num, DAY } from '../../lib/util';
 import { Card, Field, Input, Select, Btn, ActionForm, Table, Badge, Status, Modal, OpenBtn, Help, Empty, back } from '../../ui/components';
 import { page } from './ui';
+import { authSummary, ruaAddress } from '../../lib/dmarc';
+import { AuthCards } from '../dashboard/guardian';
 
 const HOST_RE = /^(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
@@ -27,6 +29,8 @@ export function registerDomains(dash: Hono<AppEnv>) {
         const cap = day >= 12 ? null : 200 * 2 ** day;
         warm = { day: day + 1, cap, used: cap ? cap - (allowance.remaining === Infinity ? cap : allowance.remaining) : null };
       }
+      // DMARC section: aggregate reports received for this sending domain (lib/dmarc)
+      const auth = d.kind === 'email' ? await authSummary(c.env, [d.hostname], now() - 30 * DAY) : null;
       blocks.push(
         <Card
           title={<span class="row"><Badge tone={d.kind === 'web' ? 'blue' : 'purple'}>{d.kind === 'web' ? 'Website' : 'Sending'}</Badge> <span class="mono">{d.hostname}</span> <Status s={d.status === 'failed' ? 'pending' : d.status} />{d.blocklisted ? <Badge tone="red">blocklisted — sending paused</Badge> : null}</span>}
@@ -62,6 +66,14 @@ export function registerDomains(dash: Hono<AppEnv>) {
                 )}
                 {report.blocklists && (
                   <p class="small">Blocklists ({ago(report.blocklists.checked_at)}): {report.blocklists.results.map((r: any) => <Badge tone={r.listed ? 'red' : 'green'}>{r.name}: {r.listed ? 'listed' : 'clean'}</Badge>)}</p>
+                )}
+                {auth && (
+                  <div class="dmarc-section" data-dmarc-section={d.hostname} style="margin-top:14px">
+                    <h4 style="margin:0 0 6px">DMARC reports</h4>
+                    <p class="small muted" style="margin:0 0 8px">Mailbox providers send a daily report of every message that claimed to be from {d.hostname}. Put this address in your DMARC record's <code>rua=</code> tag: <code>{ruaAddress(c.env, d.id)}</code> <button type="button" class="btn btn-ghost btn-sm" data-copy={`mailto:${ruaAddress(c.env, d.id)}`}>Copy</button></p>
+                    <AuthCards a={auth} compact />
+                    <p class="small"><a href="/app/analytics/guardian?tab=auth">Full authentication report →</a></p>
+                  </div>
                 )}
               </>
             )}
