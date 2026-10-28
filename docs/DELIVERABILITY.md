@@ -8,8 +8,10 @@ Mailbox providers (Gmail, Yahoo, Microsoft) require bulk senders to authenticate
 
 1. **SPF and DKIM** — `wrangler email sending enable yourdomain.com` publishes both for Cloudflare Email Sending. For each publication sending domain, Settings → Domains lists the exact records and checks them live.
 2. **DMARC** — add a TXT record at `_dmarc.yourdomain.com`:
-   `v=DMARC1; p=none; rua=mailto:dmarc-reports@yourdomain.com; adkim=r; aspf=r`
-   Start with `p=none`, watch reports for two weeks, then move to `p=quarantine`.
+   `v=DMARC1; p=none; rua=mailto:dmarc+<domain id>@SHARED_FROM_DOMAIN; adkim=r; aspf=r`
+   Settings → Domains shows the exact `rua` address for each sending domain. Start with `p=none`, watch the reports
+   (Domains page and Analytics → Deliverability → Guardian → Authentication) for two weeks, then move to `p=quarantine`.
+   See [DMARC aggregate reports](#dmarc-aggregate-reports) for the operator setup.
 3. **Alignment** — send from an address on the same domain you authenticated (`newsletter@yourdomain.com`), so SPF/DKIM align with the visible From.
 
 ## One-click unsubscribe
@@ -149,6 +151,64 @@ Sending domains are checked against major DNS blocklists on a schedule. If a dom
 ## Clean reporting
 
 Opens and clicks from security scanners, link prefetchers and bots are recorded but excluded from reports. Clicks within seconds of delivery or from known scanner user agents are flagged as bot clicks.
+
+## DMARC aggregate reports
+
+Gmail, Microsoft, Yahoo and others email a daily XML report (zipped or gzipped) of every message that claimed to be from a domain. OpenHive receives them through the Worker's `email()` handler (`src/lib/inbound.ts` → `src/lib/dmarc.ts`), parses them (RFC 7489 Appendix C / DMARCbis, `.zip`, `.xml.gz` or plain `.xml`) and stores message counts per domain, per UTC day, per reporter, per source IP and result (`dmarc_records`). Shown as aligned SPF / DKIM / DMARC pass rates and failing sources on Settings → Domains, the Guardian's Authentication tab, the Platform admin Guardian view and (install-wide) on `/open`.
+
+Addresses: `dmarc@SHARED_FROM_DOMAIN` (the platform's own domains) and `dmarc+<domain id>@SHARED_FROM_DOMAIN` (one per customer sending domain; the Domains page shows it and puts it in the recommended DMARC record). `dmarc-reports@` and `rua@` are accepted too.
+
+Operator setup (once, on the shared sending domain, e.g. `news.lnkbase.com`):
+
+1. **Email Routing rule**: Cloudflare dashboard → the zone → Email → Email Routing → Routing rules → Create address `dmarc@news.lnkbase.com` → **Send to a Worker** → `openhive`. The `dmarc+<id>@` addresses reach the same rule when **subaddressing** is enabled (Email Routing → Settings), or through the catch-all → Worker rule used for the reply Inbox.
+2. **External report authorization** (RFC 7489 §7.1): providers only send a customer domain's reports to an address on another domain if that domain agrees. Publish one wildcard TXT record on the zone: `*._report._dmarc.news.lnkbase.com  TXT  "v=DMARC1"`.
+
+Reports are unauthenticated mail, so rows are stored only for sending domains this install knows (customer email domains + `MAIL_FROM` / `SHARED_FROM_DOMAIN`), a `dmarc+<id>@` report must match that domain, and each (reporter, report id) is stored once. Every report is logged under Settings → Email → Inbound reports (`kind = dmarc`). Test locally:
+
+```bash
+curl -X POST 'http://localhost:8787/cdn-cgi/local/email?from=noreply-dmarc-support@google.com&to=dmarc@news.lnkbase.com' --data-binary @dmarc-report.eml
+```
+
+## Delivery metrics
+
+Analytics → Deliverability → Guardian → Delivery metrics shows these per publication, per send (latest 15), per mailbox provider and per day (`src/lib/deliverymetrics.ts`). Test sends and suppressed addresses are left out.
+
+| Metric | Definition |
+|---|---|
+| Accepted delivery rate | accepted (status sent or complained) / attempted |
+| Hard bounce rate | hard bounces / attempted |
+| Complaint rate | complaints / accepted |
+| Deferral rate | deliveries that hit `deferred` at least once (still deferred, or needed more than one attempt) / attempted |
+| Time to delivery | created → accepted (`sent_at`); timed / send-time-optimized deliveries count from their planned time. Median and p95 |
+| Authentication pass rate | DMARC-aligned pass (DKIM or SPF aligned) in aggregate reports for the publication's sending domains |
+| Cost per accepted email | Cloudflare Email Sending: $0.35 per 1,000 after the account's first 3,000 each month. Billable = send attempts (retries count). The free 3,000 are shared by the whole install, so each month is apportioned: `cost = billable × $0.00035 × max(0, install_month − 3000) / install_month`; per accepted = cost / accepted. The Workers base plan ($5/month) is shared infrastructure and not allocated |
+| Revenue per 1,000 emails | **Simple attribution**: paid orders from a reader within 7 days after an email from this scope was accepted for them (each order counted once per scope) × 1000 / accepted. Not full attribution |
+
+## Deliverability Guardian
+
+A periodic job (`guardian`, every 10 minutes, `src/lib/guardian.ts`) watches the live signals and acts within fixed limits (`GUARDIAN` constants):
+
+| Signal | Window / minimum | Action |
+|---|---|---|
+| Provider deferrals ≥ 10% (≥ 25%) | 2 h, 200 attempts | `provider:<p>` throttle 0.5 (0.25) for 2 h |
+| Provider rejections (hard + policy) ≥ 5% | 2 h, 200 attempts | `provider:<p>` 0.5 for 2 h |
+| Provider complaints ≥ 0.3% | 24 h, 500 accepted | `provider:<p>` 0.5 for 2 h |
+| Workspace hard bounces ≥ 4% (≥ 8%) | 2 h, 100 attempts | `workspace:<id>` 0.5 for 2 h (pause, factor 0, for 1 h) |
+| Workspace complaints ≥ 0.2% (≥ 0.5%) | 24 h, 500 accepted | 0.5 (pause) for 2 h |
+| Workspace deferrals ≥ 20% | 2 h, 100 attempts | 0.5 for 2 h |
+| Volume spike: last hour ≥ 2,000 and ≥ 3× the busiest hour of the previous 30 days | — | 0.5 for 1 h |
+| Sending domain on a blocklist (`lib/domains`) | — | incident only (sending from that domain is already paused) |
+| DMARC aligned pass < 90% (< 70%) | 3 days, 50 messages | incident only |
+
+Throttles are rows in `send_throttles` (`scope`, `factor` 0 = paused … 1 = normal, `reason`, `until`), read by the sending engine. Safety rules: every Guardian row has an expiry (max 2 h) and a `reason` starting with `guardian:`; it never writes `global` (operators only), never overrides a row an operator set by hand, never changes content, never rotates domains or IPs or otherwise routes around filters.
+
+Each action opens an incident with a plain-English diagnosis and recommended fix (e.g. "Microsoft is deferring 18% of mail … we slowed Microsoft sends to half speed for 2 hours"). Owners and admins of the workspace are emailed when an incident opens, escalates or resolves; superadmins get provider / platform incidents and every critical one. **Recovery** looks only at mail sent after the Guardian last acted: clean fresh mail resolves the incident and lifts its throttle; still-bad fresh mail re-applies it after it expires; no fresh mail for 2 h resolves it. A resolved signal isn't reopened by the old mail still in the window.
+
+Customer view: Analytics → Deliverability → **Guardian** — health score (0–100 from the last 7 days' bounce, complaint and deferral rates, DMARC pass rate, blocklists and open incidents), incidents timeline, active throttles, recommendations, delivery metrics, authentication and inbox placement. Operator view: Platform admin → **Guardian** — provider health (2 h / 24 h), Email Sending binding error rates by error code (from the outbox), throttles (set / lift, including `global`), incidents, workspaces to watch, DMARC by domain, and "Run Guardian now".
+
+## Inbox placement (seed tests)
+
+An honest estimate, labelled as a sample: customers add up to 12 inboxes they own (Gmail, Outlook.com, Yahoo…) under Guardian → Inbox placement, then send a post to them. Each seed email is the real email plus three links (Inbox / Promotions / Spam); clicking one records where it landed (`/seed/<token>/<placement>`: GET shows a page that POSTs by script, so link scanners don't record anything), or the seed owner can reply with that word (Reply-To `seed+<token>@SHARED_FROM_DOMAIN`, handled by the `email()` handler — needs the catch-all or subaddressing rule above). Results are shown per provider for the last 90 days.
 
 ## Checklist before a big send
 

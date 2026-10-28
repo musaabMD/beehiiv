@@ -14,6 +14,10 @@ import { accountStats, suspendWorkspace, unsuspendWorkspace, approveSend, reject
 import { setPlan, completeCheckout } from '../lib/platformbilling';
 import { id, now, num, money, ago, fmtDate, fmtDateTime, form, str, int, esc, DAY } from '../lib/util';
 import { audit } from '../lib/auth';
+import { runGuardian, activeThrottles, setManualThrottle, clearThrottle, mtaHealth, worstWorkspaces } from '../lib/guardian';
+import { metricsByProvider, fmtDuration, PROVIDER_NAME, PROVIDERS } from '../lib/deliverymetrics';
+import { domainPassRates } from '../lib/dmarc';
+import { HOUR } from '../lib/util';
 
 const dash = new Hono<AppEnv>();
 const root = new Hono<AppEnv>();
@@ -325,6 +329,90 @@ root.post('/checkout/plan/:id', async (c) => {
   const plan = await getPlan(c.env, r.co.plan_id);
   flash(c, ok ? `Payment received — you're on ${plan.name}.` : 'This checkout was already completed.');
   return c.redirect('/app/settings/plan', 303);
+});
+
+
+// ───────── Guardian (deliverability, all workspaces) ─────────
+// Kept in its own block (TABS.push, own routes) so other tabs can be added above without touching it.
+TABS.push(['/app/admin/guardian', 'Guardian']);
+dash.get('/guardian', async (c) => {
+  const [prov2h, prov24h, mta, throttles, openInc, recentInc, worst, auth] = await Promise.all([
+    metricsByProvider(c.env, {}, now() - 2 * HOUR), metricsByProvider(c.env, {}, now() - DAY), mtaHealth(c.env),
+    activeThrottles(c.env),
+    all<any>(c.env, `SELECT i.*, w.name AS ws_name FROM guardian_incidents i LEFT JOIN workspaces w ON w.id = i.workspace_id WHERE i.status = 'open' ORDER BY i.opened_at DESC LIMIT 50`),
+    all<any>(c.env, `SELECT i.*, w.name AS ws_name FROM guardian_incidents i LEFT JOIN workspaces w ON w.id = i.workspace_id WHERE i.status = 'resolved' ORDER BY i.resolved_at DESC LIMIT 20`),
+    worstWorkspaces(c.env), domainPassRates(c.env, 7),
+  ]);
+  const P = (x: number | null | undefined, d = 1) => (x == null ? '—' : `${(x * 100).toFixed(d)}%`);
+  const provCols = [
+    { h: 'Provider', r: (x: any) => <strong data-admin-provider={x.provider}>{PROVIDER_NAME[x.provider] || x.provider}</strong> },
+    { h: 'Attempted', r: (x: any) => num(x.attempted) }, { h: 'Accepted', r: (x: any) => P(x.acceptedRate, 2) },
+    { h: 'Hard bounce', r: (x: any) => P(x.hardRate, 2) }, { h: 'Complaints', r: (x: any) => P(x.complaintRate, 3) },
+    { h: 'Deferred', r: (x: any) => P(x.deferralRate, 1) }, { h: 'Median TTD', r: (x: any) => fmtDuration(x.ttdMedianMs) },
+  ];
+  const incRow = (i: any) => <div class="g-inc" style="padding:12px 16px;border-bottom:1px solid #e7e5e4" data-incident={i.kind}>
+    <div class="row" style="gap:8px;flex-wrap:wrap"><Badge tone={i.status === 'open' ? (i.severity === 'critical' ? 'red' : i.severity === 'warning' ? 'amber' : 'blue') : 'green'}>{i.status === 'open' ? i.severity : 'resolved'}</Badge><strong>{i.title}</strong><span class="muted small">{i.scope}{i.ws_name ? ` · ${i.ws_name}` : ''} · {ago(i.opened_at)}</span></div>
+    <p class="small" style="margin:4px 0">{i.diagnosis}</p>{i.action && <p class="small" style="margin:2px 0"><strong>Action:</strong> {i.action}</p>}
+  </div>;
+  return page(c, '/app/admin/guardian', 'Deliverability Guardian', <>
+    <Stats>
+      <Stat label="Open incidents" value={num(openInc.length)} sub={`${openInc.filter((i) => i.severity === 'critical').length} critical`} />
+      <Stat label="Active throttles" value={num(throttles.length)} />
+      <Stat label="Binding error rate (24h)" value={P(mta.attempts ? mta.failed / mta.attempts : null, 2)} sub={`${num(mta.failed)} of ${num(mta.attempts)} send calls failed`} />
+    </Stats>
+    <div class="row" style="gap:8px;margin:8px 0 14px"><ActionForm action="/app/admin/guardian/run" label="Run Guardian now" small /></div>
+    <Card title="Mailbox providers — last 2 hours" pad={false}><Table rows={prov2h} empty="No mail in the last 2 hours." cols={provCols} /></Card>
+    <Card title="Mailbox providers — last 24 hours" pad={false}><Table rows={prov24h} empty="No mail in the last 24 hours." cols={provCols} /></Card>
+    <div class="grid g2">
+      <Card title="Email Sending binding errors (24h)" pad={false}><Table rows={mta.byCode} empty="No failed send calls." cols={[{ h: 'Error', r: (x) => <code>{x.code}</code> }, { h: 'Count', r: (x) => num(x.n) }]} /></Card>
+      <Card title="Throttles" pad={false}>
+        <Table rows={throttles} empty="No throttles — everything at full speed." cols={[
+          { h: 'Scope', r: (t) => <code data-throttle-scope={t.scope}>{t.scope}</code> },
+          { h: 'Speed', r: (t) => (t.factor <= 0 ? <Badge tone="red">paused</Badge> : `${Math.round(t.factor * 100)}%`) },
+          { h: 'Reason', r: (t) => <span class="small">{t.reason}</span> },
+          { h: 'Until', r: (t) => (t.until ? fmtDateTime(t.until) : '—') },
+          { h: '', r: (t) => <ActionForm action="/app/admin/guardian/throttle/clear" fields={{ scope: t.scope }} label="Lift" small kind="ghost" /> },
+        ]} />
+        <form method="post" action="/app/admin/guardian/throttle" class="row" style="gap:6px;flex-wrap:wrap;padding:12px">
+          <Select name="scope" options={[['global', 'Global'], ...PROVIDERS.map((p) => [`provider:${p}`, `Provider: ${p}`] as [string, string])]} />
+          <input class="input" name="workspace" placeholder="or workspace id" style="max-width:150px" />
+          <Select name="factor" options={[['0.5', 'Half speed'], ['0.25', 'Quarter speed'], ['0', 'Pause']]} />
+          <Select name="hours" options={[['1', '1 hour'], ['2', '2 hours'], ['6', '6 hours'], ['24', '24 hours']]} />
+          <input class="input" name="reason" placeholder="Reason" style="max-width:180px" />
+          <Btn small kind="secondary">Set throttle</Btn>
+        </form>
+      </Card>
+    </div>
+    <Card title="Open incidents" pad={false}>{openInc.length ? openInc.map(incRow) : <div class="table-empty">No open incidents.</div>}</Card>
+    <Card title="Workspaces to watch (last 24h)" pad={false}><Table rows={worst} empty="Not enough mail yet." rowHref={(w) => `/app/admin/w/${w.ws}`} cols={[
+      { h: 'Workspace', r: (w) => <strong>{w.name || w.ws}</strong> }, { h: 'Sent', r: (w) => num(w.n) },
+      { h: 'Hard bounce', r: (w) => P(w.hard / w.n, 2) }, { h: 'Complaints', r: (w) => P(w.compl / w.n, 3) }, { h: 'Deferred', r: (w) => P(w.def / w.n, 1) },
+    ]} /></Card>
+    <Card title="DMARC alignment by domain (last 7 days)" pad={false}><Table rows={auth} empty="No DMARC reports received yet." cols={[
+      { h: 'Domain', r: (d) => <strong data-dmarc-domain={d.domain}>{d.domain}</strong> }, { h: 'Messages', r: (d) => num(d.messages) }, { h: 'Pass', r: (d) => P(d.messages ? d.pass / d.messages : null, 1) },
+    ]} /></Card>
+    <Card title="Recently resolved" pad={false}>{recentInc.length ? recentInc.map(incRow) : <div class="table-empty">Nothing yet.</div>}</Card>
+  </>);
+});
+dash.post('/guardian/run', async (c) => {
+  const r = await runGuardian(c.env);
+  return back(c, '/app/admin/guardian', `Guardian ran: ${r.findings} finding(s), ${r.opened} opened, ${r.updated} updated, ${r.resolved} resolved.`);
+});
+dash.post('/guardian/throttle', async (c) => {
+  const f = await form(c.req);
+  const ws = str(f.workspace, 64).trim();
+  const scope = ws ? `workspace:${ws}` : str(f.scope, 64);
+  try {
+    await setManualThrottle(c.env, scope, Number(f.factor), Math.min(24, Math.max(1, int(f.hours, 1))) * HOUR, str(f.reason, 200) || 'manual', actor(c));
+  } catch (e: any) { return back(c, '/app/admin/guardian', e.message, 'err'); }
+  await audit(c, 'guardian.throttle', scope, { factor: Number(f.factor), hours: int(f.hours, 1) });
+  return back(c, '/app/admin/guardian', `Throttle set on ${scope}`);
+});
+dash.post('/guardian/throttle/clear', async (c) => {
+  const scope = str((await form(c.req)).scope, 100);
+  await clearThrottle(c.env, scope);
+  await audit(c, 'guardian.throttle_cleared', scope);
+  return back(c, '/app/admin/guardian', `Lifted ${scope}`);
 });
 
 export default { dash, root } satisfies Module;

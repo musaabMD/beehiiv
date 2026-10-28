@@ -28,8 +28,11 @@ export function appHost(env: Env) {
 }
 
 /** The records a user must add for a domain. */
-export function recordsFor(env: Env, d: { hostname: string; kind: string; verify_token: string }): DnsRecord[] {
+export function recordsFor(env: Env, d: { id?: string; hostname: string; kind: string; verify_token: string }): DnsRecord[] {
   const h = d.hostname;
+  // DMARC aggregate reports go to the platform (lib/dmarc), which shows them on the Domains page and the Guardian.
+  const shared = ((env.SHARED_FROM_DOMAIN || '').trim() || (env.MAIL_FROM || '').split('@')[1] || h).toLowerCase();
+  const rua = d.id ? `dmarc+${d.id.toLowerCase()}@${shared}` : `dmarc@${shared}`;
   const recs: DnsRecord[] = [
     { key: 'verify', type: 'TXT', host: `_openhive.${h}`, value: `openhive-verify=${d.verify_token}`, purpose: 'Proves you own this domain', required: true },
   ];
@@ -39,7 +42,7 @@ export function recordsFor(env: Env, d: { hostname: string; kind: string; verify
     recs.push(
       { key: 'spf', type: 'TXT', host: h, value: `v=spf1 ${SPF_INCLUDE} ~all`, purpose: 'SPF — authorizes Cloudflare Email Sending to send for this domain (merge into an existing SPF record; only one v=spf1 record is allowed)', required: true },
       { key: 'dkim', type: 'TXT', host: `${DKIM_SELECTOR}._domainkey.${h}`, value: 'Provided by Cloudflare when you run: npx wrangler email sending enable ' + h, purpose: 'DKIM — cryptographically signs your mail. Added automatically when the zone is on Cloudflare.', required: true },
-      { key: 'dmarc', type: 'TXT', host: `_dmarc.${h}`, value: `v=DMARC1; p=quarantine; rua=mailto:dmarc@${h}; adkim=s; aspf=s; pct=100`, purpose: 'DMARC — tells inboxes to reject unaligned mail and sends you reports. adkim/aspf=s require strict alignment with your From domain.', required: true },
+      { key: 'dmarc', type: 'TXT', host: `_dmarc.${h}`, value: `v=DMARC1; p=quarantine; rua=mailto:${rua}; adkim=s; aspf=s; pct=100`, purpose: 'DMARC — tells inboxes to reject unaligned mail and sends the daily reports to us, so the Domains page and the Guardian can show who sends as you. Already have a DMARC record? Add our address to its rua= list (comma-separated). adkim/aspf=s require strict alignment with your From domain.', required: true },
       { key: 'mx', type: 'MX', host: h, value: 'Any MX (needed to receive replies and bounces)', purpose: 'Lets the domain receive replies; also required by many inbox filters', required: false },
     );
   }

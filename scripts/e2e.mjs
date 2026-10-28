@@ -1074,5 +1074,148 @@ const errs13 = sql(`SELECT source, message FROM error_log ORDER BY created_at DE
 ok(errs13.length === 0, 'no server errors logged (section 13)', JSON.stringify(errs13).slice(0, 800));
 
 }
+__restore();
+{ // Deliverability Guardian: delivery metrics, DMARC report ingestion (zip + gzip), Guardian throttles/incidents/recovery, seed tests, /open
+console.log('14. Deliverability Guardian: metrics, DMARC reports, throttles + incidents, seed placement, /open');
+const zlib = await import('node:zlib');
+const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crc32 = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+const zipOne = (name, data) => {
+  const comp = zlib.deflateRawSync(data), nb = Buffer.from(name), crc = crc32(data);
+  const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(8, 8); lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(nb.length, 26);
+  const cd = Buffer.alloc(46); cd.writeUInt32LE(0x02014b50, 0); cd.writeUInt16LE(20, 4); cd.writeUInt16LE(20, 6); cd.writeUInt16LE(8, 10); cd.writeUInt32LE(crc, 16); cd.writeUInt32LE(comp.length, 20); cd.writeUInt32LE(data.length, 24); cd.writeUInt16LE(nb.length, 28); cd.writeUInt32LE(0, 42);
+  const cdOff = 30 + nb.length + comp.length, cdLen = 46 + nb.length;
+  const eo = Buffer.alloc(22); eo.writeUInt32LE(0x06054b50, 0); eo.writeUInt16LE(1, 8); eo.writeUInt16LE(1, 10); eo.writeUInt32LE(cdLen, 12); eo.writeUInt32LE(cdOff, 16);
+  return Buffer.concat([lh, nb, comp, cd, nb, eo]);
+};
+const dmarcXml = (org, rid, domain, rows) => `<?xml version="1.0" encoding="UTF-8" ?>
+<feedback>
+  <report_metadata><org_name>${org}</org_name><email>noreply-dmarc-support@${org}</email><report_id>${rid}</report_id><date_range><begin>${Math.floor(Date.now() / 1000) - 86400}</begin><end>${Math.floor(Date.now() / 1000)}</end></date_range></report_metadata>
+  <policy_published><domain>${domain}</domain><adkim>r</adkim><aspf>r</aspf><p>none</p><sp>none</sp><pct>100</pct></policy_published>
+  ${rows.map(([ip, count, dkim, spf]) => `<record><row><source_ip>${ip}</source_ip><count>${count}</count><policy_evaluated><disposition>none</disposition><dkim>${dkim}</dkim><spf>${spf}</spf></policy_evaluated></row><identifiers><header_from>${domain}</header_from></identifiers><auth_results><dkim><domain>${domain}</domain><result>${dkim}</result><selector>cf2024-1</selector></dkim><spf><domain>${domain}</domain><result>${spf}</result></spf></auth_results></record>`).join('\n  ')}
+</feedback>`;
+const mime = (from, to, subject, filename, type, bytes) => {
+  const b = `b${rnd}x`;
+  return `From: ${from}\r\nTo: ${to}\r\nSubject: ${subject}\r\nMessage-ID: <${Math.random().toString(36).slice(2)}@reports.example>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="${b}"\r\n\r\n--${b}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nThis is an aggregate report from ${from}.\r\n--${b}\r\nContent-Type: ${type}; name="${filename}"\r\nContent-Disposition: attachment; filename="${filename}"\r\nContent-Transfer-Encoding: base64\r\n\r\n${Buffer.from(bytes).toString('base64').replace(/(.{76})/g, '$1\r\n')}\r\n--${b}--\r\n`;
+};
+const inbound = (from, to, raw) => fetch(`${BASE}/cdn-cgi/local/email?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { method: 'POST', body: raw });
+
+// a verified custom sending domain for this publication
+const host = `g${rnd}.example.com`, domId = `dom${rnd}`;
+sql(`INSERT INTO domains (id, pub_id, hostname, kind, status, verify_token, created_at) VALUES ('${domId}', '${pubId}', '${host}', 'email', 'verified', 'vt${rnd}', ${Date.now()})`);
+r = await req('/app/settings/domains'); let gh = await r.text();
+ok(r.status === 200 && gh.includes(`rua=mailto:dmarc+${domId}@news.lnkbase.com`) && gh.includes(`data-dmarc-section="${host}"`), 'Domains page tells the customer their rua address and shows a DMARC section');
+
+// Google: zip attachment to the per-domain address; Microsoft: gzip to dmarc@ — real aggregate report format
+const gXml = dmarcXml('google.com', `g-${rnd}`, host, [['104.30.0.1', 40, 'pass', 'pass'], ['104.30.0.2', 20, 'pass', 'fail'], ['203.0.113.9', 30, 'fail', 'fail']]);
+let ir = await inbound('noreply-dmarc-support@google.com', `dmarc+${domId}@news.lnkbase.com`, mime('noreply-dmarc-support@google.com', `dmarc+${domId}@news.lnkbase.com`, `Report domain: ${host} Submitter: google.com Report-ID: g-${rnd}`, `google.com!${host}!1.zip`, 'application/zip', zipOne(`google.com!${host}!1.xml`, Buffer.from(gXml))));
+ok(ir.status < 300, 'local email endpoint accepts the Google zip report', ir.status);
+const mXml = dmarcXml('Outlook.com', `m-${rnd}`, host, [['104.30.0.1', 10, 'pass', 'pass'], ['198.51.100.7', 5, 'fail', 'fail']]);
+ir = await inbound('dmarcreport@microsoft.com', 'dmarc@news.lnkbase.com', mime('dmarcreport@microsoft.com', 'dmarc@news.lnkbase.com', `Report Domain: ${host} Submitter: protection.outlook.com`, `protection.outlook.com!${host}!1.xml.gz`, 'application/gzip', zlib.gzipSync(Buffer.from(mXml))));
+ok(ir.status < 300, 'local email endpoint accepts the Microsoft gzip report', ir.status);
+let dr = sql(`SELECT org, messages FROM dmarc_reports WHERE domain = '${host}' ORDER BY org`);
+ok(dr.length === 2 && dr.find((x) => x.org === 'google.com')?.messages === 90 && dr.find((x) => x.org === 'Outlook.com')?.messages === 15, 'zip and gzip DMARC reports parsed and stored', JSON.stringify(dr));
+const recs = sql(`SELECT SUM(count) AS m, SUM(CASE WHEN dkim = 'pass' OR spf = 'pass' THEN count ELSE 0 END) AS p FROM dmarc_records WHERE domain = '${host}'`)[0];
+ok(recs.m === 105 && recs.p === 70, 'per-day records by source IP with aligned pass/fail', JSON.stringify(recs));
+// the same report again is a duplicate; a report for a domain we don't know is ignored
+await inbound('noreply-dmarc-support@google.com', `dmarc+${domId}@news.lnkbase.com`, mime('noreply-dmarc-support@google.com', `dmarc+${domId}@news.lnkbase.com`, 'dup', 'r.zip', 'application/zip', zipOne('r.xml', Buffer.from(gXml))));
+await inbound('noreply-dmarc-support@google.com', 'dmarc@news.lnkbase.com', mime('noreply-dmarc-support@google.com', 'dmarc@news.lnkbase.com', 'x', 'x.xml.gz', 'application/gzip', zlib.gzipSync(Buffer.from(dmarcXml('google.com', `u-${rnd}`, `unknown-${rnd}.example.org`, [['1.1.1.1', 9, 'fail', 'fail']])))));
+ok(sql(`SELECT SUM(messages) AS n FROM dmarc_reports WHERE domain = '${host}'`)[0].n === 105 && sql(`SELECT COUNT(*) AS n FROM dmarc_reports WHERE domain = 'unknown-${rnd}.example.org'`)[0].n === 0, 'duplicate reports and unknown domains are not stored');
+ok(sql(`SELECT COUNT(*) AS n FROM inbound_reports WHERE kind = 'dmarc' AND detail LIKE '%${host}%'`)[0].n === 2, 'DMARC reports logged under Inbound reports');
+r = await req('/app/settings/domains'); gh = await r.text();
+ok(gh.includes('data-failing-ip="203.0.113.9"') && gh.includes('66.7%'), 'Domains page shows the DMARC pass rate and failing sources');
+r = await req('/app/analytics/guardian?tab=auth'); gh = await r.text();
+ok(r.status === 200 && gh.includes('data-failing-ip="198.51.100.7"') && gh.includes('Outlook.com'), 'Guardian → Authentication shows reporters and failing sources');
+
+// the Guardian scenario runs in its own fresh workspace (the main one has thousands of earlier deliveries)
+cookies = {};
+const gEmail = `gw.${rnd}@gmail.com`;
+await req('/signup', { form: { name: 'Guardian Tester', email: gEmail, password: 'correct-horse-9' } });
+await req('/app/onboarding', { form: { name: `Guardian ${rnd}`, slug: `gw-${rnd}`, description: 'Guardian', language: 'en', timezone: 'UTC' } });
+const gCookies = { ...cookies };
+const gRow = sql(`SELECT id, workspace_id FROM publications WHERE slug = 'gw-${rnd}'`)[0];
+const gPub = gRow.id, gWs = gRow.workspace_id;
+// delivery metrics: a send with 150 attempts, 2 s to delivery, 15 hard bounces (10%), 15 deferred once
+const gsend = `gs${rnd}`, t0 = Date.now() - 20 * 60_000;
+sql(`INSERT INTO sends (id, pub_id, kind, subject, status, total, sent, created_at) VALUES ('${gsend}', '${gPub}', 'post', 'Guardian ${rnd}', 'sent', 150, 135, ${t0})`);
+sql(`WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < 150) INSERT INTO deliveries (id, send_id, pub_id, email, status, bounce_type, attempts, provider, sent_at, created_at) SELECT 'gd' || i || '${rnd}', '${gsend}', '${gPub}', 'gd' || i || '.${rnd}@example.net', CASE WHEN i <= 15 THEN 'bounced' ELSE 'sent' END, CASE WHEN i <= 15 THEN 'hard' ELSE NULL END, CASE WHEN i > 135 THEN 2 ELSE 1 END, 'other', CASE WHEN i <= 15 THEN NULL ELSE ${t0} + 2000 END, ${t0} FROM k`);
+cookies = { ...gCookies };
+r = await req('/app/analytics/guardian?tab=metrics'); gh = await r.text();
+ok(r.status === 200 && gh.includes(`Guardian ${rnd}`) && gh.includes('2.0 s') && gh.includes('10.00%') && gh.includes('Cost per accepted email') && gh.includes('Revenue per 1,000'), 'metrics: per send (time to delivery, hard bounce rate), cost and revenue per 1k', gh.match(/Guardian [a-z0-9]+[\s\S]{0,600}/)?.[0]?.replace(/<[^>]+>/g, ' ').slice(0, 300));
+ok(gh.includes('data-provider="other"') && gh.includes('Deferred'), 'metrics: per mailbox provider incl. deferral rate');
+
+// Guardian: run it as a superadmin; the workspace's 10% hard bounces pause it (critical) with an expiry
+cookies = {};
+const gOps = `opsg.${rnd}@gmail.com`;
+await req('/signup', { form: { name: 'Ops G', email: gOps, password: 'correct-horse-9' } });
+sql(`UPDATE users SET is_superadmin = 1 WHERE email = '${gOps}'`);
+const opsG = { ...cookies };
+r = await req('/app/admin/guardian/run', { form: {} });
+ok([302, 303].includes(r.status), 'superadmin can run the Guardian', r.status);
+let inc = sql(`SELECT * FROM guardian_incidents WHERE scope = 'workspace:${gWs}' AND kind = 'bounces' AND status = 'open'`)[0];
+const thr = sql(`SELECT * FROM send_throttles WHERE scope = 'workspace:${gWs}'`)[0];
+ok(inc && inc.severity === 'critical' && /hard-bounced/.test(inc.title) && /paused sending/i.test(inc.diagnosis) && inc.recommendation.length > 20, 'Guardian opens a plain-English bounce incident', JSON.stringify(inc || {}).slice(0, 300));
+ok(thr && thr.factor === 0 && thr.reason.startsWith('guardian:') && thr.until > Date.now() && thr.until <= Date.now() + 2 * 3600_000 + 60_000, 'Guardian pauses the workspace through send_throttles, with an expiry', JSON.stringify(thr || {}));
+const dmInc = sql(`SELECT severity, title FROM guardian_incidents WHERE scope = 'domain:${host}' AND kind = 'dmarc' AND status = 'open'`)[0];
+ok(dmInc && dmInc.severity === 'critical' && /passes DMARC/.test(dmInc.title), 'DMARC failures raise a domain incident', JSON.stringify(dmInc || {}));
+ok(sql(`SELECT COUNT(*) AS n FROM outbox WHERE to_email = '${gEmail}' AND subject LIKE '%Deliverability:%hard-bounced%'`)[0].n === 1, 'owner emailed about the incident');
+await req('/app/admin/guardian/run', { form: {} });
+ok(sql(`SELECT COUNT(*) AS n FROM guardian_incidents WHERE scope = 'workspace:${gWs}' AND kind = 'bounces'`)[0].n === 1 && sql(`SELECT COUNT(*) AS n FROM outbox WHERE to_email = '${gEmail}' AND subject LIKE '%Deliverability:%hard-bounced%'`)[0].n === 1, 'a second pass updates the incident without re-notifying');
+// an operator's own throttle is never overwritten by the Guardian
+r = await req('/app/admin/guardian/throttle', { form: { scope: 'provider:yahoo', workspace: '', factor: '0.25', hours: '1', reason: 'e2e manual' } });
+ok(sql(`SELECT factor, reason FROM send_throttles WHERE scope = 'provider:yahoo'`)[0]?.reason?.startsWith('operator'), 'superadmin can set a manual throttle');
+r = await req('/app/admin/guardian'); gh = await r.text();
+ok(r.status === 200 && gh.includes('data-throttle-scope="provider:yahoo"') && gh.includes(`data-throttle-scope="workspace:${gWs}"`) && gh.includes('Email Sending binding errors') && gh.includes('Mailbox providers'), 'platform Guardian view: provider health, binding errors, throttles, incidents');
+await req('/app/admin/guardian/throttle/clear', { form: { scope: 'provider:yahoo' } });
+ok(sql(`SELECT COUNT(*) AS n FROM send_throttles WHERE scope = 'provider:yahoo'`)[0].n === 0, 'superadmin can lift a throttle');
+
+// customer view
+cookies = { ...gCookies };
+r = await req('/app/analytics/guardian'); gh = await r.text();
+const score = Number(gh.match(/data-health="(\d+)"/)?.[1]);
+ok(r.status === 200 && score < 75 && gh.includes('data-incident="bounces"') && gh.includes('Your account') && gh.includes('paused') && gh.includes('Recommendations'), `customer Guardian: health score (${score}), incident timeline, active throttle, recommendations`);
+r = await req('/app/analytics/deliverability'); ok((await r.text()).includes('/app/analytics/guardian'), 'Analytics → Deliverability links to the Guardian');
+
+// auto-recovery: fresh mail after the pause is clean → incident resolves, throttle lifted, owner told
+sql(`UPDATE guardian_incidents SET acted_at = ${Date.now() - 2 * 60_000} WHERE id = '${inc.id}'`);
+sql(`WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < 80) INSERT INTO deliveries (id, send_id, pub_id, email, status, attempts, provider, sent_at, created_at) SELECT 'gr' || i || '${rnd}', '${gsend}', '${gPub}', 'gr' || i || '.${rnd}@example.net', 'sent', 1, 'other', ${Date.now()}, ${Date.now() - 60_000} FROM k`);
+cookies = opsG;
+await req('/app/admin/guardian/run', { form: {} });
+inc = sql(`SELECT status FROM guardian_incidents WHERE id = '${inc.id}'`)[0];
+ok(inc.status === 'resolved' && sql(`SELECT COUNT(*) AS n FROM send_throttles WHERE scope = 'workspace:${gWs}'`)[0].n === 0, 'Guardian auto-recovers: incident resolved and throttle lifted', JSON.stringify(inc));
+ok(sql(`SELECT COUNT(*) AS n FROM outbox WHERE to_email = '${gEmail}' AND subject LIKE '%Resolved:%hard-bounced%'`)[0].n === 1, 'owner told it recovered');
+await req('/app/admin/guardian/run', { form: {} });
+ok(sql(`SELECT COUNT(*) AS n FROM guardian_incidents WHERE scope = 'workspace:${gWs}' AND kind = 'bounces' AND status = 'open'`)[0].n === 0, 'old bad mail still in the window does not reopen it');
+
+// inbox placement seed test
+cookies = { ...__mainCookies };
+r = await req('/app/analytics/guardian/seeds', { form: { emails: `seed1.${rnd}@gmail.com\nseed2.${rnd}@outlook.com\nnot-an-email` } });
+ok(sql(`SELECT COUNT(*) AS n FROM seed_addresses WHERE pub_id = '${pubId}'`)[0].n === 2, 'seed inboxes added (invalid skipped)');
+r = await req('/app/analytics/guardian/seed-test', { form: { post_id: postId } });
+const seeds = sql(`SELECT id, email, provider FROM seed_results WHERE pub_id = '${pubId}' ORDER BY email`);
+const seedMail = sql(`SELECT html, headers FROM outbox WHERE to_email = 'seed1.${rnd}@gmail.com'`)[0];
+ok(seeds.length === 2 && seedMail && seedMail.html.includes(`/seed/${seeds[0].id}/spam`) && seedMail.html.includes('Placement test'), 'seed test sends the preview with one-click placement links', JSON.stringify(seeds));
+cookies = {};
+r = await req(`/seed/${seeds[0].id}/spam`);
+ok(r.status === 200 && sql(`SELECT placement FROM seed_results WHERE id = '${seeds[0].id}'`)[0].placement === null, 'GET (link scanners) does not record placement');
+r = await req(`/seed/${seeds[0].id}/spam`, { form: {} });
+ok(r.status === 200 && sql(`SELECT placement FROM seed_results WHERE id = '${seeds[0].id}'`)[0].placement === 'spam', 'one-click link records placement');
+ir = await inbound(`seed2.${rnd}@outlook.com`, `seed+${seeds[1].id}@news.lnkbase.com`, `From: seed2.${rnd}@outlook.com\r\nTo: seed+${seeds[1].id}@news.lnkbase.com\r\nSubject: Re: test\r\nMessage-ID: <s${rnd}@outlook.com>\r\nContent-Type: text/plain\r\n\r\ninbox\r\n`);
+ok(sql(`SELECT placement FROM seed_results WHERE id = '${seeds[1].id}'`)[0].placement === 'inbox', 'replying "inbox" to a seed email records placement', ir.status);
+cookies = { ...__mainCookies };
+r = await req('/app/analytics/guardian?tab=placement'); gh = await r.text();
+ok(gh.includes('data-seed-provider="gmail"') && gh.includes('data-seed-provider="outlook"') && gh.includes('This is a sample'), 'placement estimate per provider, labelled as a sample');
+
+// public /open page
+r = await fetch(`${BASE}/open`); gh = await r.text();
+ok(r.status === 200 && gh.includes('Time to delivery runs from when an email was queued') && gh.includes('authentication pass rate'), '/open explains deferral, time to delivery and authentication');
+
+// clean up so later runs start clear
+sql(`DELETE FROM deliveries WHERE send_id = '${gsend}'`); sql(`DELETE FROM sends WHERE id = '${gsend}'`);
+sql(`DELETE FROM guardian_incidents WHERE scope IN ('workspace:${gWs}', 'domain:${host}') OR scope LIKE 'provider:%'`); sql(`DELETE FROM send_throttles WHERE reason LIKE 'guardian:%'`);
+sql(`DELETE FROM domains WHERE id = '${domId}'`);
+const errs14 = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
+ok(errs14.length === 0, 'no server errors logged (section 14)', JSON.stringify(errs14).slice(0, 800));
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
