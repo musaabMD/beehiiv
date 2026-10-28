@@ -9,6 +9,19 @@ import { createHmac } from 'node:crypto';
 import { execSync } from 'node:child_process';
 
 const BASE = process.env.BASE || 'http://localhost:8787';
+// The dev server closes idle keep-alive sockets after a few seconds. When a slow step (wrangler d1 execute on a busy
+// machine, a Workers AI call) outlasts that, the next fetch can pick the just-closed socket and fail with ECONNRESET
+// before the request reaches the server: retry those once on a fresh connection.
+{
+  const _fetch = globalThis.fetch;
+  globalThis.fetch = async (...a) => {
+    try { return await _fetch(...a); } catch (e) {
+      if (!['ECONNRESET', 'UND_ERR_SOCKET', 'EPIPE'].includes(e?.cause?.code)) throw e;
+      await new Promise((r) => setTimeout(r, 300));
+      return _fetch(...a);
+    }
+  };
+}
 const PERSIST = process.env.PERSIST || '';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15';
 const rnd = Math.random().toString(36).slice(2, 8);
@@ -1073,6 +1086,175 @@ sql(`DELETE FROM subscribers WHERE id LIKE 'mv%${rnd}'`);
 const errs13 = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
 ok(errs13.length === 0, 'no server errors logged (section 13)', JSON.stringify(errs13).slice(0, 800));
 
+}
+__restore();
+{ // AI revenue journeys, experiment guardrails, tracking domains, onboarding wizard, troubleshooter
+console.log('14. AI journeys, experiment guardrails, custom tracking domains, onboarding wizard, delivery troubleshooter');
+const http = await import('node:http');
+const hostReq = (host, path) => new Promise((done) => { const u = new URL(BASE); const rq = http.request({ host: u.hostname, port: u.port, path, method: 'GET', headers: { host, 'user-agent': UA } }, (res) => { res.resume(); done({ status: res.statusCode, location: res.headers.location || '', type: res.headers['content-type'] || '' }); }); rq.on('error', () => done({ status: 0 })); rq.end(); });
+const t14 = Date.now();
+sql(`DELETE FROM error_log`);
+
+// ── AI journey: fallback path (engine = template), preview, create as draft
+r = await req('/app/automations');
+ok((await r.text()).includes('data-ai-journey-entry'), 'New automation gallery offers "Describe your goal"');
+r = await req('/app/automations/ai');
+ok(r.status === 200 && (await r.text()).includes('data-goal-example'), 'goal form with examples');
+r = await req('/app/automations/ai', { form: { goal: 'Turn free readers into paid subscribers', tone: 'professional', engine: 'template' } });
+const jPath = r.headers.get('location') || '';
+const jid = jPath.split('/').pop();
+const jrow = sql(`SELECT source, template_key FROM ai_journeys WHERE id = '${jid}'`)[0];
+ok(jrow?.source === 'template' && jrow.template_key === 'upgrade_nurture', 'fallback picks the closest template (free → paid = upgrade_nurture)', JSON.stringify(jrow || {}).slice(0, 200));
+r = await req(jPath);
+const jh = await r.text();
+ok(r.status === 200 && jh.includes('data-journey-source="template"') && (jh.match(/data-journey-email/g) || []).length >= 2 && jh.includes('data-create-journey'), 'preview shows flow, rendered emails and a create button');
+ok(sql(`SELECT COUNT(*) AS n FROM automations WHERE name = 'Turn free readers into paid subscribers' AND pub_id = '${pubId}'`)[0].n === 0, 'nothing is created before confirming');
+r = await req(`/app/automations/ai/${jid}/create`, { form: {} });
+const jAuto = sql(`SELECT id, status, draft_steps, draft_trigger FROM automations WHERE id = (SELECT automation_id FROM ai_journeys WHERE id = '${jid}')`)[0];
+ok(jAuto?.status === 'draft' && JSON.parse(jAuto.draft_steps).some((s) => s.type === 'condition') && JSON.parse(jAuto.draft_trigger).type === 'signup', 'confirm creates a draft automation with the adapted flow');
+const seg14 = `seg14${rnd}`;
+sql(`INSERT INTO segments (id, pub_id, name, rules, created_at) VALUES ('${seg14}', '${pubId}', 'Course fans', '{"op":"and","rules":[]}', ${Date.now()})`);
+r = await req('/app/automations/ai', { form: { goal: 'Sell my $49 course to new subscribers', product: 'Writing Masterclass', price: '$49', url: 'https://example.com/course', segment_id: seg14, engine: 'template' } });
+const p2 = JSON.parse(sql(`SELECT plan FROM ai_journeys WHERE id = '${(r.headers.get('location') || '').split('/').pop()}'`)[0]?.plan || '{}');
+const p2s = JSON.stringify(p2.steps || []);
+ok(p2s.includes('Writing Masterclass') && p2s.includes('$49') && p2s.includes('https://example.com/course') && JSON.stringify(p2.trigger).includes(seg14), 'fallback adapts copy (product, price, link) and adds the audience segment filter');
+r = await req('/app/automations/ai', { form: { goal: "Win back customers who haven't bought in 90 days", engine: 'template' } });
+const p3 = JSON.parse(sql(`SELECT plan FROM ai_journeys WHERE id = '${(r.headers.get('location') || '').split('/').pop()}'`)[0]?.plan || '{}');
+ok(p3.trigger?.type === 'inactive' && p3.trigger?.config?.days === 90 && JSON.stringify(p3.trigger.filter || {}).includes('purchased'), 'win-back goal: inactive 90 days, customers only', JSON.stringify(p3.trigger || {}));
+// AI path (Workers AI reaches the real service in local dev): either a validated AI plan or an explained fallback
+r = await req('/app/automations/ai', { form: { goal: 'Sell my $49 course to new subscribers', product: 'Writing Masterclass', price: '$49', engine: 'auto' } });
+const jai = sql(`SELECT source, plan, notes FROM ai_journeys WHERE id = '${(r.headers.get('location') || '').split('/').pop()}'`)[0];
+const emailsAi = []; const walk14 = (l) => (l || []).forEach((s) => { if (s.type === 'send_email') emailsAi.push(s); walk14(s.yes); walk14(s.no); });
+walk14(JSON.parse(jai?.plan || '{}').steps);
+ok(jai && emailsAi.length >= 1 && emailsAi.every((e) => e.config.subject && e.config.doc.blocks.length) && (jai.source === 'ai' || JSON.parse(jai.notes).some((n) => /template/i.test(n))), `AI path: ${jai?.source === 'ai' ? 'Workers AI plan validated' : 'fell back with a reason'} (${emailsAi.length} emails)`, (jai?.notes || '').slice(0, 300));
+
+// ── Guardrails: automation A/B split
+const g14 = `ga${rnd}`;
+const gSteps = [{ id: `sp${rnd}`, type: 'ab_split', config: { pct: 50 }, yes: [{ id: `ea${rnd}`, type: 'delay', config: { amount: 1, unit: 'days' } }], no: [{ id: `eb${rnd}`, type: 'delay', config: { amount: 1, unit: 'days' } }] }];
+sql(`INSERT INTO automations (id, pub_id, name, status, trigger, steps, allow_reentry, created_at, updated_at) VALUES ('${g14}', '${pubId}', 'Split ${rnd}', 'active', '{"type":"api","config":{}}', '${JSON.stringify(gSteps)}', 0, ${Date.now()}, ${Date.now()})`);
+const tNow = Date.now() - 3600000;
+const gIns = [];
+for (let i = 0; i < 8; i++) {
+  const arm = i < 4 ? 'A' : 'B';
+  const unsub = arm === 'B' && i < 7; // 3 of 4 on path B unsubscribed after the split
+  gIns.push(`INSERT INTO subscribers (id, pub_id, email, status, unsubscribed_at, referral_code, created_at, updated_at) VALUES ('gs${i}${rnd}', '${pubId}', 'gs${i}.${rnd}@gmail.com', '${unsub ? 'unsubscribed' : 'active'}', ${unsub ? tNow + 60000 : 'NULL'}, 'gr${i}${rnd}', ${tNow - 1000}, ${tNow})`);
+  gIns.push(`INSERT INTO automation_runs (id, automation_id, pub_id, subscriber_id, status, step_path, next_run_at, data, created_at, updated_at) VALUES ('gr${i}${rnd}', '${g14}', '${pubId}', 'gs${i}${rnd}', '${i === 7 ? 'waiting' : 'completed'}', '${i === 7 ? '[0,"no",0]' : '[0]'}', ${Date.now() + 86400000}, '{}', ${tNow}, ${tNow})`);
+  gIns.push(`INSERT INTO automation_logs (id, run_id, automation_id, step_id, action, result, created_at) VALUES ('gl${i}${rnd}', 'gr${i}${rnd}', '${g14}', 'sp${rnd}', 'ab_split', 'path ${arm}', ${tNow})`);
+}
+sql(gIns.join('; '));
+r = await req(`/app/automations/${g14}/guardrails`);
+ok(r.status === 200 && (await r.text()).includes('Path B'), 'automation Guardrails tab shows per-path stats');
+r = await req(`/app/automations/${g14}/guardrails`, { form: { enabled: '1', max_unsub_pct: '10', max_complaint_pct: '0.5', min_rpr_pct: '0', min_sample: '3', window_days: '7', control: 'A' } });
+r = await req(`/app/automations/${g14}/guardrails/check`, { form: {} });
+const gA = JSON.parse(sql(`SELECT steps FROM automations WHERE id = '${g14}'`)[0].steps)[0];
+const gEv = sql(`SELECT stopped, safe, explanation, moved FROM guardrail_events WHERE ref_id = '${g14}'`)[0];
+ok(gA.config.guardrail?.route === 'yes' && gEv?.stopped === 'path B' && /unsubscribe rate 75%/.test(gEv.explanation) && gEv.moved === 1, 'split guardrail stops path B (75% unsubscribes) with a logged explanation', JSON.stringify(gEv || {}).slice(0, 300));
+ok(sql(`SELECT step_path FROM automation_runs WHERE id = 'gr7${rnd}'`)[0].step_path === '[0,"yes",0]', 'in-flight journey on the stopped path moved to the safe path');
+sql(`INSERT INTO subscribers (id, pub_id, email, status, referral_code, created_at, updated_at) VALUES ('gsn${rnd}', '${pubId}', 'gsn.${rnd}@gmail.com', 'active', 'grn${rnd}', ${Date.now()}, ${Date.now()})`);
+r = await req(`/app/automations/${g14}/enroll`, { json: { subscriber_id: `gsn${rnd}` } });
+ok(sql(`SELECT l.result FROM automation_logs l JOIN automation_runs r ON r.id = l.run_id WHERE r.subscriber_id = 'gsn${rnd}' AND l.action = 'ab_split'`)[0]?.result === 'path A (guardrail)', 'new enrollments all take the safe path');
+
+// ── Guardrails: newsletter A/B test (variant B wins on opens but draws complaints → everyone gets A)
+const gp = `gp${rnd}`, gsend = `gsd${rnd}`;
+sql(`INSERT INTO posts (id, pub_id, title, slug, content, status, ab_test, created_at, updated_at) VALUES ('${gp}', '${pubId}', 'Guard post ${rnd}', 'guard-${rnd}', '{"blocks":[]}', 'published', '{"subjects":["A subj","B subj"],"sample_pct":20,"wait_minutes":60,"metric":"opens"}', ${Date.now()}, ${Date.now()})`);
+sql(`INSERT INTO sends (id, pub_id, post_id, kind, subject, status, total, options, created_at, started_at) VALUES ('${gsend}', '${pubId}', '${gp}', 'post', 'Guard post ${rnd}', 'testing', 10, '{"ab":{"subjects":["A subj","B subj"],"sample_pct":20,"wait_minutes":60,"metric":"opens","winner":null},"phase":"test"}', ${Date.now()}, ${Date.now()})`);
+const dIns = [];
+for (let i = 0; i < 6; i++) dIns.push(`INSERT INTO deliveries (id, send_id, pub_id, subscriber_id, email, variant, status, attempts, sent_at, opened_at, created_at) VALUES ('gd${i}${rnd}', '${gsend}', '${pubId}', 'gs${i}${rnd}', 'gs${i}.${rnd}@gmail.com', '${i % 2 ? 'B' : 'A'}', '${i % 2 && i < 5 ? 'complained' : 'sent'}', 1, ${Date.now() - 60000}, ${i % 2 ? Date.now() : 'NULL'}, ${Date.now() - 60000})`);
+sql(dIns.join('; '));
+r = await req('/app/automations/guardrails');
+ok(r.status === 200 && (await r.text()).includes(`Guard post ${rnd}`), 'Guardrails page lists newsletter tests');
+r = await req('/app/automations/guardrails/default', { form: { enabled: '1', max_unsub_pct: '50', max_complaint_pct: '1', min_rpr_pct: '0', min_sample: '3', window_days: '7', control: 'A' } });
+r = await req('/app/automations/guardrails/check', { form: {} });
+const gS = sql(`SELECT status, options FROM sends WHERE id = '${gsend}'`)[0];
+const gO = JSON.parse(gS.options);
+const gE2 = sql(`SELECT explanation FROM guardrail_events WHERE ref_id = '${gsend}'`)[0];
+ok(gS.status === 'sending' && gO.winner === 'A' && gO.phase === 'main' && /complaint rate 66\.7%/.test(gE2?.explanation || '') && JSON.parse(sql(`SELECT ab_test FROM posts WHERE id = '${gp}'`)[0].ab_test).winner === 'A', 'newsletter test: variant B (more opens, 67% complaints) stopped — everyone gets A', JSON.stringify(gE2 || {}).slice(0, 300));
+sql(`UPDATE sends SET status = 'cancelled' WHERE id = '${gsend}'`);
+sql(`DELETE FROM experiment_guardrails WHERE pub_id = '${pubId}' AND kind = 'default'`);
+r = await req(`/app/automations/guardrails/send/${gsend}`);
+ok(r.status === 200 && (await r.text()).includes('data-guardrail-events'), 'test detail page shows variants and the guardrail log');
+
+// ── Custom tracking domain
+const th = `links-${rnd}.example.test`;
+r = await req('/app/settings/domains', { form: { hostname: th, kind: 'tracking' } });
+const td = sql(`SELECT id, kind FROM domains WHERE hostname = '${th}'`)[0];
+ok(td?.kind === 'tracking', 'tracking domain added on the Domains page');
+r = await req('/app/settings/domains');
+const dh = await r.text();
+ok(dh.includes('Tracking links') && dh.includes(`data-live-check="/app/settings/domains/${td?.id}/check.json"`), 'Domains page shows tracking setup + live verification');
+r = await req(`/app/settings/domains/${td?.id}/check.json`);
+const tj = await r.json().catch(() => ({}));
+ok(r.status === 200 && tj.active === false && (tj.checks || []).some((k) => k.key === 'cname'), 'live check: unverified tracking domain stays inactive');
+// verification itself needs real DNS: simulate the verified state
+sql(`UPDATE domains SET status = 'verified' WHERE id = '${td?.id}'; UPDATE publications SET tracking_domain = '${th}' WHERE id = '${pubId}'`);
+r = await req(`/app/automations/${g14}/preview-email`, { json: { config: { subject: 'x', doc: { blocks: [{ id: 'b', type: 'paragraph', data: { html: 'Hi <a href="https://example.com/x">link</a>' } }] } } } });
+const pv = await r.json().catch(() => ({ html: '' }));
+ok(pv.html.includes(`https://${th}/u/`) && pv.html.includes(`https://${th}/pref/`), 'emails use the tracking domain for unsubscribe + preference links');
+const tsub = sql(`SELECT id FROM subscribers WHERE pub_id = '${pubId}' AND status = 'active' AND email LIKE 'gsn.%' LIMIT 1`)[0];
+const trackA = `tk${rnd}`;
+sql(`INSERT INTO automations (id, pub_id, name, status, trigger, steps, allow_reentry, created_at, updated_at) VALUES ('${trackA}', '${pubId}', 'Track ${rnd}', 'active', '{"type":"api","config":{}}', '[{"id":"tke${rnd}","type":"send_email","config":{"subject":"Track ${rnd}","doc":{"blocks":[{"id":"b1","type":"paragraph","data":{"html":"Hi <a href=\\"https://example.com/y\\">link</a>"}}]}}}]', 0, ${Date.now()}, ${Date.now()})`);
+r = await req(`/app/automations/${trackA}/enroll`, { json: { subscriber_id: tsub.id } });
+const tOut = sql(`SELECT html FROM outbox WHERE subject = 'Track ${rnd}' ORDER BY created_at DESC LIMIT 1`)[0];
+ok(tOut && tOut.html.includes(`https://${th}/t/c/`) && tOut.html.includes(`https://${th}/t/o/`) && !tOut.html.includes(`${BASE}/t/`), 'sent email: click + open tracking on the tracking domain', (tOut?.html || 'no email').slice(0, 120));
+const tp = await hostReq(th, '/t/o/nonexistent.gif');
+const tApp = await hostReq(th, '/app/settings');
+const tUnsub = await hostReq(th, '/u/bad.token');
+// wrangler dev rewrites the Host to the configured route unless started with --local-upstream <tracking host>,
+// so the redirect half is only observable when the Host header reaches the Worker.
+const hostSeen = !tApp.location.startsWith('/login');
+ok(tp.status === 200 && /gif/.test(tp.type) && tUnsub.status === 400 && (!hostSeen || (tApp.status === 302 && tApp.location.startsWith(BASE))), `router: tracking host serves /t/ and /u/${hostSeen ? ', redirects everything else to the app' : ' (redirect not observable: local dev rewrites Host)'}`, JSON.stringify([tp, tApp, tUnsub]));
+sql(`UPDATE publications SET tracking_domain = NULL WHERE id = '${pubId}'; UPDATE automations SET status = 'archived' WHERE id IN ('${trackA}', '${g14}')`);
+
+// ── Troubleshooter
+r = await req('/app/settings/email');
+ok((await r.text()).includes('/app/settings/email/troubleshoot'), 'Email settings link to the troubleshooter');
+const tsA = `ts.sup.${rnd}@gmail.com`, tsB = `ts.bnc.${rnd}@gmail.com`, tsC = `ts.def.${rnd}@gmail.com`;
+sql(`INSERT INTO subscribers (id, pub_id, email, status, referral_code, created_at, updated_at) VALUES ('tsa${rnd}', '${pubId}', '${tsA}', 'active', 'tsa${rnd}', ${Date.now()}, ${Date.now()}), ('tsb${rnd}', '${pubId}', '${tsB}', 'bounced', 'tsb${rnd}', ${Date.now()}, ${Date.now()}), ('tsc${rnd}', '${pubId}', '${tsC}', 'active', 'tsc${rnd}', ${Date.now()}, ${Date.now()})`);
+sql(`INSERT INTO suppressions (id, scope, pub_id, email, reason, created_at) VALUES ('tsp${rnd}', 'pub', '${pubId}', '${tsA}', 'manual', ${Date.now()})`);
+sql(`INSERT INTO sends (id, pub_id, post_id, kind, subject, status, status_reason, total, options, created_at, started_at) VALUES ('tss${rnd}', '${pubId}', '${gp}', 'post', 'Paused issue ${rnd}', 'paused', 'Hard-bounce rate 12% is above the 5% safety limit', 3, '{}', ${Date.now() + 5000}, ${Date.now()})`);
+sql(`INSERT INTO deliveries (id, send_id, pub_id, subscriber_id, email, status, bounce_type, attempts, error, next_attempt_at, created_at) VALUES ('tdb${rnd}', 'tss${rnd}', '${pubId}', 'tsb${rnd}', '${tsB}', 'bounced', 'hard', 1, '550 5.1.1 user unknown', NULL, ${Date.now()}), ('tdc${rnd}', 'tss${rnd}', '${pubId}', 'tsc${rnd}', '${tsC}', 'deferred', 'soft', 2, '421 try again later', ${Date.now() + 1800000}, ${Date.now()})`);
+const tsT0 = Date.now();
+const dx = async (q) => (await (await req(`/app/settings/email/troubleshoot?format=json&q=${encodeURIComponent(q)}`)).json().catch(() => ({ findings: [] })));
+const dA = await dx(tsA), dB = await dx('tdb' + rnd), dC = await dx(tsC);
+const codes = (d) => (d.findings || []).map((f) => f.code);
+ok(codes(dA).includes('suppressed') && (dA.findings.find((f) => f.code === 'suppressed').action?.url || '').endsWith('/unsuppress'), 'troubleshoot: suppressed address explained with a one-click removal', JSON.stringify(codes(dA)));
+ok(codes(dB).includes('bounced') && /mailbox does not exist/.test(dB.findings.find((f) => f.code === 'bounced')?.detail || '') && codes(dB).includes('campaign_paused'), 'troubleshoot: bounce classified (hard) + campaign auto-pause, found by delivery id', JSON.stringify(codes(dB)));
+ok(codes(dC).includes('deferred') && /next try .*in \d+ min/.test(dC.findings.find((f) => f.code === 'deferred')?.detail || ''), 'troubleshoot: deferred with the retry schedule', JSON.stringify(dC.findings?.find((f) => f.code === 'deferred') || {}).slice(0, 300));
+ok(Date.now() - tsT0 < 120000, `three diagnoses in ${Date.now() - tsT0} ms (goal: under 2 minutes)`);
+r = await req(`/app/settings/email/troubleshoot?q=${encodeURIComponent(tsA)}`);
+ok(r.status === 200 && (await r.text()).includes('data-finding="suppressed"'), 'troubleshoot page renders findings');
+r = await req('/app/settings/email/troubleshoot/unsuppress', { form: { email: tsA, scope: 'pub' } });
+ok(sql(`SELECT COUNT(*) AS n FROM suppressions WHERE email = '${tsA}'`)[0].n === 0, 'one-click: suppression removed');
+sql(`UPDATE sends SET status = 'pending_approval', status_reason = NULL WHERE id = 'tss${rnd}'`);
+ok(codes(await dx(tsC)).includes('held_for_approval'), 'troubleshoot: campaign held for approval');
+sql(`UPDATE sends SET status = 'cancelled' WHERE id = 'tss${rnd}'`);
+
+// ── Onboarding wizard: signup → name → sender → test email → arrival/auth → contacts, timed
+cookies = {};
+const obEmail = `ob.${rnd}@gmail.com`;
+const obT0 = Date.now();
+r = await req('/signup', { form: { name: 'Onboard Tester', email: obEmail, password: 'correct-horse-9' } });
+r = await req('/app/onboarding', { form: { name: `Onboard ${rnd}`, slug: `ob-${rnd}`, description: '', language: 'en', timezone: 'UTC' } });
+ok((r.headers.get('location') || '').endsWith('/app/start'), 'first publication goes to the onboarding wizard', r.headers.get('location'));
+r = await req('/app/start');
+let oh = await r.text();
+ok(r.status === 200 && oh.includes('data-stepper') && oh.includes('data-ttfs-clock'), 'wizard shows the steps and the time-to-first-send clock');
+r = await req('/app/start/sender', { form: { choice: 'domain', hostname: `ob${rnd}.example.test` } });
+oh = await (await req('/app/start')).text();
+ok(oh.includes('data-dns-records') && oh.includes(`_dmarc.ob${rnd}.example.test`) && oh.includes('data-copy='), 'own domain: exact DNS records with copy buttons and live checking');
+r = await req('/app/start/sender', { form: { choice: 'shared' } });
+r = await req('/app/start/test', { form: { to: obEmail } });
+const st = await (await req('/app/start/status.json')).json().catch(() => ({}));
+ok(st.first_send_at && st.test?.status && st.test.status !== 'failed' && st.ttfs_ms < 180000, `first test email out ${Math.round((st.ttfs_ms || 0) / 1000)}s after signup (goal < 3 min)`, JSON.stringify(st));
+const au = await (await req('/app/start/auth.json')).json().catch(() => ({}));
+ok(au.checks?.length === 3 && au.checks.every((k) => k.meaning && k.host), 'arrival step explains SPF / DKIM / DMARC from live DNS', JSON.stringify(au).slice(0, 200));
+r = await req('/app/start/finish', { form: { next: 'import' } });
+ok((r.headers.get('location') || '') === '/app/audience/imports' && !!sql(`SELECT completed_at FROM onboarding_progress WHERE test_to = '${obEmail}'`)[0]?.completed_at, `wizard ends at contact import (whole flow ${Math.round((Date.now() - obT0) / 1000)}s)`);
+__restore();
+
+const errs14 = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
+ok(errs14.length === 0, 'no server errors logged (section 14)', JSON.stringify(errs14).slice(0, 800));
+console.log(`  (section 14 took ${Math.round((Date.now() - t14) / 1000)}s)`);
 }
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

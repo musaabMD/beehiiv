@@ -17,6 +17,7 @@ import { assertCanSend, SendBlockedError, showsBranding, emailBrandingHtml, getW
 import { needsApproval, requestApproval, checkCampaign, rampRemaining, workspaceSuspended } from './safety';
 import { replyToFor } from './sharedsender';
 import { normalizeTiming, planTimes, type SendTiming } from './sendtime';
+import { trackingBase, onTrackingHost } from './trackingdomain';
 
 export interface SendOptions {
   segment_ids?: string[];
@@ -130,7 +131,7 @@ function bucket(seed: string): Promise<number> {
 // ───────── link tracking ─────────
 export function trackLinks(html: string, env: Env, deliveryToken: string, pub: Publication, campaign?: string): string {
   const cfg = settings(pub);
-  const base = env.APP_URL.replace(/\/$/, '');
+  const base = trackingBase(env, pub); // the publication's verified tracking domain, else APP_URL
   return html.replace(/href="(https?:\/\/[^"]+)"/g, (m, url: string) => {
     if (url.startsWith(base + '/u/') || url.startsWith(base + '/pref/') || url.startsWith(base + '/t/')) return m;
     let target = url.replace(/&amp;/g, '&');
@@ -142,8 +143,8 @@ export function trackLinks(html: string, env: Env, deliveryToken: string, pub: P
   });
 }
 
-export function openPixel(env: Env, deliveryToken: string) {
-  return `<img src="${env.APP_URL.replace(/\/$/, '')}/t/o/${deliveryToken}.gif" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0" />`;
+export function openPixel(env: Env, deliveryToken: string, pub?: Publication | null) {
+  return `<img src="${trackingBase(env, pub)}/t/o/${deliveryToken}.gif" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0" />`;
 }
 
 // ───────── building one email ─────────
@@ -169,18 +170,18 @@ export async function buildEmail(env: Env, pub: Publication, c: Content, sub: Su
   const surl = siteUrl(env, pub);
   const r = await renderDoc(c.doc, { env, mode: 'email', pub, siteUrl: surl, post: o.post, subscriber: sub, tags, segmentIds: segIds, access, style, deliveryId: o.deliveryId, cohort: o.cohort, preview: o.preview });
   const tok = sub ? await subToken(env, sub.id) : 'preview';
-  const unsub = unsubscribeUrl(env, tok);
+  const unsub = onTrackingHost(env, pub, unsubscribeUrl(env, tok));
   const webUrl = c.slug ? `${surl}/p/${c.slug}` : null;
   // Free plan: small "Sent with Lnkbase Newsletter" line in the footer (removed on paid plans)
   const branding = pub.workspace_id && (await showsBranding(env, pub.workspace_id)) ? emailBrandingHtml(pub.slug, style.muted) : undefined;
   let html = emailLayout(r.html, {
     extraFooter: branding,
     pub, style, title: c.hideHeader ? undefined : c.title, subtitle: c.subtitle, byline: c.byline ? `${c.byline} · ${fmtDate(Date.now(), { dateStyle: 'long' }, pub.timezone)}` : undefined,
-    preheader: c.preview_text ? applyMerge(c.preview_text, mergeVars(pub, sub, surl)) : undefined, webUrl, unsubscribeUrl: unsub, preferencesUrl: preferencesUrl(env, tok), thumbnail: c.thumbnail, hideHeader: c.hideHeader,
+    preheader: c.preview_text ? applyMerge(c.preview_text, mergeVars(pub, sub, surl)) : undefined, webUrl, unsubscribeUrl: unsub, preferencesUrl: onTrackingHost(env, pub, preferencesUrl(env, tok)), thumbnail: c.thumbnail, hideHeader: c.hideHeader,
   });
   if (o.deliveryId) {
     html = trackLinks(html, env, o.deliveryId, pub, c.slug || undefined);
-    html = html.replace('</body>', openPixel(env, o.deliveryId) + '</body>');
+    html = html.replace('</body>', openPixel(env, o.deliveryId, pub) + '</body>');
   }
   return { html, text: r.text, bytes: new TextEncoder().encode(html).length, unsubscribeUrl: unsub, paywalled: r.paywalled };
 }
@@ -434,6 +435,7 @@ async function deliverDue(env: Env, pub: Publication, post: Post, send: any, o: 
 registerJob('send.ab_winner', async (env, p) => {
   const send = await one<any>(env, 'SELECT * FROM sends WHERE id = ?', p.send_id);
   if (!send || send.status !== 'testing') return;
+  if (await (await import('./guardrails')).beforeWinner(env, send)) return; // experiment guardrail routed everyone to the safe variant
   const o: SendOptions = parseJSON(send.options, {});
   const rows = await all<any>(env, `SELECT substr(variant,1,1) AS v, COUNT(*) AS n, SUM(CASE WHEN opened_at IS NOT NULL THEN 1 ELSE 0 END) AS op, SUM(CASE WHEN clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS cl FROM deliveries WHERE send_id = ? GROUP BY substr(variant,1,1)`, send.id);
   let best = 'A', bestRate = -1;

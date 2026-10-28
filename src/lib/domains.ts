@@ -35,6 +35,8 @@ export function recordsFor(env: Env, d: { hostname: string; kind: string; verify
   ];
   if (d.kind === 'web') {
     recs.push({ key: 'cname', type: 'CNAME', host: h, value: appHost(env), purpose: 'Points your domain at your OpenHive site (proxied through Cloudflare / Cloudflare for SaaS custom hostname)', required: true });
+  } else if (d.kind === 'tracking') {
+    recs.push({ key: 'cname', type: 'CNAME', host: h, value: appHost(env), purpose: 'Tracking domain — open pixels, click redirects and unsubscribe links in your emails use this host instead of ' + appHost(env), required: true });
   } else {
     recs.push(
       { key: 'spf', type: 'TXT', host: h, value: `v=spf1 ${SPF_INCLUDE} ~all`, purpose: 'SPF — authorizes Cloudflare Email Sending to send for this domain (merge into an existing SPF record; only one v=spf1 record is allowed)', required: true },
@@ -54,12 +56,14 @@ export async function checkDomain(env: Env, d: { id: string; hostname: string; k
   const rootTxt = await doh(h, 'TXT');
   const verifyOk = [...txtVerify.answers, ...rootTxt.answers].some((a) => a.includes(`openhive-verify=${d.verify_token}`));
   checks.push({ key: 'verify', ok: verifyOk, found: txtVerify.answers });
-  if (d.kind === 'web') {
+  let cnameOk = false;
+  if (d.kind === 'web' || d.kind === 'tracking') {
     const cname = await doh(h, 'CNAME');
     const a = await doh(h, 'A');
     const target = appHost(env);
     const ok = cname.answers.some((x) => x.replace(/\.$/, '') === target) || (a.answers.length > 0 && cname.answers.length === 0);
-    checks.push({ key: 'cname', ok, found: [...cname.answers, ...a.answers], note: cname.answers.length ? undefined : a.answers.length ? 'Resolves via A record (fine if proxied through Cloudflare)' : 'No record found' });
+    cnameOk = ok;
+    checks.push({ key: 'cname', ok, found: [...cname.answers, ...a.answers], note: cname.answers.length ? (ok ? undefined : `Points elsewhere — set the CNAME to ${target}`) : a.answers.length ? 'Resolves via A record (fine if proxied through Cloudflare)' : 'No record found' });
   } else {
     const spf = rootTxt.answers.filter((x) => x.startsWith('v=spf1'));
     checks.push({ key: 'spf', ok: spf.length === 1 && spf[0].includes('_spf.mx.cloudflare.net'), found: spf, note: spf.length > 1 ? 'Multiple SPF records — merge them into one' : spf.length && !spf[0].includes('_spf.mx.cloudflare.net') ? `Add ${SPF_INCLUDE}` : undefined });
@@ -78,6 +82,11 @@ export async function checkDomain(env: Env, d: { id: string; hostname: string; k
   if (verified && prev) {
     if (d.kind === 'web') await run(env, 'UPDATE publications SET custom_domain = ? WHERE id = ? AND (custom_domain IS NULL OR custom_domain != ?)', h, prev.pub_id, h);
     if (d.kind === 'email' && !prev.warmup_started_at) await run(env, 'UPDATE domains SET warmup_started_at = ? WHERE id = ?', now(), d.id);
+  }
+  // Tracking domain: links switch to it only while ownership AND the CNAME check pass, so emails never carry dead links.
+  if (d.kind === 'tracking' && prev) {
+    if (verified && cnameOk) await run(env, 'UPDATE publications SET tracking_domain = ? WHERE id = ?', h, prev.pub_id);
+    else await run(env, 'UPDATE publications SET tracking_domain = NULL WHERE id = ? AND tracking_domain = ?', prev.pub_id, h);
   }
   return { verified, checks };
 }
@@ -185,7 +194,8 @@ export async function checkBlocklists(env: Env) {
 registerPeriodic('domains.blocklist', 6 * HOUR, checkBlocklists);
 
 // Re-check unverified domains hourly so they flip to verified without a manual click.
+// Tracking domains whose CNAME isn't live yet are re-checked too (they stay inactive until it is).
 registerPeriodic('domains.recheck', HOUR, async (env) => {
-  const pending = await all<any>(env, `SELECT * FROM domains WHERE status != 'verified' AND created_at > ? LIMIT 50`, now() - 7 * 24 * HOUR);
+  const pending = await all<any>(env, `SELECT d.* FROM domains d WHERE (d.status != 'verified' OR (d.kind = 'tracking' AND NOT EXISTS (SELECT 1 FROM publications p WHERE p.id = d.pub_id AND p.tracking_domain = d.hostname))) AND d.created_at > ? LIMIT 50`, now() - 7 * 24 * HOUR);
   for (const d of pending) await checkDomain(env, d).catch((e) => logError(env, 'domains.recheck', e, d.pub_id));
 });

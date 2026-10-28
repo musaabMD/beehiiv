@@ -229,8 +229,9 @@ export async function processRun(env: Env, runId: string): Promise<void> {
         }
         case 'ab_split': {
           const h = parseInt((await sha256(runId + step.id)).slice(0, 6), 16) % 100;
-          const br = h < (Number(c.pct) || 50) ? 'yes' : 'no';
-          result = br === 'yes' ? 'path A' : 'path B';
+          const forced = c.guardrail?.route; // set by lib/guardrails when an experiment guardrail stopped one path
+          const br = forced === 'yes' || forced === 'no' ? forced : h < (Number(c.pct) || 50) ? 'yes' : 'no';
+          result = (br === 'yes' ? 'path A' : 'path B') + (forced ? ' (guardrail)' : '');
           if ((step as any)[br]?.length) next = [...path, br, 0];
           break;
         }
