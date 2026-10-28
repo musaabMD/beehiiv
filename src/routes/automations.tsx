@@ -23,6 +23,7 @@ import { stepSummary, triggerSummary, flatten, stepLabel, normalizeSteps, normal
 import { automationRevenue, revenueByAutomation } from '../lib/attribution';
 import { getHoldout, setHoldout, liftReport } from '../lib/holdout';
 import { HoldoutCard, usd } from './revenue-ui';
+import { registerAiJourneys, registerAutomationGuardrails, AiJourneyEntry } from './automations/aijourney';
 
 const dash = new Hono<AppEnv>();
 const site = new Hono<AppEnv>();
@@ -54,7 +55,7 @@ const hasDraft = (a: AutomationRow) => a.draft_steps !== null || a.draft_trigger
 
 function AutomationTabs(p: { a: AutomationRow; active: string }) {
   const base = `/app/automations/${p.a.id}`;
-  return <Tabs active={p.active} items={[[base, 'Builder'], [`${base}/journeys`, 'Journeys'], [`${base}/analytics`, 'Analytics'], [`${base}/compare`, 'Draft vs live']]} />;
+  return <Tabs active={p.active} items={[[base, 'Builder'], [`${base}/journeys`, 'Journeys'], [`${base}/analytics`, 'Analytics'], [`${base}/compare`, 'Draft vs live'], [`${base}/guardrails`, 'Guardrails']]} />;
 }
 
 // ───────────────────────── list ─────────────────────────
@@ -78,7 +79,7 @@ dash.get('/', async (c) => {
   const showArchived = c.req.query('archived') === '1';
   const visible = rows.filter((r) => showArchived || r.status !== 'archived');
   return c.html(
-    <DashLayout c={c} title="Automations" section="automations" styles={['/static/automations.css']} scripts={['/static/automations.js']} actions={<OpenBtn target="#new-automation">+ New automation</OpenBtn>}>
+    <DashLayout c={c} title="Automations" section="automations" styles={['/static/automations.css']} scripts={['/static/automations.js']} actions={<><a class="btn btn-ghost" href="/app/automations/guardrails">Experiment guardrails</a><a class="btn btn-secondary" href="/app/automations/ai">✨ Build from a goal</a><OpenBtn target="#new-automation">+ New automation</OpenBtn></>}>
       <Stats>
         <Stat label="Active automations" value={num(tot.active)} />
         <Stat label="Subscribers in a journey" value={num(tot.inprog)} />
@@ -131,6 +132,7 @@ function TemplateGallery() {
   const countEmails = (list: Step[]): number => list.reduce((n, s) => n + (s.type === 'send_email' ? 1 : 0) + countEmails(s.yes || []) + countEmails(s.no || []), 0);
   return (
     <Modal id="new-automation" title="New automation" wide>
+      <AiJourneyEntry />
       <form method="post" action="/app/automations/new" class="af-gallery" id="af-gallery">
         <div class="af-gal-top">
           <Field label="Name"><Input name="name" placeholder="Defaults to the template name" /></Field>
@@ -345,6 +347,10 @@ dash.post('/:id/settings', async (c) => {
   await run(c.env, 'UPDATE automations SET name = ?, description = ?, allow_reentry = ?, updated_at = ? WHERE id = ?', str(f.name, 120) || a.name, str(f.description, 500), bool(f.allow_reentry) ? 1 : 0, now(), a.id);
   return back(c, `/app/automations/${a.id}`, 'Settings saved');
 });
+
+// AI journeys (/ai…), experiment guardrails (/guardrails…, /:id/guardrails) — routes/automations/aijourney.tsx
+registerAiJourneys(dash);
+registerAutomationGuardrails(dash, (_c, a) => <AutomationTabs a={a} active={`/app/automations/${a.id}/guardrails`} />);
 
 // ───────────────────────── builder ─────────────────────────
 dash.get('/:id', async (c) => {

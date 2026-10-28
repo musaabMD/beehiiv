@@ -65,6 +65,7 @@ export function registerEmail(dash: Hono<AppEnv>) {
     const complaintRate = total ? Number(d.complained || 0) / total : 0;
     return page(c, 'email', 'Email & senders', (
       <>
+        <div class="callout row between" data-troubleshoot-link><span><strong>Someone didn’t get your email?</strong> Diagnose any address or message in seconds — suppressions, bounces, retries, limits, holds and DNS.</span><a class="btn btn-secondary btn-sm" href="/app/settings/email/troubleshoot">Troubleshoot</a></div>
         <Stats>
           <Stat label="Delivered (30d)" value={pct(Number(d.delivered || 0), total)} sub={`${num(Number(d.delivered || 0))} of ${num(total)}`} />
           <Stat label="Bounce rate" value={pct(Number(d.bounced || 0), total, 2)} tone={bounceRate > 0.02 ? 'down' : ''} sub="Keep under 2%" />

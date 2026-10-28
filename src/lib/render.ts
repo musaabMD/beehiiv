@@ -1,6 +1,7 @@
 // Document renderer: one editor doc → web HTML and table-based, inline-styled email HTML.
 // Block schema is documented in docs/ARCHITECTURE.md ("Editor document").
 import type { Env, Publication, Post, Subscriber } from '../types';
+import { trackingBase } from './trackingdomain'; // email ad-click links use the publication's tracking domain
 import { all, one } from './db';
 import { inline, sanitizeHtml } from './sanitize';
 import { esc, parseJSON, slugify, stripTags, fmtDate } from './util';
@@ -509,7 +510,7 @@ async function renderBlock(st: State, b: Block): Promise<string> {
           url = u.toString(); // keeps any #fragment at the end
         } catch { url += (url.includes('?') ? '&' : '?') + params; }
       }
-      const href = a.opp_id ? `${ctx.env.APP_URL}/t/ad/${a.opp_id}?u=${encodeURIComponent(url)}${ctx.deliveryId ? `&d=${ctx.deliveryId}` : ''}` : url;
+      const href = a.opp_id ? `${ctx.mode === 'email' ? trackingBase(ctx.env, ctx.pub) : ctx.env.APP_URL.replace(/\/$/, '')}/t/ad/${a.opp_id}?u=${encodeURIComponent(url)}${ctx.deliveryId ? `&d=${ctx.deliveryId}` : ''}` : url;
       const label = d.label || 'Together with';
       if (E)
         return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 ${s.spacing}px;border:1px solid ${s.border};border-radius:${s.radius}px"><tr><td style="padding:16px;font-family:${s.font};color:${s.text}"><p style="margin:0 0 8px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:${s.muted}">${esc(label)}</p>${a.image_url ? `<a href="${esc(href)}"><img src="${esc(a.image_url)}" alt="" width="${s.width - 82}" style="display:block;width:100%;height:auto;border-radius:${s.radius}px;margin:0 0 10px"></a>` : ''}<p style="margin:0 0 6px;font-size:18px;font-weight:700"><a href="${esc(href)}" style="color:${s.text};text-decoration:none">${esc(a.headline)}</a></p><p style="margin:0 0 12px;font-size:15px;line-height:1.5">${esc(a.body)}</p>${emailButton(s, a.cta_label || 'Learn more', href)}</td></tr></table>`;

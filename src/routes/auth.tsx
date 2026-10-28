@@ -690,10 +690,10 @@ dash.get('/', async (c) => {
   return c.html(
     <PlainLayout title="Create your publication" wide c={c}>
       <h1>{pubs.length ? 'Create another publication' : `Welcome, ${user.name.split(' ')[0] || 'there'}! Let's set up your newsletter`}</h1>
-      <p class="muted">You can change all of this later in Settings.</p>
+      <p class="muted">{pubs.length ? 'You can change all of this later in Settings.' : 'Step 1 of 5 — then pick a sender, send yourself a test email and bring in your readers. Most people finish in under 3 minutes.'}</p>
       <form method="post" class="stack">
         <Field label="Publication name"><Input name="name" required autofocus maxlength={100} placeholder="The Weekly Dispatch" attrs={{ 'data-slug-src': '' }} /></Field>
-        <Field label="URL" hint={`Your site will live at ${appUrl(c.env, '/s/')}<slug> until you connect a custom domain.`}><Input name="slug" placeholder="weekly-dispatch" pattern="[a-z0-9-]{2,60}" attrs={{ 'data-slug': '' }} /></Field>
+        <Field label="URL" hint={`Your site will live at ${appUrl(c.env, '/s/')}<slug> until you connect a custom domain.`}><Input name="slug" placeholder="weekly-dispatch" pattern="[a-z0-9\-]{2,60}" attrs={{ 'data-slug': '' }} /></Field>
         <Field label="What's it about?"><Textarea name="description" rows={2} placeholder="One sentence readers will see on your site and signup forms." /></Field>
         <div class="grid g3">
           <Field label="Category"><Select name="category" options={CATEGORIES} value="Technology" /></Field>
@@ -736,6 +736,8 @@ dash.post('/', async (c) => {
   await insert(c.env, 'sender_addresses', { id: id(), pub_id: pid, email: c.env.MAIL_FROM, name, purpose: 'newsletter', is_default: 1, created_at: t });
   await insert(c.env, 'audit_log', { id: id(), pub_id: pid, user_id: user.id, action: 'publication.created', target: slug, data: '{}', created_at: t });
   setCookie(c, 'oh_pub', pid, { path: '/', sameSite: 'Lax', maxAge: 365 * 86400 });
+  // first publication → the onboarding wizard (sender, first authenticated test email, contacts); see routes/onboarding.tsx
+  if (!(c.get('pubs') || []).length) { flash(c, `${name} is live! Next: get your first email out.`); return c.redirect('/app/start', 303); }
   flash(c, `${name} is live! Write your first post when you're ready.`);
   return c.redirect('/app', 303);
 });

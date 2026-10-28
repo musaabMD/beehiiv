@@ -33,7 +33,7 @@ export function registerDomains(dash: Hono<AppEnv>) {
       const auth = d.kind === 'email' ? await authSummary(c.env, [d.hostname], now() - 30 * DAY) : null;
       blocks.push(
         <Card
-          title={<span class="row"><Badge tone={d.kind === 'web' ? 'blue' : 'purple'}>{d.kind === 'web' ? 'Website' : 'Sending'}</Badge> <span class="mono">{d.hostname}</span> <Status s={d.status === 'failed' ? 'pending' : d.status} />{d.blocklisted ? <Badge tone="red">blocklisted — sending paused</Badge> : null}</span>}
+          title={<span class="row"><Badge tone={d.kind === 'web' ? 'blue' : d.kind === 'tracking' ? 'amber' : 'purple'}>{d.kind === 'web' ? 'Website' : d.kind === 'tracking' ? 'Tracking links' : 'Sending'}</Badge> <span class="mono">{d.hostname}</span> <Status s={d.status === 'failed' ? 'pending' : d.status} />{d.kind === 'tracking' && <Badge tone={(pub as any).tracking_domain === d.hostname ? 'green' : 'gray'}>{(pub as any).tracking_domain === d.hostname ? 'in use for tracking' : 'not active yet'}</Badge>}{d.blocklisted ? <Badge tone="red">blocklisted — sending paused</Badge> : null}</span>}
           actions={<div class="row"><ActionForm action={`/app/settings/domains/${d.id}/check`} label="Check DNS" kind="primary" />{d.kind === 'email' && <ActionForm action={`/app/settings/domains/${d.id}/blocklists`} label="Check blocklists" />}<ActionForm action={`/app/settings/domains/${d.id}/delete`} label="Remove" kind="danger" confirm={`Remove ${d.hostname}?`} /></div>}
           pad={false}
         >
@@ -49,7 +49,14 @@ export function registerDomains(dash: Hono<AppEnv>) {
           />
           <div class="card-b">
             {report.checked_at && <p class="muted small">Last checked {ago(report.checked_at)}.</p>}
-            {d.kind === 'web' ? (
+            {d.kind === 'tracking' ? (
+              <div data-tracking-domain={d.id}>
+                <Help>
+                  Add the CNAME <code>{d.hostname}</code> → <code>{appHost(c.env)}</code> and the TXT record above. Once both check out, every open pixel, click redirect and unsubscribe / preference link in this publication's emails uses <code>https://{d.hostname}</code> instead of <code>{appHost(c.env)}</code> — links match your brand and don't share the platform's link reputation. The hostname must also be added as a <strong>Custom Hostname (Cloudflare for SaaS)</strong> on the app's zone so HTTPS works. If the CNAME ever stops resolving, links fall back to {appHost(c.env)} automatically.
+                </Help>
+                <p class="small" data-live-check={`/app/settings/domains/${d.id}/check.json`}><span data-live-status class="muted">Live check: waiting…</span> <span class="muted">(re-checks every 10 seconds while this page is open)</span></p>
+              </div>
+            ) : d.kind === 'web' ? (
               <Help>
                 Point <code>{d.hostname}</code> at <code>{appHost(c.env)}</code>. If your OpenHive runs on Cloudflare, add the hostname as a <strong>Custom Hostname (Cloudflare for SaaS)</strong> on the app's zone, or add a Worker route <code>{d.hostname}/*</code> if the domain is in the same Cloudflare account. SSL is issued automatically. Once verified, your site is served at https://{d.hostname} and every link in your emails uses it.
               </Help>
@@ -83,13 +90,14 @@ export function registerDomains(dash: Hono<AppEnv>) {
     }
     return page(c, 'domains', 'Domains', (
       <>
-        <Help>Use your own domain for your website and send email from your own domain with SPF, DKIM and DMARC aligned — the biggest single boost to inbox placement.</Help>
+        <Help>Use your own domain for your website, send email from your own domain with SPF, DKIM and DMARC aligned — the biggest single boost to inbox placement — and serve tracking links from your own subdomain.</Help>
+        <script dangerouslySetInnerHTML={{ __html: `addEventListener('DOMContentLoaded',function(){var els=document.querySelectorAll('[data-live-check]');if(!els.length)return;function run(){els.forEach(function(el){fetch(el.getAttribute('data-live-check'),{credentials:'same-origin',headers:{accept:'application/json'}}).then(function(r){return r.json()}).then(function(j){var s=el.querySelector('[data-live-status]');s.className=j.active?'':'muted';s.textContent=j.active?'✅ Live: tracking links now use https://'+j.hostname:'Live check: '+j.checks.map(function(k){return k.key.toUpperCase()+' '+(k.ok?'✓':'✗')}).join(' · ')+(j.active?'':' — not active yet');}).catch(function(){})})}run();setInterval(run,10000)});` }} />
         {domains.length ? blocks : <Card><Empty title="No custom domains yet" body={`Your site lives at ${c.env.APP_URL.replace(/\/$/, '')}/s/${pub.slug} and email is sent from ${c.env.MAIL_FROM}. Add your own domains to brand both.`} action={<OpenBtn target="#add-domain">Add domain</OpenBtn>} /></Card>}
         {domains.length > 0 && <div class="row end"><OpenBtn target="#add-domain">Add domain</OpenBtn></div>}
         <Modal id="add-domain" title="Add a domain">
           <form method="post" action="/app/settings/domains" class="stack">
             <Field label="Domain" hint="e.g. news.example.com (website) or example.com (sending)"><Input name="hostname" required placeholder="news.example.com" /></Field>
-            <Field label="Use for"><Select name="kind" options={[['web', 'Website (custom domain)'], ['email', 'Sending email (From address)']]} value="web" /></Field>
+            <Field label="Use for" hint="Tracking links: a subdomain like links.example.com that serves click / open tracking and unsubscribe links."><Select name="kind" options={[['web', 'Website (custom domain)'], ['email', 'Sending email (From address)'], ['tracking', 'Tracking links (click, open & unsubscribe)']]} value="web" /></Field>
             <div class="form-actions"><Btn>Add domain</Btn></div>
           </form>
         </Modal>
@@ -101,13 +109,15 @@ export function registerDomains(dash: Hono<AppEnv>) {
     const pub = c.get('pub');
     const f = await form(c.req);
     const host = str(f.hostname, 253).toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/\.$/, '');
-    const kind = f.kind === 'email' ? 'email' : 'web';
+    const kind = f.kind === 'email' ? 'email' : f.kind === 'tracking' ? 'tracking' : 'web';
     if (!HOST_RE.test(host)) return back(c, '/app/settings/domains', 'Enter a valid domain like news.example.com', 'err');
     if (host === appHost(c.env)) return back(c, '/app/settings/domains', 'That is the app domain itself.', 'err');
     const exists = await one<any>(c.env, 'SELECT pub_id FROM domains WHERE hostname = ?', host);
     if (exists) return back(c, '/app/settings/domains', exists.pub_id === pub.id ? 'Already added.' : 'That domain is connected to another publication.', 'err');
     if (kind === 'web' && (await val<number>(c.env, `SELECT COUNT(*) FROM domains WHERE pub_id = ? AND kind = 'web'`, pub.id)) >= 1)
       return back(c, '/app/settings/domains', 'A publication can have one website domain. Remove the current one first (add old-domain redirects in Website → Redirects).', 'err');
+    if (kind === 'tracking' && (await val<number>(c.env, `SELECT COUNT(*) FROM domains WHERE pub_id = ? AND kind = 'tracking'`, pub.id)) >= 1)
+      return back(c, '/app/settings/domains', 'A publication can have one tracking domain. Remove the current one first.', 'err');
     const did = id();
     await insert(c.env, 'domains', { id: did, pub_id: pub.id, hostname: host, kind, status: 'pending', verify_token: token(16), created_at: now() });
     await audit(c, 'domains.added', host, { kind });
@@ -121,6 +131,15 @@ export function registerDomains(dash: Hono<AppEnv>) {
     if (r.verified) await audit(c, 'domains.verified', d.hostname);
     const missing = r.checks.filter((x) => !x.ok).map((x) => x.key.toUpperCase());
     return back(c, '/app/settings/domains', r.verified ? `${d.hostname} verified ✓${missing.length ? ` — still missing: ${missing.join(', ')}` : ''}` : `Not verified yet — the TXT record _openhive.${d.hostname} wasn't found. DNS changes can take a few minutes.`, r.verified ? 'ok' : 'err');
+  });
+
+  // Live verification (polled by the Domains page and the onboarding wizard): runs the DNS checks now.
+  dash.get('/domains/:id/check.json', requirePerm('admin'), async (c) => {
+    const d = await one<any>(c.env, 'SELECT * FROM domains WHERE id = ? AND pub_id = ?', c.req.param('id'), c.get('pub').id);
+    if (!d) return c.json({ error: 'not_found' }, 404);
+    const r = await checkDomain(c.env, d);
+    const p = await one<any>(c.env, 'SELECT tracking_domain FROM publications WHERE id = ?', d.pub_id);
+    return c.json({ hostname: d.hostname, kind: d.kind, verified: r.verified, active: d.kind === 'tracking' ? p?.tracking_domain === d.hostname : r.verified, checks: r.checks.map((k) => ({ key: k.key, ok: k.ok, note: k.note || null })) });
   });
 
   dash.post('/domains/:id/blocklists', requirePerm('admin'), async (c) => {
@@ -139,6 +158,7 @@ export function registerDomains(dash: Hono<AppEnv>) {
     if (!d) return back(c, '/app/settings/domains', 'Not found', 'err');
     await run(c.env, 'DELETE FROM domains WHERE id = ?', d.id);
     if (d.kind === 'web') await run(c.env, 'UPDATE publications SET custom_domain = NULL WHERE id = ? AND custom_domain = ?', pub.id, d.hostname);
+    if (d.kind === 'tracking') await run(c.env, 'UPDATE publications SET tracking_domain = NULL WHERE id = ? AND tracking_domain = ?', pub.id, d.hostname);
     await audit(c, 'domains.removed', d.hostname);
     return back(c, '/app/settings/domains', `${d.hostname} removed`);
   });

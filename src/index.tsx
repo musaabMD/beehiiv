@@ -14,6 +14,8 @@ import { handleInboundEmail, handleSendingEvent, type SendingEvent } from './lib
 import './lib/webhooks';
 import './lib/sender';
 import './lib/automations';
+import './lib/guardrails';
+import { routeTrackingHost } from './lib/trackingdomain';
 
 import core from './routes/core';
 import landing from './routes/landing';
@@ -39,6 +41,8 @@ import './lib/campaigns';
 import inbox from './routes/audience/inbox';
 import { root as commerceHooks } from './routes/integrations-commerce';
 import { txRoot } from './routes/settings/transactional';
+import onboarding from './routes/onboarding';
+import troubleshoot from './routes/settings/troubleshoot';
 
 export { CollabRoom } from './lib/collab';
 export { LiveRoom } from './lib/live';
@@ -93,6 +97,8 @@ app.use('/app/*', requireUser);
 
 const mods: Array<[string, Module]> = [
   ['/app/onboarding', auth],
+  ['/app/start', onboarding], // post-signup wizard: sender → test email → auth status → contacts
+  ['/app/settings/email/troubleshoot', troubleshoot],
   ['/app/posts', posts],
   ['/app/website', website],
   ['/app/podcasts', podcasts],
@@ -149,6 +155,10 @@ export default {
     const url = new URL(req.url);
     const appHost = new URL(env.APP_URL).host;
     if (url.host !== appHost && !url.host.endsWith('.workers.dev') && !url.host.startsWith('localhost') && !url.host.startsWith('127.0.0.1')) {
+      // custom tracking domain (links.example.com): tracking / unsubscribe paths only, everything else → the app
+      const tr = await routeTrackingHost(env, req).catch(() => undefined);
+      if (tr) return tr;
+      if (tr === null) return app.fetch(req, env, ctx);
       const pub = await pubByDomain(env, url.host).catch(() => null);
       if (pub && !PLATFORM_PREFIX.test(url.pathname)) {
         url.pathname = `/s/${pub.slug}${url.pathname}`;
