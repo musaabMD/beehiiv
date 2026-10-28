@@ -3,6 +3,16 @@ export interface ChangelogEntry { date: string; slug: string; title: string; bod
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-28', slug: 'guardian-revenue-engine', title: 'Deliverability Guardian, revenue attribution and a faster sending engine',
+    body: [
+      'The Deliverability Guardian watches bounces, complaints, deferrals, blocklists and DMARC reports every 10 minutes. When something goes wrong it slows or pauses just the affected mailbox provider or account, tells you why in plain English, and recovers on its own.',
+      'Every order is now credited to the emails that drove it, with last-click, first-touch and linear models, revenue per 1,000 emails, and holdout groups that measure real lift.',
+      'The sending engine gained batch, scheduled and expiring transactional email, priority queues, per-provider rate limits, idempotency keys, delivery attempt history, custom headers, international addresses and an emergency stop.',
+      'Also new: AI-built automations from a goal, experiment guardrails, custom tracking domains, a setup wizard, a delivery troubleshooter, a custom events API and one timeline per customer.',
+    ],
+    links: [['Deliverability', '/features/deliverability'], ['Developers', '/features/api']],
+  },
+  {
     date: '2026-10-26', slug: 'kit-mailchimp-parity', title: 'Everything Kit and Mailchimp do, and more',
     body: [
       'Automations: 45 templates, several entry points per automation, triggers from Calendly, Typeform, Thinkific, Kajabi or any app through incoming webhooks, and cart abandonment from Shopify and WooCommerce.',
