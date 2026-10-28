@@ -6,7 +6,9 @@ import type { Hono as HonoT } from 'hono';
 import type { AppEnv } from '../../types';
 import { one, all, run } from '../../lib/db';
 import { requirePerm, audit } from '../../lib/auth';
-import { searchTx, saveTemplate, sendTx, txOpen, txClick, TxError, TX_DAILY, TX_PER_MINUTE_PER_KEY } from '../../lib/transactional';
+import { searchTx, saveTemplate, sendTx, cancelTx, txOpen, txClick, TxError, TX_DAILY, TX_PER_MINUTE_PER_KEY, TX_BATCH_MAX, TX_BATCHES_PER_MINUTE_PER_KEY } from '../../lib/transactional';
+import { attemptsFor } from '../../lib/email';
+import { loadThrottles, holdReason } from '../../lib/throttle';
 import { form, str, ago, fmtDateTime, parseJSON, num } from '../../lib/util';
 import { Card, Field, Input, Textarea, Select, Btn, ActionForm, Table, Badge, Status, Grid, Help, Code, Tabs, back } from '../../ui/components';
 import { page } from './ui';
@@ -24,8 +26,9 @@ txRoot.get('/t/x/c/:id/:n', async (c) => {
   return url ? c.redirect(url, 302) : c.text('Link not found', 404);
 });
 
-const STATUSES: Array<[string, string]> = [['', 'All statuses'], ['sent', 'Sent'], ['simulated', 'Simulated'], ['failed', 'Failed'], ['suppressed', 'Suppressed'], ['bounced', 'Bounced'], ['complained', 'Complained']];
-const tone = (s: string) => (s === 'sent' || s === 'simulated' ? 'green' : s === 'suppressed' ? 'amber' : s === 'sending' ? 'blue' : 'red') as any;
+const STATUSES: Array<[string, string]> = [['', 'All statuses'], ['sent', 'Sent'], ['simulated', 'Simulated'], ['scheduled', 'Scheduled'], ['queued', 'Queued (sending stopped)'], ['deferred', 'Retrying'], ['failed', 'Failed'], ['suppressed', 'Suppressed'], ['bounced', 'Bounced'], ['complained', 'Complained'], ['expired', 'Expired'], ['cancelled', 'Cancelled']];
+const tone = (s: string) => (s === 'sent' || s === 'simulated' ? 'green' : s === 'suppressed' || s === 'deferred' || s === 'queued' ? 'amber' : s === 'sending' || s === 'scheduled' ? 'blue' : s === 'cancelled' || s === 'expired' ? 'gray' : 'red') as any;
+const stopBanner = async (c: any) => { const h = holdReason(await loadThrottles(c.env), c.get('pub').workspace_id); return h ? <div class="callout danger" data-stop-banner="tx">{h} <a href="/app/sending">Sending controls</a></div> : null; };
 
 export function registerTransactional(dash: HonoT<AppEnv>) {
   dash.get('/transactional', requirePerm('admin'), async (c) => {
@@ -89,13 +92,18 @@ export function registerTransactional(dash: HonoT<AppEnv>) {
   -d '{"to": "reader@example.com", "template_id": "order-receipt",
        "merge_vars": {"order": {"id": "1001", "total": "$29.00"}},
        "tags": ["receipt"], "idempotency_key": "order-1001", "track": true}'`}</Code>
-            <p class="small muted">Or pass <code>subject</code> with <code>html</code>, <code>markdown</code> or <code>text</code> instead of a template. Optional: <code>reply_to</code>, <code>from_name</code>, <code>attachments: [{"{"}filename, content (base64), type{"}"}]</code> (5 MB total). Responses include the message <code>id</code>; look it up with <code>GET /transactional/messages/:id</code>.</p>
+            <p class="small muted">Or pass <code>subject</code> with <code>html</code>, <code>markdown</code> or <code>text</code> instead of a template. Optional: <code>reply_to</code>, <code>from_name</code>, <code>attachments: [{"{"}filename, content (base64), type, content_id?{"}"}]</code> (5 MB total; with <code>content_id</code> an image is sent inline — reference it as <code>&lt;img src="cid:logo"&gt;</code>), <code>headers</code> (X-* plus List-Id, References, In-Reply-To, Thread-Index, Thread-Topic), <code>scheduled_at</code> (send later, up to 30 days) and <code>expires_at</code> (not delivered by then → expired, never sent). Responses include the message <code>id</code>; look it up with <code>GET /transactional/messages/:id</code>, see every attempt with <code>GET /deliveries/:id/attempts</code>, cancel a scheduled one with <code>POST /transactional/messages/:id/cancel</code>.</p>
+          </Card>
+          <Card title="Batch sending">
+            <p>Send up to {TX_BATCH_MAX} messages per call with <code>POST /transactional/batch</code> and <code>{"{"}"messages": [...]{"}"}</code>. Each message is validated and sent on its own (with its own <code>idempotency_key</code>); the response lists a result per message in the same order (HTTP 207 when some failed).</p>
           </Card>
           <Card title="Rules">
             <ul>
               <li>Sent as transactional mail from your transactional sender (Settings → Email). Newsletter unsubscribes don't block it; hard bounces, complaints about transactional mail, and manual transactional suppressions do.</li>
               <li>Does not use your plan's monthly newsletter emails. Limits: {TX_PER_MINUTE_PER_KEY} per minute per API key, and {num(TX_DAILY.free)} per 24 hours on Free / {num(TX_DAILY.paid)} on paid plans. Nothing sends while sending is suspended.</li>
-              <li>A repeated <code>idempotency_key</code> returns the original message instead of sending again.</li>
+              <li>A repeated <code>idempotency_key</code> (or <code>Idempotency-Key</code> header) returns the original message instead of sending again.</li>
+              <li>Batch calls: {TX_BATCHES_PER_MINUTE_PER_KEY} per minute per API key (each message still counts toward the daily cap).</li>
+              <li>Transactional mail has its own top-priority queue: scheduled messages and retries never wait behind newsletter batches. Temporary provider errors are retried with backoff (up to 5 attempts, never past <code>expires_at</code>). If sending is stopped (emergency stop), messages wait as "queued" and go out on resume.</li>
               <li>Opens and clicks are tracked only when you pass <code>"track": true</code>.</li>
             </ul>
           </Card>
@@ -104,8 +112,10 @@ export function registerTransactional(dash: HonoT<AppEnv>) {
     }
     const rows = await searchTx(c.env, pub.id, { q: q.q, status: q.status, tag: q.tag, limit: 100 });
     const day = await one<any>(c.env, `SELECT COUNT(*) AS n, SUM(CASE WHEN status IN ('sent','simulated') THEN 1 ELSE 0 END) AS ok, SUM(CASE WHEN opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opened FROM tx_messages WHERE pub_id = ? AND created_at > ?`, pub.id, Date.now() - 86400000);
+    const banner = await stopBanner(c);
     return page(c, 'transactional', 'Transactional email', (
       <>
+        {banner}
         {tabNav}
         <Help>Last 24 hours: {num(day?.n || 0)} sent · {num(day?.ok || 0)} delivered to the provider · {num(day?.opened || 0)} opened (tracked messages only).</Help>
         <Card pad={false} title={
@@ -117,7 +127,7 @@ export function registerTransactional(dash: HonoT<AppEnv>) {
           </form>
         }>
           <Table rows={rows} empty="No transactional messages yet. Send one with the API (see API & limits)." cols={[
-            { h: 'Sent', r: (m) => <span class="nowrap">{fmtDateTime(m.created_at, pub.timezone)}</span> },
+            { h: 'Sent', r: (m) => <span class="nowrap">{fmtDateTime(m.created_at, pub.timezone)}{m.scheduled_at && m.status === 'scheduled' ? <div class="small muted">for {fmtDateTime(m.scheduled_at, pub.timezone)}</div> : null}</span> },
             { h: 'To', r: (m) => <a href={`/app/settings/transactional/m/${m.id}`}>{m.to_email}</a> },
             { h: 'Subject', r: (m) => m.subject },
             { h: 'Status', r: (m) => <Badge tone={tone(m.status)}>{m.status}</Badge> },
@@ -136,6 +146,9 @@ export function registerTransactional(dash: HonoT<AppEnv>) {
     if (!m) return c.notFound();
     const ob = m.message_id ? await one<any>(c.env, 'SELECT html, from_email, headers FROM outbox WHERE message_id = ? AND pub_id = ?', m.message_id, pub.id) : null;
     const tpl = m.template_id ? await one<any>(c.env, 'SELECT name FROM tx_templates WHERE id = ?', m.template_id) : null;
+    const attempts = await attemptsFor(c.env, m.id);
+    const files = parseJSON<any[]>(m.attachments_meta, []);
+    const hdrs = Object.entries(parseJSON<Record<string, string>>(m.headers, {}));
     return page(c, 'transactional', 'Transactional message', (
       <>
         <p><a href="/app/settings/transactional">← All messages</a></p>
@@ -148,12 +161,37 @@ export function registerTransactional(dash: HonoT<AppEnv>) {
             {tpl && <><dt>Template</dt><dd>{tpl.name}</dd></>}
             <dt>Tracking</dt><dd>{m.track ? `${num(m.open_count)} opens${m.opened_at ? ` (first ${ago(m.opened_at)})` : ''} · ${num(m.click_count)} clicks` : 'off'}</dd>
             {m.idempotency_key && <><dt>Idempotency key</dt><dd><code>{m.idempotency_key}</code></dd></>}
-            <dt>Sent</dt><dd>{fmtDateTime(m.created_at, pub.timezone)}</dd>
+            <dt>Created</dt><dd>{fmtDateTime(m.created_at, pub.timezone)}</dd>
+            {m.scheduled_at && <><dt>Scheduled for</dt><dd>{fmtDateTime(m.scheduled_at, pub.timezone)}</dd></>}
+            {m.expires_at && <><dt>Expires</dt><dd>{fmtDateTime(m.expires_at, pub.timezone)}</dd></>}
+            {m.sent_at && <><dt>Handed to provider</dt><dd>{fmtDateTime(m.sent_at, pub.timezone)}</dd></>}
+            {files.length > 0 && <><dt>Attachments</dt><dd>{files.map((f) => <div>{f.filename} <small class="muted">{f.type}{f.content_id ? ` · inline cid:${f.content_id}` : ''} · {num(f.bytes)} bytes</small></div>)}</dd></>}
+            {hdrs.length > 0 && <><dt>Custom headers</dt><dd>{hdrs.map(([k, v]) => <div><code>{k}: {v}</code></div>)}</dd></>}
           </dl>
+          {['scheduled', 'queued', 'deferred'].includes(m.status) && <ActionForm action={`/app/settings/transactional/m/${m.id}/cancel`} label="Cancel message" kind="ghost" confirm="Cancel this message? It won't be sent." />}
+        </Card>
+        <Card title={`Delivery attempts (${attempts.length})`} pad={false}>
+          <Table rows={attempts} empty={m.status === 'scheduled' ? 'Not attempted yet — scheduled.' : 'No attempts recorded.'} cols={[
+            { h: '#', r: (a) => num(a.attempt) },
+            { h: 'When', r: (a) => <span class="nowrap">{fmtDateTime(a.created_at, pub.timezone)}</span> },
+            { h: 'Result', r: (a) => <Badge tone={tone(a.status)}>{a.status}</Badge> },
+            { h: 'Provider response', r: (a) => <code class="small" data-attempt-response>{a.response || '—'}</code> },
+            { h: 'Duration', r: (a) => `${num(a.duration_ms)} ms`, class: 'right' },
+          ]} />
         </Card>
         {ob?.html && <Card title="Content"><iframe sandbox="" srcdoc={ob.html} style="width:100%;height:520px;border:1px solid var(--line,#e5e7eb);border-radius:8px;background:#fff" title="Email preview" /></Card>}
       </>
     ));
+  });
+
+  dash.post('/transactional/m/:id/cancel', requirePerm('admin'), async (c) => {
+    try {
+      await cancelTx(c.env, c.get('pub').id, c.req.param('id'));
+      await audit(c, 'transactional.cancel', c.req.param('id'));
+      return back(c, `/app/settings/transactional/m/${c.req.param('id')}`, 'Message cancelled.');
+    } catch (e: any) {
+      return back(c, `/app/settings/transactional/m/${c.req.param('id')}`, e instanceof TxError ? e.message : 'Could not cancel.', 'err');
+    }
   });
 
   dash.post('/transactional/templates', requirePerm('admin'), async (c) => {

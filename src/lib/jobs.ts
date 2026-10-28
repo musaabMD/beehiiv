@@ -18,9 +18,23 @@ export function registerPeriodic(name: string, everyMs: number, fn: (env: Env) =
   if (!periodic.find((p) => p.name === name)) periodic.push({ name, everyMs, fn });
 }
 
-export async function enqueue(env: Env, kind: string, payload: unknown = {}, runAt = now()): Promise<string> {
+/**
+ * Job priority (lower runs first). Transactional mail never waits behind a newsletter: the runner claims due jobs in
+ * priority order and re-checks for higher-priority work before every lower-priority job.
+ */
+export const PRIORITY = { transactional: 0, automation: 1, webhook: 2, normal: 3, newsletter: 5, bulk: 7 } as const;
+export function priorityFor(kind: string): number {
+  if (kind.startsWith('tx.')) return PRIORITY.transactional;
+  if (kind.startsWith('automation.')) return PRIORITY.automation;
+  if (kind.startsWith('webhook.')) return PRIORITY.webhook;
+  if (kind.startsWith('send.')) return PRIORITY.newsletter;
+  if (kind === 'audience.import' || kind.startsWith('intel.') || kind.startsWith('podcast.')) return PRIORITY.bulk;
+  return PRIORITY.normal;
+}
+
+export async function enqueue(env: Env, kind: string, payload: unknown = {}, runAt = now(), opts: { priority?: number } = {}): Promise<string> {
   const jid = id();
-  await insert(env, 'jobs', { id: jid, kind, payload: JSON.stringify(payload ?? {}), run_at: runAt, status: 'pending', attempts: 0, created_at: now() });
+  await insert(env, 'jobs', { id: jid, kind, payload: JSON.stringify(payload ?? {}), run_at: runAt, status: 'pending', attempts: 0, priority: opts.priority ?? priorityFor(kind), created_at: now() });
   return jid;
 }
 
@@ -30,9 +44,9 @@ export async function runJobs(env: Env, budgetMs = 20_000): Promise<number> {
   let processed = 0;
   while (Date.now() - start < budgetMs) {
     const t = now();
-    const due = await all<{ id: string; kind: string; payload: string; attempts: number }>(
+    const due = await all<{ id: string; kind: string; payload: string; attempts: number; priority: number }>(
       env,
-      `SELECT id, kind, payload, attempts FROM jobs WHERE status = 'pending' AND run_at <= ? AND (locked_until IS NULL OR locked_until < ?) ORDER BY run_at LIMIT 10`,
+      `SELECT id, kind, payload, attempts, priority FROM jobs WHERE status = 'pending' AND run_at <= ? AND (locked_until IS NULL OR locked_until < ?) ORDER BY priority, run_at LIMIT 10`,
       t, t,
     );
     if (!due.length) {
@@ -44,12 +58,18 @@ export async function runJobs(env: Env, budgetMs = 20_000): Promise<number> {
       break;
     }
     for (const j of due) {
+      // higher-priority work (e.g. a transactional message) became due meanwhile → re-query so it goes first
+      if (j !== due[0] && j.priority > 0) {
+        const t2 = now();
+        const urgent = await env.DB.prepare(`SELECT 1 AS x FROM jobs WHERE status = 'pending' AND priority < ? AND run_at <= ? AND (locked_until IS NULL OR locked_until < ?) LIMIT 1`).bind(j.priority, t2, t2).first();
+        if (urgent) break;
+      }
       // claim
       const claim = await run(env, `UPDATE jobs SET locked_until = ?, status = 'running', attempts = attempts + 1 WHERE id = ? AND status = 'pending'`, t + 5 * MIN, j.id);
       if (!claim.meta.changes) continue;
       const h = handlers.get(j.kind);
       if (!h) {
-        await run(env, `UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`, 'no handler for ' + j.kind, j.id);
+        await run(env, `UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`, 'no handler for ' + j.kind, now(), j.id);
         continue;
       }
       try {
@@ -57,15 +77,15 @@ export async function runJobs(env: Env, budgetMs = 20_000): Promise<number> {
         if (res && res.retryInMs !== undefined) {
           await run(env, `UPDATE jobs SET status = 'pending', locked_until = NULL, run_at = ? WHERE id = ?`, now() + res.retryInMs, j.id);
         } else {
-          await run(env, `UPDATE jobs SET status = 'done', locked_until = NULL WHERE id = ?`, j.id);
+          await run(env, `UPDATE jobs SET status = 'done', locked_until = NULL, finished_at = ? WHERE id = ?`, now(), j.id);
         }
       } catch (e: any) {
         const attempts = j.attempts + 1;
         const giveUp = attempts >= 8;
         await run(
           env,
-          `UPDATE jobs SET status = ?, locked_until = NULL, run_at = ?, error = ? WHERE id = ?`,
-          giveUp ? 'failed' : 'pending', now() + Math.min(2 ** attempts * 30_000, 6 * 3600_000), String(e?.stack || e).slice(0, 2000), j.id,
+          `UPDATE jobs SET status = ?, locked_until = NULL, run_at = ?, error = ?, finished_at = ? WHERE id = ?`,
+          giveUp ? 'failed' : 'pending', now() + Math.min(2 ** attempts * 30_000, 6 * 3600_000), String(e?.stack || e).slice(0, 2000), giveUp ? now() : null, j.id,
         );
         await logError(env, 'job:' + j.kind, e);
       }
@@ -90,7 +110,11 @@ export async function runPeriodic(env: Env) {
     }
   }
   // housekeeping
-  await run(env, `DELETE FROM jobs WHERE status = 'done' AND created_at < ?`, t - 7 * 86_400_000);
+  await run(env, `DELETE FROM jobs WHERE status IN ('done','discarded') AND created_at < ?`, t - 7 * 86_400_000);
+  // a runner that died mid-job leaves it 'running' with an expired lock: hand it back to the queue
+  await run(env, `UPDATE jobs SET status = 'pending' WHERE status = 'running' AND locked_until < ?`, t);
+  await run(env, `DELETE FROM api_idempotency WHERE created_at < ?`, t - 86_400_000).catch(() => {});
+  await run(env, `DELETE FROM delivery_attempts WHERE created_at < ?`, t - 90 * 86_400_000).catch(() => {});
   await run(env, `DELETE FROM rate_limits WHERE reset_at < ? AND key NOT LIKE 'periodic:%'`, t);
 }
 
@@ -100,6 +124,14 @@ export async function logError(env: Env, source: string, e: unknown, pubId?: str
   try {
     await insert(env, 'error_log', { id: id(), pub_id: pubId ?? null, source, message: String(err?.message || err).slice(0, 1000), stack: String(err?.stack || '').slice(0, 4000), created_at: now() });
   } catch {}
+}
+
+/** Dead-letter handling (Admin → Platform → Queues). */
+export async function retryJob(env: Env, jobId: string) {
+  return run(env, `UPDATE jobs SET status = 'pending', attempts = 0, run_at = ?, locked_until = NULL, finished_at = NULL WHERE id = ? AND status = 'failed'`, now(), jobId);
+}
+export async function discardJob(env: Env, jobId: string) {
+  return run(env, `UPDATE jobs SET status = 'discarded', locked_until = NULL, finished_at = ? WHERE id = ? AND status IN ('failed','pending')`, now(), jobId);
 }
 
 /** Kick the job runner in the background after a request enqueues work (so local dev doesn't wait for cron). */

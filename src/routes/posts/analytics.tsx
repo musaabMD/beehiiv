@@ -13,6 +13,8 @@ import { DashLayout } from '../../ui/layout';
 import { Card, Stats, Stat, Table, Bars, LineChart, LinkBtn, Btn, Status, Badge, back, Empty } from '../../ui/components';
 import { num, pct, fmtDateTime, parseJSON, form, str, id, now, HOUR, DAY } from '../../lib/util';
 import { loadPost, walkBlocks } from './shared';
+import { attemptsFor } from '../../lib/email';
+import { loadThrottles, holdReason } from '../../lib/throttle';
 
 const app = new Hono<AppEnv>();
 
@@ -89,6 +91,7 @@ app.get('/:id', async (c) => {
   const nonOpeners = (await one<any>(c.env, `SELECT COUNT(DISTINCT d.subscriber_id) AS n FROM deliveries d JOIN sends s ON s.id = d.send_id JOIN subscribers sb ON sb.id = d.subscriber_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND d.status = 'sent' AND d.opened_at IS NULL AND sb.status = 'active' AND NOT EXISTS (SELECT 1 FROM deliveries d2 JOIN sends s2 ON s2.id = d2.send_id WHERE s2.post_id = ? AND d2.subscriber_id = d.subscriber_id AND d2.opened_at IS NOT NULL)`, pid, pid))?.n || 0;
   const canPublish = can(c.get('role'), 'publish');
   const rate = (a: number, b: number) => (b ? pct(a, b) : '—');
+  const stopped = sends.some((s) => ['sending', 'testing'].includes(s.status)) ? holdReason(await loadThrottles(c.env), pub.workspace_id) : null;
   return c.html(
     <DashLayout c={c} title={post.title || 'Untitled post'} section="posts" sub="posts" crumbs={[['/app/posts', 'Posts']]}
       actions={<>
@@ -102,6 +105,7 @@ app.get('/:id', async (c) => {
           {s.status === 'paused' ? ' Our team has been notified and will review it — clean the list and reply to the email we sent you.' : ''}
         </div>
       ))}
+      {stopped && <div class="callout danger" data-stop-banner="post">{stopped} <a href="/app/sending">Sending controls</a></div>}
       {post.platform === 'web' ? null : (
         <Stats>
           <Stat label="Recipients" value={num(totals.recipients || 0)} sub={`${num(delivered)} delivered (${rate(delivered, totals.recipients)})`} />
@@ -203,6 +207,11 @@ app.get('/:id', async (c) => {
           </Card>
         ) : <div />}
       </div>
+      {sends.length > 0 && post.platform !== 'web' && (
+        <Card title="Recipients" actions={<LinkBtn href={`/app/posts/${pid}/recipients`}>Look up a recipient</LinkBtn>}>
+          <p class="muted" style="margin:0">Every delivery with its status and each attempt to hand it to the mailbox provider (retries included), with the provider's response.</p>
+        </Card>
+      )}
       {canPublish && post.platform !== 'web' && post.status === 'published' && (
         <Card title="Resend to non-openers">
           {nonOpeners ? (
@@ -215,6 +224,74 @@ app.get('/:id', async (c) => {
         </Card>
       )}
       {post.platform === 'web' && sends.length === 0 && <Card><Empty title="Web-only post" body="This post was published to your website only, so there are no email stats." /></Card>}
+    </DashLayout>,
+  );
+});
+
+// ───────── per-recipient drill-down: deliveries + attempt history ─────────
+const D_STATUSES: Array<[string, string]> = [['', 'All'], ['sent', 'Sent'], ['deferred', 'Retrying'], ['scheduled', 'Scheduled'], ['bounced', 'Bounced'], ['failed', 'Failed'], ['suppressed', 'Suppressed'], ['complained', 'Complained']];
+const dTone = (s: string) => (s === 'sent' ? 'green' : s === 'deferred' || s === 'scheduled' || s === 'queued' ? 'amber' : s === 'suppressed' || s === 'skipped' ? 'gray' : 'red') as any;
+app.get('/:id/recipients', async (c) => {
+  const pub = c.get('pub');
+  const post = await loadPost(c, c.req.param('id'));
+  if (!post) return c.notFound();
+  const q = str(c.req.query('q'), 200).trim().toLowerCase();
+  const st = str(c.req.query('status'), 20);
+  const w = [`s.post_id = ?`, `s.kind NOT IN ('test','try')`];
+  const params: unknown[] = [post.id];
+  if (q) { w.push('(d.email LIKE ? OR d.id = ?)'); params.push(`%${q}%`, q); }
+  if (st) { w.push('d.status = ?'); params.push(st); }
+  const rows = await all<any>(c.env, `SELECT d.id, d.email, d.status, d.attempts, d.provider, d.error, d.sent_at, d.next_attempt_at, d.variant, (SELECT COUNT(*) FROM delivery_attempts a WHERE a.delivery_id = d.id) AS tries FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE ${w.join(' AND ')} ORDER BY d.created_at DESC LIMIT 200`, ...params);
+  return c.html(
+    <DashLayout c={c} title="Recipients" section="posts" sub="posts" crumbs={[['/app/posts', 'Posts'], [`/app/posts/${post.id}`, post.title || 'Untitled post']]}>
+      <form method="get" class="row" style="margin-bottom:12px">
+        <input class="input grow" name="q" value={q} placeholder="Email address or delivery id" />
+        <select class="input" name="status" style="max-width:180px">{D_STATUSES.map(([v, l]) => <option value={v} selected={v === st}>{l}</option>)}</select>
+        <Btn kind="secondary" small>Search</Btn>
+      </form>
+      <Card pad={false}>
+        <Table rows={rows} empty="No deliveries match." cols={[
+          { h: 'Recipient', r: (d) => <a href={`/app/posts/${post.id}/d/${d.id}`}>{d.email}</a> },
+          { h: 'Status', r: (d) => <Badge tone={dTone(d.status)}>{d.status}</Badge> },
+          { h: 'Attempts', r: (d) => num(Math.max(d.tries || 0, d.attempts || 0)), class: 'right' },
+          { h: 'Provider', r: (d) => <span style="text-transform:capitalize">{d.provider || 'other'}</span> },
+          { h: 'Sent', r: (d) => (d.sent_at ? fmtDateTime(d.sent_at, pub.timezone) : d.next_attempt_at && ['deferred', 'scheduled'].includes(d.status) ? <span class="muted">next {fmtDateTime(d.next_attempt_at, pub.timezone)}</span> : '—') },
+          { h: 'Last error', r: (d) => <span class="small muted">{(d.error || '').slice(0, 120)}</span> },
+        ]} />
+      </Card>
+    </DashLayout>,
+  );
+});
+app.get('/:id/d/:did', async (c) => {
+  const pub = c.get('pub');
+  const post = await loadPost(c, c.req.param('id'));
+  if (!post) return c.notFound();
+  const d = await one<any>(c.env, `SELECT d.*, s.subject AS send_subject FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE d.id = ? AND s.post_id = ? AND d.pub_id = ?`, c.req.param('did'), post.id, pub.id);
+  if (!d) return c.notFound();
+  const attempts = await attemptsFor(c.env, d.id);
+  return c.html(
+    <DashLayout c={c} title={d.email} section="posts" sub="posts" crumbs={[['/app/posts', 'Posts'], [`/app/posts/${post.id}`, post.title || 'Untitled post'], [`/app/posts/${post.id}/recipients`, 'Recipients']]}>
+      <Card title="Delivery">
+        <dl class="kv">
+          <dt>Recipient</dt><dd>{d.email}</dd>
+          <dt>Status</dt><dd><Badge tone={dTone(d.status)}>{d.status}</Badge>{d.bounce_type ? <small class="muted"> {d.bounce_type}</small> : null} {d.error && <small class="muted">{d.error}</small>}</dd>
+          <dt>Subject</dt><dd>{d.send_subject}{d.variant ? <small class="muted"> · variant {d.variant}</small> : null}</dd>
+          <dt>Mailbox provider</dt><dd style="text-transform:capitalize">{d.provider || 'other'}</dd>
+          <dt>Delivery id</dt><dd><code>{d.id}</code>{d.message_id && <> · provider <code>{d.message_id}</code></>}</dd>
+          {d.sent_at && <><dt>Sent</dt><dd>{fmtDateTime(d.sent_at, pub.timezone)}</dd></>}
+          {d.next_attempt_at && ['deferred', 'scheduled'].includes(d.status) && <><dt>Next attempt</dt><dd>{fmtDateTime(d.next_attempt_at, pub.timezone)}</dd></>}
+          <dt>Engagement</dt><dd>{d.opened_at ? `opened ${fmtDateTime(d.opened_at, pub.timezone)}` : 'not opened'} · {num(d.click_count)} clicks</dd>
+        </dl>
+      </Card>
+      <Card title={`Attempts (${attempts.length})`} pad={false}>
+        <Table rows={attempts} empty="No attempts recorded yet." cols={[
+          { h: '#', r: (a) => num(a.attempt) },
+          { h: 'When', r: (a) => fmtDateTime(a.created_at, pub.timezone) },
+          { h: 'Result', r: (a) => <Badge tone={dTone(a.status === 'simulated' ? 'sent' : a.status)}>{a.status}</Badge> },
+          { h: 'Provider response', r: (a) => <code class="small" data-attempt-response>{a.response || '—'}</code> },
+          { h: 'Duration', r: (a) => `${num(a.duration_ms)} ms`, class: 'right' },
+        ]} />
+      </Card>
     </DashLayout>,
   );
 });

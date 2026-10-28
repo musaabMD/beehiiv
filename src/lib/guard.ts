@@ -48,6 +48,24 @@ export function suggestEmail(email: string): string | null {
   return best && bestD <= 2 ? `${local}@${best}` : null;
 }
 
+/** UTF-8 local part: letters/digits/marks of any script plus the RFC 5322 atext symbols, no leading/trailing/double dot. */
+const INTL_LOCAL_RE = /^(?!\.)(?!.*\.\.)[\p{L}\p{N}\p{M}!#$%&'*+/=?^_`{|}~.-]+(?<!\.)$/u;
+
+/** Unicode domain → ASCII (punycode) via the WHATWG URL parser (IDNA/UTS-46). null when it isn't a valid hostname. */
+export function toAsciiDomain(domain: string): string | null {
+  if (!domain || /[\s/\\?#@%:[\]]/.test(domain)) return null;
+  try {
+    const h = new URL(`http://${domain}/`).hostname;
+    return /^[a-z0-9.-]+$/.test(h) && h.includes('.') ? h : null;
+  } catch { return null; }
+}
+
+/** Latin lookalikes from Cyrillic/Greek and accented letters, folded to ASCII (for homograph checks only). */
+const CONFUSABLE: Record<string, string> = { 'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'х': 'x', 'у': 'y', 'і': 'i', 'ј': 'j', 'ӏ': 'l', 'ԁ': 'd', 'ɡ': 'g', 'ı': 'i', 'ѕ': 's', 'һ': 'h', 'ο': 'o', 'α': 'a', 'ν': 'v', 'κ': 'k', 'τ': 't', 'ε': 'e', 'ι': 'i', 'ӧ': 'o', 'ⅼ': 'l', 'ｍ': 'm' };
+export function foldLookalikes(s: string): string {
+  return [...s.normalize('NFKD')].map((ch) => CONFUSABLE[ch] ?? ch).join('').replace(/\p{M}/gu, '');
+}
+
 export interface EmailCheck { ok: boolean; email: string; reason?: string; suggestion?: string | null }
 
 const mxCache = new Map<string, { ok: boolean; at: number }>();
@@ -76,10 +94,27 @@ export async function hasMX(domain: string): Promise<boolean> {
 
 /** Validate one email submission. `strict` adds the DNS MX check (used for 1st-party signups and API). */
 export async function validateEmail(raw: string, opts: { strict?: boolean; extraBlocked?: string[] } = {}): Promise<EmailCheck> {
-  const email = (raw || '').trim().toLowerCase();
-  if (!email || email.length > 254 || !EMAIL_RE.test(email)) return { ok: false, email, reason: 'That email address looks invalid.' };
-  const [local, domain] = email.split('@');
-  if (local.length > 64) return { ok: false, email, reason: 'That email address looks invalid.' };
+  let email = (raw || '').trim().normalize('NFC').toLowerCase();
+  const bad = { ok: false, email, reason: 'That email address looks invalid.' };
+  // International email (RFC 6531 / IDNA): UTF-8 local parts, and domains converted to punycode (xn--) for sending and
+  // storage, so the disposable/typo/MX checks below run on the same ASCII form as everyone else.
+  if (/[^\x00-\x7f]/.test(email)) {
+    const at = email.lastIndexOf('@');
+    if (at < 1) return bad;
+    const uLocal = email.slice(0, at), uDomain = email.slice(at + 1);
+    if (!INTL_LOCAL_RE.test(uLocal) || new TextEncoder().encode(uLocal).length > 64) return bad;
+    const ascii = toAsciiDomain(uDomain);
+    if (!ascii) return bad;
+    // homograph of a big mailbox provider (gmаil.com with a Cyrillic "а") → treat like a typo
+    const look = foldLookalikes(uDomain);
+    const target = TYPO_FIX[look] || (COMMON.includes(look) ? look : null);
+    if (ascii !== uDomain && target) return { ok: false, email, reason: `Did you mean ${uLocal}@${target}?`, suggestion: `${uLocal}@${target}` };
+    email = `${uLocal}@${ascii}`;
+    if (new TextEncoder().encode(email).length > 254 || !EMAIL_RE.test(`x@${ascii}`)) return { ...bad, email };
+  } else if (!email || email.length > 254 || !EMAIL_RE.test(email)) return bad;
+  const at = email.lastIndexOf('@');
+  const local = email.slice(0, at), domain = email.slice(at + 1);
+  if (local.length > 64 && !/[^\x00-\x7f]/.test(local)) return { ok: false, email, reason: 'That email address looks invalid.' };
   if (DISPOSABLE.has(domain) || opts.extraBlocked?.includes(domain)) return { ok: false, email, reason: 'Disposable email addresses are not allowed.' };
   if (/^(test|example|invalid|localhost)$/.test(domain.split('.').pop() || '') || /^example\.(com|org|net)$/.test(domain))
     return { ok: false, email, reason: 'Please use a real email address.' };
