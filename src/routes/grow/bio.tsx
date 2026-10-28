@@ -69,7 +69,8 @@ export function registerBio(dash: App, site: App) {
           <Stat label="Signups from bio" value={num(signups?.n || 0)} />
           <Stat label="Conversion" value={views ? ((100 * (signups?.n || 0)) / views).toFixed(1) + '%' : '0%'} />
         </Stats>
-        <div class="split" style="grid-template-columns:minmax(0,1fr) 400px">
+        <style>{`@media(min-width:900px){.bio-split{grid-template-columns:minmax(0,1fr) 400px}}`}</style>
+        <div class="split bio-split">
           <form method="post" action="/app/grow/bio" id="bio-form">
             <Card title="Profile">
               <Field label="Avatar">
@@ -118,7 +119,7 @@ export function registerBio(dash: App, site: App) {
           </form>
           <div style="position:sticky;top:80px">
             <Card title="Live preview" actions={<button type="button" class="btn btn-ghost btn-sm" data-refresh-preview>Refresh</button>}>
-              <div style="width:360px;height:700px;margin:0 auto;border:10px solid #111;border-radius:36px;overflow:hidden;background:#fff">
+              <div style="width:360px;max-width:100%;height:700px;margin:0 auto;border:10px solid #111;border-radius:36px;overflow:hidden;background:#fff;box-sizing:border-box">
                 <iframe id="bio-preview" src={`${url}?preview=1`} style="width:100%;height:100%;border:0" title="Preview" />
               </div>
             </Card>
