@@ -23,7 +23,7 @@ function costCard(c: PageCtx, only?: Platform) {
       <span style="height:6px;border-radius:4px;background:#e7e5e4;position:relative;overflow:hidden"><i style="position:absolute;inset:0 auto 0 0;width:${x.v ? Math.max(2, (x.v / max) * 100) : 0}%;background:${x.p === OH ? 'var(--accent)' : '#78716c'}"></i></span>
       <span class="muted small">${esc(x.plan)}</span><span class="num" style="text-align:right">${x.v == null ? '<span class="muted">n/a</span>' : money(x.v)}</span></a>`).join('');
   };
-  return `<div class="card" id="cost">
+  return `<style>@media(max-width:620px){#cost a{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) auto!important}#cost a>span:nth-child(3){display:none}}#cost a span{min-width:0;overflow-wrap:anywhere}</style><div class="card" id="cost">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><h3 style="margin:0">What a list costs a month</h3>
     <div role="tablist" style="display:flex;gap:4px;background:#f5f5f4;border:1px solid var(--line);border-radius:10px;padding:3px">${SIZES.map((s, i) => `<button role="tab" data-i="${i}" style="all:unset;cursor:pointer;padding:5px 11px;border-radius:7px;font-size:13.5px;${i === 1 ? 'background:#fff;color:#1c1917;box-shadow:0 1px 2px rgba(0,0,0,.08)' : 'color:#57534e'}">${sizeLabel(s)}</button>`).join('')}</div></div>
     ${SIZES.map((_, i) => `<div data-panel="${i}" ${i === 1 ? '' : 'hidden'}>${rows(i)}</div>`).join('')}
@@ -46,7 +46,7 @@ export function compareIndex(c: PageCtx) {
   <div class="ctas"><a class="btn btn-primary" href="/signup">Start free</a><a class="btn btn-ghost" href="#guides">Migration guides</a></div></div>
   ${costCard(c)}
 </div></section>
-<style>@media(max-width:960px){.hero .wrap{grid-template-columns:1fr!important}}@media(max-width:620px){#cost a{grid-template-columns:120px 1fr 60px!important}#cost a>span:nth-child(3){display:none}}</style>
+<style>@media(max-width:960px){.hero .wrap{grid-template-columns:1fr!important}}</style>
 
 <section><div class="wrap"><h2>One page per platform</h2><p class="muted" style="margin-top:0">A feature table that says where each one does more, the price at five list sizes, and how to move.</p>
 <div class="grid" style="margin-top:20px">${PLATFORMS.map((p) => `<div class="card"><div style="display:flex;gap:10px;align-items:center;font-weight:800;font-size:18px">${badge(p)}${esc(p.name)}</div>

@@ -23,7 +23,7 @@ const FAVICON = BRAND_ICON;
 export const CSS = `
 :root{--bg:#fafaf9;--bg2:#f5f5f4;--card:#ffffff;--line:#e7e5e4;--text:#1c1917;--muted:#57534e;--accent:#d97706;--accent2:#f59e0b;--green:#059669;--red:#dc2626;--radius:16px}
 *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
-a{color:inherit;text-decoration:none}img{max-width:100%}
+a{color:inherit;text-decoration:none}img{max-width:100%}main p,main li,main td{overflow-wrap:anywhere}.tw{max-width:100%}
 .wrap{max-width:1160px;margin:0 auto;padding:0 20px}.narrow{max-width:820px}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:46px;padding:0 22px;border-radius:12px;font-weight:700;font-size:15px;border:1px solid transparent;cursor:pointer;transition:transform .12s,background .12s,border-color .12s;white-space:nowrap}
 .btn:hover{transform:translateY(-1px)}.btn-primary{background:#1c1917;color:#fff}.btn-primary:hover{background:#000}

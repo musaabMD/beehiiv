@@ -116,7 +116,8 @@ aside.toc{position:sticky;top:60px;align-self:start;padding:36px 0;font-size:13.
 .m-GET{background:#2563eb}.m-POST{background:#059669}.m-PATCH{background:#d97706}.m-PUT{background:#7c3aed}.m-DELETE{background:#dc2626}.ep small{color:var(--muted);flex-basis:100%;padding-left:64px}
 .params{padding-left:64px;font-size:13px;color:#4b5563;flex-basis:100%}.params b{font-family:ui-monospace,monospace;font-weight:600;color:#111}
 @media(max-width:1100px){.layout{grid-template-columns:220px minmax(0,1fr)}aside.toc{display:none}}
-@media(max-width:760px){.layout{grid-template-columns:1fr}nav.side{position:static;max-height:none;padding:12px 0;display:flex;gap:4px;overflow-x:auto}nav.side h4{display:none}nav.side a{white-space:nowrap}.hd .r{display:none}.ep small,.params{padding-left:0}}
+article{overflow-wrap:anywhere}article pre{max-width:100%}.ep code{word-break:break-all}
+@media(max-width:760px){.hd{flex-wrap:wrap;height:auto;padding:10px 16px;gap:10px}form.s{order:3;flex-basis:100%;max-width:none}.layout{grid-template-columns:1fr;padding:0 16px}article h1{font-size:28px}nav.side{position:static;max-height:none;padding:12px 0;display:flex;gap:4px;overflow-x:auto}nav.side h4{display:none}nav.side a{white-space:nowrap}.hd .r{display:none}.ep small,.params{padding-left:0}}
 </style></head><body>
 <header><div class="hd"><a class="brand" href="/"><img src="/static/favicon.svg" width="24" height="24" alt="">Lnkbase Newsletter <span style="color:var(--muted);font-weight:500">Docs</span></a>
 <form class="s" action="/docs" method="get"><input name="q" value="${esc(q)}" placeholder="Search the docs…" aria-label="Search docs"></form>
