@@ -136,5 +136,6 @@ export async function discardJob(env: Env, jobId: string) {
 
 /** Kick the job runner in the background after a request enqueues work (so local dev doesn't wait for cron). */
 export function kick(env: Env, ctx: { waitUntil(p: Promise<unknown>): void } | undefined) {
-  if (ctx) ctx.waitUntil(runJobs(env, 25_000).catch(() => 0));
+  // stay well inside the 30 s waitUntil allowance: a cancelled waitUntil resets the request's keep-alive connection
+  if (ctx) ctx.waitUntil(runJobs(env, 18_000).catch(() => 0));
 }
