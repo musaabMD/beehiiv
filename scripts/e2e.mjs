@@ -1074,5 +1074,179 @@ const errs13 = sql(`SELECT source, message FROM error_log ORDER BY created_at DE
 ok(errs13.length === 0, 'no server errors logged (section 13)', JSON.stringify(errs13).slice(0, 800));
 
 }
+__restore();
+{ // revenue attribution, holdout groups, unified customer timeline, custom events
+console.log('14. Revenue attribution, holdouts, customer timeline, custom events');
+cookies = userCookies;
+const T = Date.now();
+const mcp14 = async (name, args) => (await (await fetch(`${BASE}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name, arguments: args } }) })).json()).result;
+const tickAll = async (names) => { sql(`DELETE FROM rate_limits WHERE key IN (${names.map((n) => `'periodic:${n}'`).join(',')})`); await cron(); await sleep(1200); };
+fakeSubs(60, 'rv');
+const rvIds = sql(`SELECT id, email FROM subscribers WHERE id LIKE 'rv%${rnd}' ORDER BY id`);
+
+// ── holdout on a newsletter send ──
+const rvPost = await newPost('Revenue');
+let x = await api(key, 'PUT', `/posts/${rvPost}/holdout`, { pct: 25, window_days: 7 });
+ok(x.status === 200 && x.body.data.pct === 25 && x.body.data.window_days === 7, 'post holdout set via API (25%, 7-day window)', JSON.stringify(x.body).slice(0, 160));
+r = await req(`/app/posts/${rvPost}`); let ph14 = await r.text();
+ok(ph14.includes('data-holdout="25"') && ph14.includes('/holdout"'), 'post report shows the holdout setting before sending');
+let s14 = await api(key, 'POST', `/posts/${rvPost}/send`, {});
+ok([200, 201, 202].includes(s14.status), 'post with a holdout sends', JSON.stringify(s14.body).slice(0, 160));
+for (let i = 0; i < 12; i++) { await cron(); await sleep(1200); if (sql(`SELECT status FROM sends WHERE post_id = '${rvPost}' AND kind = 'post'`)[0]?.status === 'sent') break; }
+const held = sql(`SELECT subscriber_id FROM holdout_members WHERE kind = 'post' AND ref_id = '${rvPost}'`).map((h) => h.subscriber_id);
+const heldRv = held.filter((h) => h.startsWith('rv'));
+const sentRv = sql(`SELECT COUNT(DISTINCT d.subscriber_id) AS n FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = '${rvPost}' AND d.subscriber_id LIKE 'rv%${rnd}'`)[0].n;
+ok(heldRv.length >= 5 && heldRv.length <= 26 && heldRv.length + sentRv === 60, `~25% of readers held out by stable hash (${heldRv.length} held, ${sentRv} sent of 60)`);
+ok(sql(`SELECT COUNT(*) AS n FROM deliveries d JOIN sends s ON s.id = d.send_id JOIN holdout_members h ON h.subscriber_id = d.subscriber_id AND h.kind = 'post' AND h.ref_id = s.post_id WHERE s.post_id = '${rvPost}'`)[0].n === 0, 'held-out readers got no delivery (never counted as unopened)');
+x = await api(key, 'PUT', `/posts/${rvPost}/holdout`, { pct: 10 });
+ok(x.status === 409, 'holdout cannot change after the post is sent');
+
+// ── attribution: internal checkout order after two email clicks (transactional first, then the post) ──
+const treated = sql(`SELECT d.id, d.send_id, d.subscriber_id, d.email FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.post_id = '${rvPost}' AND d.status = 'sent' AND d.subscriber_id LIKE 'rv%${rnd}' ORDER BY d.subscriber_id LIMIT 4`);
+const [A, B, D, E] = treated;
+const click = (d, at, n = 'c') => { sql(`INSERT INTO clicks (id, delivery_id, send_id, pub_id, url, is_bot, created_at) VALUES ('${n}${d.id}', '${d.id}', '${d.send_id}', '${pubId}', 'https://example.com/shop', 0, ${at})`); sql(`UPDATE deliveries SET clicked_at = COALESCE(clicked_at, ${at}), click_count = click_count + 1 WHERE id = '${d.id}'`); };
+click(A, T - 3600000);
+sql(`INSERT INTO tx_messages (id, pub_id, to_email, subject, status, track, created_at, clicked_at, click_count) VALUES ('tx${rnd}', '${pubId}', '${A.email}', 'Your receipt ${rnd}', 'sent', 1, ${T - 3 * 3600000}, ${T - 2 * 3600000}, 1)`);
+sql(`INSERT INTO products (id, pub_id, name, slug, description, kind, price_cents, currency, tags, status, created_at) VALUES ('rvp${rnd}', '${pubId}', 'Revenue course ${rnd}', 'rv-course-${rnd}', 'x', 'download', 5000, 'usd', '[]', 'active', ${T})`);
+const order = (oid, sub, amount) => sql(`INSERT INTO orders (id, pub_id, kind, ref_id, subscriber_id, email, amount_cents, currency, status, delivery_token, data, created_at) VALUES ('${oid}', '${pubId}', 'product', 'rvp${rnd}', '${sub.subscriber_id || sub.id}', '${sub.email}', ${amount}, 'usd', 'pending', 'tok${oid}', '{}', ${Date.now()})`);
+order(`rvo${rnd}`, A, 5000);
+r = await req(`/checkout/simulate/rvo${rnd}`, { form: {} });
+ok([302, 303].includes(r.status), 'test checkout pays the order', r.status);
+const attr = (k, m) => sql(`SELECT channel, post_id, tx_message_id, weight, revenue_cents FROM revenue_attributions WHERE order_key = '${k}' AND model = '${m}' ORDER BY channel`);
+const lc = attr(`o:rvo${rnd}`, 'last_click'), ft = attr(`o:rvo${rnd}`, 'first_touch'), ln = attr(`o:rvo${rnd}`, 'linear');
+ok(lc.length === 1 && lc[0].post_id === rvPost && lc[0].revenue_cents === 5000, 'last click: order credited to the post clicked last', JSON.stringify(lc));
+ok(ft.length === 1 && ft[0].channel === 'transactional' && ft[0].tx_message_id === `tx${rnd}`, 'first touch: credited to the transactional email clicked first', JSON.stringify(ft));
+ok(ln.length === 2 && ln.every((y) => y.revenue_cents === 2500), 'linear: split evenly across both clicked emails', JSON.stringify(ln));
+
+// ── attribution: Shopify order after a click ──
+const shop14 = sql(`SELECT * FROM commerce_stores WHERE pub_id = '${pubId}' AND platform = 'shopify'`)[0];
+if (shop14) {
+  click(B, T - 2 * 86400000);
+  const body = JSON.stringify({ id: 7723049676000 + Math.floor(Math.random() * 100000), name: '#2001', order_number: 2001, email: B.email, financial_status: 'paid', total_price: '30.00', currency: 'USD', processed_at: new Date().toISOString(), buyer_accepts_marketing: true, customer: { id: 7723049676099, email: B.email, first_name: 'Rv', email_marketing_consent: { state: 'subscribed' } }, line_items: [{ id: 1, product_id: 1, title: 'Mug', quantity: 1, price: '30.00' }] });
+  r = await fetch(`${BASE}/hooks/commerce/${shop14.hook_token}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-shopify-topic': 'orders/paid', 'x-shopify-hmac-sha256': createHmac('sha256', 'shpss_e2e_secret').update(body).digest('base64'), 'x-shopify-webhook-id': 'rvw' + rnd, 'x-shopify-shop-domain': shop14.store_url }, body });
+  const xo = sql(`SELECT a.touches, r.post_id, r.revenue_cents FROM attribution_orders a JOIN revenue_attributions r ON r.order_key = a.order_key AND r.model = 'last_click' WHERE a.source = 'store' AND a.email = '${B.email}'`)[0];
+  ok(r.status === 200 && xo && xo.post_id === rvPost && xo.revenue_cents === 3000, 'Shopify order credited to the newsletter clicked 2 days earlier', JSON.stringify(xo || {}));
+} else ok(false, 'Shopify store from section 11c available');
+// a held-out reader buys too (counts for the lift, never attributed — no click)
+const H = rvIds.find((s) => heldRv.includes(s.id));
+sql(`INSERT INTO orders (id, pub_id, kind, ref_id, subscriber_id, email, amount_cents, currency, status, data, created_at, paid_at) VALUES ('rvh${rnd}', '${pubId}', 'product', 'rvp${rnd}', '${H.id}', '${H.email}', 1000, 'usd', 'paid', '{}', ${Date.now()}, ${Date.now()})`);
+
+x = await api(key, 'GET', `/posts/${rvPost}/revenue`);
+ok(x.status === 200 && x.body.data.by_model.last_click.revenue === 8000 && x.body.data.by_model.last_click.orders === 2 && x.body.data.revenue_per_1000 > 0, 'GET /posts/:id/revenue: $80 last click, 2 orders, revenue per 1,000', JSON.stringify(x.body.data).slice(0, 200));
+x = await api(key, 'GET', `/revenue/attribution?days=1`);
+const top = x.body?.data?.top_emails || [];
+ok(x.status === 200 && x.body.data.attributed_revenue >= 8000 && top[0]?.post_id === rvPost && x.body.data.by_model.linear >= 5500 && x.body.data.revenue_per_1000 > 0, 'GET /revenue/attribution: revenue by email, top earning email, per-1,000', JSON.stringify(x.body.data).slice(0, 240));
+x = await api(key, 'GET', `/revenue/orders?days=1&model=linear`);
+ok(x.status === 200 && x.body.data.some((o) => o.order_id === `rvo${rnd}` && o.credits.length === 2), 'GET /revenue/orders lists credited emails per order');
+x = await api(key, 'GET', `/revenue/attribution?model=nope`);
+ok(x.status === 400, 'unknown attribution model → 400');
+x = await api(key, 'GET', `/posts/${rvPost}/holdout`);
+const lift = x.body?.data?.lift;
+ok(x.status === 200 && lift && lift.holdout === heldRv.length + held.filter((h) => !h.startsWith('rv')).length && lift.purchase.treated.x >= 2 && lift.purchase.holdout.x === 1 && lift.summary.length >= 2 && Array.isArray(lift.purchase.ci), 'holdout lift: treated vs holdout orders, CI, plain-English summary', JSON.stringify(lift || {}).slice(0, 300));
+r = await req(`/app/posts/${rvPost}`); ph14 = await r.text();
+ok(ph14.includes('Revenue from this email') && ph14.includes('data-post-revenue="8000"') && ph14.includes('data-lift') && ph14.includes('data-lift-summary'), 'post report shows revenue (all models) and the lift table');
+r = await req('/app/analytics/revenue?range=7d'); let rh14 = await r.text();
+ok(r.status === 200 && rh14.includes('Revenue by email') && rh14.includes('Top earning emails') && rh14.includes('Revenue per 1,000 emails') && rh14.includes(`Revenue ${rnd}`), 'Analytics → Revenue: revenue by email, per 1,000, top earning emails');
+r = await req('/app/analytics/revenue?range=7d&model=linear'); ok((await r.text()).includes('data-model="linear"'), 'attribution model switch');
+
+// ── custom events ──
+const trialAuto = await api(key, 'POST', '/automations', { name: `Trial ${rnd}`, trigger: { type: 'custom_event', config: { name: 'trial_started', properties: 'plan = pro' } }, steps: [{ type: 'send_email', config: { subject: `Trial tips ${rnd}`, markdown: 'Welcome to your trial: [start](https://example.com/start)' } }], activate: true });
+const taId = trialAuto.body?.data?.id;
+ok(trialAuto.status === 201 && taId, 'automation with the custom_event trigger created', JSON.stringify(trialAuto.body).slice(0, 160));
+let ev = await api(key, 'POST', '/events', { email: D.email, name: 'trial_started', properties: { plan: 'pro', seats: 3 }, dedupe_key: `trial-${rnd}` });
+const ev2 = await api(key, 'POST', '/events', { email: D.email, name: 'trial_started', properties: { plan: 'pro' }, dedupe_key: `trial-${rnd}` });
+ok(ev.status === 201 && ev.body.data.subscriber_id === D.subscriber_id && ev2.status === 200 && ev2.body.data.duplicate === true && ev2.body.data.id === ev.body.data.id, 'POST /events stores the event; same dedupe_key returns the original (exactly once)');
+ok(sql(`SELECT COUNT(*) AS n FROM custom_events WHERE dedupe_key = 'trial-${rnd}'`)[0].n === 1, 'only one row for a deduplicated event');
+ok(sql(`SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id = '${taId}' AND subscriber_id = '${D.subscriber_id}'`)[0].n === 1, 'custom event enrolls the subscriber (name + property filter match)');
+await api(key, 'POST', '/events', { email: E.email, name: 'trial_started', properties: { plan: 'basic' } });
+ok(sql(`SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id = '${taId}' AND subscriber_id = '${E.subscriber_id}'`)[0].n === 0, 'property filter (plan = pro) keeps other events out');
+ev = await api(key, 'POST', '/events', { email: `nobody.${rnd}@gmail.com`, name: 'viewed_pricing' });
+ok(ev.status === 201 && ev.body.data.subscriber_id === null, 'event for a non-subscriber is kept by email');
+ev = await api(key, 'POST', '/events', { email: D.email, name: '' });
+ok(ev.status === 400 && ev.body.error?.code === 'invalid_name', 'missing event name → 400');
+ev = await api(key, 'POST', '/events/batch', { events: [{ email: D.email, name: 'lesson_done', properties: { n: 1 }, occurred_at: new Date(T - 86400000).toISOString() }, { subscriber_id: D.subscriber_id, name: 'lesson_done', occurred_at: Math.floor(T / 1000) }, { email: D.email, name: '!!bad' }] });
+ok(ev.status === 200 && ev.body.data.accepted === 2 && ev.body.data.rejected === 1 && ev.body.data.results[2].error.code === 'invalid_name', 'batch: 2 accepted, 1 rejected individually', JSON.stringify(ev.body).slice(0, 200));
+ev = await api(key, 'POST', '/events/batch', { events: Array.from({ length: 101 }, () => ({ email: D.email, name: 'x' })) });
+ok(ev.status === 400, 'batch over 100 events → 400');
+let seg14 = await mcp14('create_segment_from_description', { name: 'Trialists', dry_run: true, rules: { op: 'and', rules: [{ field: 'custom_event', cmp: 'performed', value: { name: 'trial_started', days: 7 } }] } });
+const seg14b = await mcp14('create_segment_from_description', { name: 'Keen', dry_run: true, rules: { op: 'and', rules: [{ field: 'custom_event', cmp: 'performed', value: { name: 'lesson_done', days: 30, count: 2 } }] } });
+const seg14c = await mcp14('create_segment_from_description', { name: 'Old', dry_run: true, rules: { op: 'and', rules: [{ field: 'custom_event', cmp: 'performed', value: { name: 'lesson_done', days: 30, count: 3 } }] } });
+ok(seg14?.structuredContent?.matches === 2 && seg14b?.structuredContent?.matches === 1 && seg14c?.structuredContent?.matches === 0, 'segment "performed event X within N days, at least k times"', JSON.stringify([seg14?.structuredContent?.matches, seg14b?.structuredContent?.matches, seg14c?.structuredContent?.matches]));
+const mte = await mcp14('track_event', { email: D.email, name: 'webinar_joined', dedupe_key: `web-${rnd}` });
+ok(mte && !mte.isError && JSON.stringify(mte).includes('webinar_joined'), 'MCP track_event');
+
+// automation step revenue: D clicks the trial email, then buys
+for (let i = 0; i < 4; i++) { if (sql(`SELECT COUNT(*) AS n FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.automation_id = '${taId}' AND d.subscriber_id = '${D.subscriber_id}'`)[0].n) break; await tickAll(['automations.runs']); }
+const dDel = sql(`SELECT d.id, d.send_id, s.step_id FROM deliveries d JOIN sends s ON s.id = d.send_id WHERE s.automation_id = '${taId}' AND d.subscriber_id = '${D.subscriber_id}'`)[0];
+ok(!!dDel, 'automation email delivered');
+if (dDel) {
+  click(dDel, Date.now() - 60000, 'ca');
+  order(`rvd${rnd}`, D, 2000);
+  await req(`/checkout/simulate/rvd${rnd}`, { form: {} });
+  x = await api(key, 'GET', `/automations/${taId}/revenue`);
+  ok(x.status === 200 && x.body.data.steps[dDel.step_id]?.revenue === 2000 && x.body.data.by_model.last_click.revenue === 2000, 'automation revenue credited per email step', JSON.stringify(x.body.data).slice(0, 200));
+  r = await req(`/app/automations/${taId}/analytics`); const ah14 = await r.text();
+  ok(ah14.includes(`data-step-revenue="${dDel.step_id}"`) && ah14.includes('data-automation-revenue="2000"') && ah14.includes('data-holdout="0"'), 'automation analytics: revenue per step, overview revenue, holdout setting');
+  r = await req('/app/automations'); ok((await r.text()).includes('Revenue from automations'), 'automations overview shows attributed revenue');
+}
+
+// ── holdout on an automation ──
+const hoAuto = await api(key, 'POST', '/automations', { name: `Holdout flow ${rnd}`, trigger: { type: 'tag_added', config: { tag: `rv-go-${rnd}` } }, steps: [{ type: 'add_tag', config: { tags: [`rv-got-${rnd}`] } }], activate: true });
+const haId = hoAuto.body?.data?.id;
+x = await api(key, 'PUT', `/automations/${haId}/holdout`, { pct: 50 });
+ok(x.status === 200 && x.body.data.pct === 50, 'automation holdout set via API (50%)');
+for (const s of rvIds.slice(20, 40)) await api(key, 'POST', `/subscriptions/${s.id}/tags`, { tags: [`rv-go-${rnd}`] });
+const aRuns = sql(`SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id = '${haId}'`)[0].n;
+const aHeld = sql(`SELECT subscriber_id FROM holdout_members WHERE kind = 'automation' AND ref_id = '${haId}'`).map((h) => h.subscriber_id);
+ok(aRuns + aHeld.length === 20 && aHeld.length >= 3 && aHeld.length <= 17 && sql(`SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id = '${haId}' AND subscriber_id IN (${aHeld.map((h) => `'${h}'`).join(',') || "''"})`)[0].n === 0, `automation holdout: ${aHeld.length} of 20 trigger enrollments held back, none enrolled`);
+await api(key, 'POST', `/subscriptions/${aHeld[0]}/tags`, { tags: ['other'] });
+await api(key, 'DELETE', `/subscriptions/${aHeld[0]}/tags/rv-go-${rnd}`); await api(key, 'POST', `/subscriptions/${aHeld[0]}/tags`, { tags: [`rv-go-${rnd}`] });
+ok(sql(`SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id = '${haId}' AND subscriber_id = '${aHeld[0]}'`)[0].n === 0, 'held-out reader stays held out when the trigger fires again (stable)');
+x = await api(key, 'POST', `/automations/${haId}/journeys`, { subscriber_id: aHeld[0] });
+ok(x.status === 201, 'manual / API enrollment is never held back');
+x = await api(key, 'GET', `/automations/${haId}/holdout`);
+ok(x.status === 200 && x.body.data.lift && x.body.data.lift.holdout === aHeld.length && x.body.data.lift.kind === 'automation', 'automation lift report via API');
+const mh = await mcp14('holdout_lift', { automation_id: haId });
+ok(mh && !mh.isError && JSON.stringify(mh).includes('"pct":50'), 'MCP holdout_lift');
+const mr = await mcp14('revenue_attribution', { days: 1 });
+ok(mr && !mr.isError && JSON.stringify(mr).includes('attributed_revenue'), 'MCP revenue_attribution');
+
+// ── unified customer timeline ──
+x = await api(key, 'GET', `/subscriptions/${A.subscriber_id}/timeline`);
+const types = (x.body?.data || []).map((i) => i.type);
+ok(x.status === 200 && types.includes('email.sent') && types.includes('email.clicked') && types.includes('order.paid') && types.includes('transactional.clicked'), 'timeline merges deliveries, clicks, orders and transactional', types.join(','));
+const tlAll = x.body.data;
+ok(tlAll.every((it, i) => i === 0 || Date.parse(tlAll[i - 1].at) >= Date.parse(it.at)), 'timeline is newest first');
+x = await api(key, 'GET', `/subscriptions/${D.subscriber_id}/timeline?types=custom`);
+ok(x.status === 200 && x.body.data.length === 4 && x.body.data.every((i) => i.category === 'custom') && x.body.data.some((i) => i.type === 'custom.trial_started'), 'timeline filter: custom events only', JSON.stringify(x.body.data.map((i) => i.type)));
+const p1 = await api(key, 'GET', `/subscriptions/${D.subscriber_id}/timeline?limit=3`);
+const p2 = await api(key, 'GET', `/subscriptions/${D.subscriber_id}/timeline?limit=3&cursor=${encodeURIComponent(p1.body.next_cursor || '')}`);
+ok(p1.body.data.length === 3 && p1.body.has_more && p2.body.data.length >= 1 && !p2.body.data.some((i) => p1.body.data.find((j) => j.key === i.key)) && Date.parse(p2.body.data[0].at) <= Date.parse(p1.body.data[2].at), 'timeline pagination (cursor, no repeats)');
+x = await api(key, 'GET', `/subscriptions/${D.subscriber_id}/timeline?types=bogus`);
+ok(x.status === 400, 'unknown timeline type → 400');
+x = await api(key, 'GET', `/subscriptions/${H.id}/timeline?types=email`);
+ok(x.body.data.some((i) => i.type === 'holdout'), 'held-out reader sees "held out" on their timeline');
+r = await req(`/app/audience/s/${D.subscriber_id}`); let sh14 = await r.text();
+ok(r.status === 200 && sh14.includes('data-timeline') && sh14.includes('Event: trial_started') && sh14.includes('Entered automation'), 'subscriber page shows the unified timeline');
+r = await req(`/app/audience/s/${D.subscriber_id}?tl=custom`); sh14 = await r.text();
+ok(sh14.includes('data-tl-cat="custom"') && !sh14.includes('data-tl-cat="email"'), 'subscriber timeline filter');
+const mt = await mcp14('subscriber_timeline', { email_or_id: D.email, types: ['custom'] });
+ok(mt && !mt.isError && JSON.stringify(mt).includes('trial_started'), 'MCP subscriber_timeline');
+x = await api(key, 'GET', `/events?email=${encodeURIComponent(D.email)}&name=lesson_done`);
+ok(x.status === 200 && x.body.data.length === 2, 'GET /events filters by email and name');
+
+// ── refunds lose their attribution; window setting ──
+sql(`UPDATE orders SET status = 'refunded' WHERE id = 'rvo${rnd}'`);
+await tickAll(['attribution.sweep']);
+ok(sql(`SELECT COUNT(*) AS n FROM revenue_attributions WHERE order_key = 'o:rvo${rnd}'`)[0].n === 0, 'refunded order loses its attribution');
+x = await api(key, 'PUT', '/revenue/settings', { window_days: 1 });
+ok(x.status === 200 && x.body.data.window_days === 1, 'attribution window setting');
+for (let i = 0; i < 6; i++) { await cron(); await sleep(1000); if (sql(`SELECT window_days FROM attribution_orders WHERE order_key LIKE 'x:%' AND email = '${B.email}'`)[0]?.window_days === 1) break; }
+ok(sql(`SELECT touches FROM attribution_orders WHERE email = '${B.email}' AND source = 'store'`)[0]?.touches === 0, 'narrower window re-credits orders (a 2-day-old click no longer counts)');
+await api(key, 'PUT', '/revenue/settings', { window_days: 7 });
+sql(`DELETE FROM subscribers WHERE id LIKE 'rv%${rnd}'`);
+const errs14 = sql(`SELECT source, message FROM error_log ORDER BY created_at DESC LIMIT 10`);
+ok(errs14.length === 0, 'no server errors logged (section 14)', JSON.stringify(errs14).slice(0, 800));
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

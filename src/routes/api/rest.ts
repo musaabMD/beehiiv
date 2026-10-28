@@ -21,6 +21,10 @@ import { siteUrl } from '../../lib/pub';
 import { markdownToBlocks } from '../../lib/markdown';
 import { postStats, providerStats, summary, growthSeries, earnings } from '../../lib/stats';
 import { id, now, slugify, parseJSON, clamp, int, token, DAY } from '../../lib/util';
+import { trackEvent, trackBatch, listEvents, eventNames, serializeEvent, EventError, MAX_BATCH } from '../../lib/customevents';
+import { timeline, CATEGORIES } from '../../lib/timeline';
+import { revenueSummary, revenueByEmail, revenueByCampaign, attributedOrders, postRevenue, automationRevenue, setWindowDays, modelOf, MODELS } from '../../lib/attribution';
+import { getHoldout, setHoldout, liftReport, MAX_HOLDOUT_PCT, type HoldoutKind } from '../../lib/holdout';
 
 export type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 export interface RouteDef {
@@ -1022,6 +1026,97 @@ route('POST', '/transactional/templates', 'Transactional', 'Create or update (pa
     return c.json({ data: serializeTemplate(await one<any>(c.env, 'SELECT * FROM tx_templates WHERE id = ?', tid)) }, b.id ? 200 : 201);
   } catch (e) { return txFail(c, e); }
 }, { body: { id: 'Existing template id (update)', name: 'Name', slug: 'template_id used in send calls', subject: 'Subject with {{merge}} tags', body: 'Markdown or HTML', format: 'markdown|html' } });
+
+// ───────── custom events (lib/customevents) ─────────
+const evFail = (c: Ctx, e: unknown) => { if (e instanceof EventError) return apiError(c, e.status, e.code, e.message); throw e; };
+const EVENT_BODY = { email: 'Subscriber email (or subscriber_id)', subscriber_id: 'Subscriber id', name: 'Event name (required), e.g. trial_started', properties: 'Object, up to 8 KB', occurred_at: 'ISO 8601 or Unix seconds (default now)', dedupe_key: 'Exactly-once key per publication: a repeat returns the original event (duplicate: true)' };
+route('POST', '/events', 'Custom events', 'Track a custom event for a subscriber (exactly once per dedupe_key); shows on the timeline, in segments and can trigger automations', async (c, pub) => {
+  try {
+    const r = await trackEvent(c.env, pub, (await body(c)) as any);
+    return c.json({ data: serializeEvent(r.event, { duplicate: r.duplicate }) }, r.duplicate ? 200 : 201);
+  } catch (e) { return evFail(c, e); }
+}, { body: EVENT_BODY });
+route('POST', '/events/batch', 'Custom events', `Track up to ${MAX_BATCH} events in one request ({"events": [...]}); each is validated and deduplicated on its own`, async (c, pub) => {
+  try {
+    const b = await body(c);
+    return c.json({ data: await trackBatch(c.env, pub, Array.isArray(b) ? b : b.events) });
+  } catch (e) { return evFail(c, e); }
+}, { body: { events: `Array of up to ${MAX_BATCH} events (same fields as POST /events)` } });
+route('GET', '/events', 'Custom events', 'List custom events, newest first (filter by email, subscriber_id or name)', async (c, pub) => {
+  const rows = await listEvents(c.env, pub.id, { email: c.req.query('email'), subscriberId: c.req.query('subscriber_id'), name: c.req.query('name'), before: c.req.query('before') ? Date.parse(c.req.query('before')!) : undefined, limit: int(c.req.query('limit'), 50) });
+  return c.json({ data: rows.map((e) => serializeEvent(e)) });
+}, { query: { email: 'Subscriber email', subscriber_id: 'Subscriber id', name: 'Event name', before: 'ISO date: older than', limit: '1-200 (default 50)' } });
+route('GET', '/events/names', 'Custom events', 'Event names seen in this publication with counts', async (c, pub) => c.json({ data: (await eventNames(c.env, pub.id)).map((x) => ({ name: x.name, count: x.n, last_at: iso(x.last_at) })) }));
+
+// ───────── unified customer timeline (lib/timeline) ─────────
+route('GET', '/subscriptions/:id/timeline', 'Subscriptions', 'Unified customer timeline: emails, opens, clicks, automation steps, transactional, orders, carts, replies, page views, signups, events, community, custom events', async (c, pub) => {
+  const s = await needSub(c, pub);
+  const types = String(c.req.query('types') || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const bad = types.filter((t) => !(t in CATEGORIES));
+  if (bad.length) throw new BadRequest(`Unknown type(s): ${bad.join(', ')}. Use: ${Object.keys(CATEGORIES).join(', ')}.`);
+  const r = await timeline(c.env, pub.id, s, { cursor: c.req.query('cursor'), types, limit: int(c.req.query('limit'), 50) });
+  return c.json({ data: r.items.map((i) => ({ ...i, at: iso(i.at) })), next_cursor: r.next_cursor, has_more: !!r.next_cursor });
+}, { query: { types: `Comma-separated: ${Object.keys(CATEGORIES).join(', ')}`, cursor: 'next_cursor from the previous page', limit: '1-100 (default 50)' } });
+
+// ───────── revenue attribution + holdouts (lib/attribution, lib/holdout) ─────────
+function revRange(c: Ctx) {
+  const to = c.req.query('to') ? Date.parse(c.req.query('to')!) : now();
+  const from = c.req.query('from') ? Date.parse(c.req.query('from')!) : to - clamp(int(c.req.query('days'), 30), 1, 730) * DAY;
+  if (!Number.isFinite(from) || !Number.isFinite(to)) throw new BadRequest('from/to must be ISO dates.');
+  const m = c.req.query('model');
+  if (m && !(MODELS as readonly string[]).includes(m)) throw new BadRequest(`model must be one of ${MODELS.join(', ')}.`);
+  return { r: { from, to }, model: modelOf(m) };
+}
+const REV_Q = { days: 'Look-back in days (default 30)', from: 'ISO start (overrides days)', to: 'ISO end (default now)', model: 'last_click (default) | first_touch | linear' };
+route('GET', '/revenue/attribution', 'Revenue', 'Revenue attributed to emails: totals per model and channel, revenue per 1,000 emails, top earning emails and campaigns', async (c, pub) => {
+  const { r, model } = revRange(c);
+  const [summary, emails, campaigns] = await Promise.all([revenueSummary(c.env, pub.id, r, model), revenueByEmail(c.env, pub.id, r, model, int(c.req.query('limit'), 25)), revenueByCampaign(c.env, pub.id, r, model)]);
+  return c.json({ data: { from: iso(r.from), to: iso(r.to), ...summary, top_emails: emails, campaigns } });
+}, { query: { ...REV_Q, limit: 'Top emails 1-200 (default 25)' } });
+route('GET', '/revenue/orders', 'Revenue', 'Orders credited to emails with each credited email and its share', async (c, pub) => {
+  const { r, model } = revRange(c);
+  return c.json({ data: await attributedOrders(c.env, pub.id, r, model, int(c.req.query('limit'), 50)) });
+}, { query: { ...REV_Q, limit: '1-200 (default 50)' } });
+route('PUT', '/revenue/settings', 'Revenue', 'Set the attribution window (days after a click, 1-90); re-credits the last 90 days', async (c, pub) => {
+  const b = await body(c);
+  if (!(Number(b.window_days) >= 1)) throw new BadRequest('window_days (1-90) is required.');
+  return c.json({ data: { window_days: await setWindowDays(c.env, pub.id, Number(b.window_days)) } });
+}, { body: { window_days: 'integer 1-90 (default 7)' } });
+route('GET', '/posts/:id/revenue', 'Revenue', 'Revenue attributed to a post (every model) and revenue per 1,000 emails', async (c, pub) => {
+  const p = await needPost(c, pub);
+  return c.json({ data: await postRevenue(c.env, p.id) });
+});
+route('GET', '/automations/:id/revenue', 'Revenue', 'Revenue attributed to an automation, per model and per email step', async (c, pub) => {
+  const a: any = await needRow(c, 'automations', pub, 'Automation');
+  return c.json({ data: await automationRevenue(c.env, a.id, modelOf(c.req.query('model'))) });
+}, { query: { model: 'Model for the per-step numbers (default last_click)' } });
+
+async function holdoutPayload(c: Ctx, pub: Publication, kind: HoldoutKind, refId: string) {
+  const [cfg, lift] = await Promise.all([getHoldout(c.env, kind, refId, true), liftReport(c.env, pub.id, kind, refId, int(c.req.query('window_days'), 0) || undefined)]);
+  return { pct: cfg?.pct || 0, window_days: cfg?.window_days || 7, lift: lift ? { ...lift, window_ends_at: iso(lift.window_ends_at) } : null };
+}
+const HOLDOUT_BODY = { pct: `Share of eligible readers held back, 0-${MAX_HOLDOUT_PCT} (0 turns it off)`, window_days: 'Conversion window for the lift report, 1-60 (default 7)' };
+route('GET', '/posts/:id/holdout', 'Revenue', 'Holdout setting and incremental lift (orders, revenue, site visits, upgrades) vs readers who got the post', async (c, pub) => {
+  const p = await needPost(c, pub);
+  return c.json({ data: await holdoutPayload(c, pub, 'post', p.id) });
+}, { query: { window_days: 'Override the conversion window' } });
+route('PUT', '/posts/:id/holdout', 'Revenue', 'Hold out a share of readers from this post (before it is sent)', async (c, pub) => {
+  const p = await needPost(c, pub);
+  if (await one(c.env, `SELECT 1 FROM sends WHERE post_id = ? AND kind = 'post'`, p.id)) return apiError(c, 409, 'already_sent', 'This post has already been sent; its holdout can no longer change.');
+  const b = await body(c);
+  await setHoldout(c.env, pub.id, 'post', p.id, Number(b.pct), b.window_days);
+  return c.json({ data: await holdoutPayload(c, pub, 'post', p.id) });
+}, { body: HOLDOUT_BODY });
+route('GET', '/automations/:id/holdout', 'Revenue', 'Holdout setting and incremental lift vs readers who entered the automation', async (c, pub) => {
+  const a: any = await needRow(c, 'automations', pub, 'Automation');
+  return c.json({ data: await holdoutPayload(c, pub, 'automation', a.id) });
+}, { query: { window_days: 'Override the conversion window' } });
+route('PUT', '/automations/:id/holdout', 'Revenue', 'Hold out a share of trigger-driven enrollments (manual and API enrollments are never held out)', async (c, pub) => {
+  const a: any = await needRow(c, 'automations', pub, 'Automation');
+  const b = await body(c);
+  await setHoldout(c.env, pub.id, 'automation', a.id, Number(b.pct), b.window_days);
+  return c.json({ data: await holdoutPayload(c, pub, 'automation', a.id) });
+}, { body: HOLDOUT_BODY });
 
 /** helper re-exported for MCP */
 export { countMatching };

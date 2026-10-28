@@ -13,6 +13,10 @@ import { DashLayout } from '../../ui/layout';
 import { Card, Stats, Stat, Table, Bars, LineChart, LinkBtn, Btn, Status, Badge, back, Empty } from '../../ui/components';
 import { num, pct, fmtDateTime, parseJSON, form, str, id, now, HOUR, DAY } from '../../lib/util';
 import { loadPost, walkBlocks } from './shared';
+// revenue intelligence (attribution + holdout lift) — kept in its own section, see revenue-ui
+import { postRevenue, windowDays } from '../../lib/attribution';
+import { getHoldout, setHoldout, liftReport } from '../../lib/holdout';
+import { PostRevenueCard, HoldoutCard } from '../revenue-ui';
 
 const app = new Hono<AppEnv>();
 
@@ -87,6 +91,8 @@ app.get('/:id', async (c) => {
     polls.push({ q: poll.question, opts, total: opts.reduce((a, b) => a + b.n, 0) });
   }
   const nonOpeners = (await one<any>(c.env, `SELECT COUNT(DISTINCT d.subscriber_id) AS n FROM deliveries d JOIN sends s ON s.id = d.send_id JOIN subscribers sb ON sb.id = d.subscriber_id WHERE s.post_id = ? AND s.kind NOT IN ('test','try') AND d.status = 'sent' AND d.opened_at IS NULL AND sb.status = 'active' AND NOT EXISTS (SELECT 1 FROM deliveries d2 JOIN sends s2 ON s2.id = d2.send_id WHERE s2.post_id = ? AND d2.subscriber_id = d.subscriber_id AND d2.opened_at IS NOT NULL)`, pid, pid))?.n || 0;
+  // ── revenue intelligence ──
+  const [postRev, revWindow, holdoutCfg, lift] = await Promise.all([postRevenue(c.env, pid), windowDays(c.env, pub.id), getHoldout(c.env, 'post', pid, true), liftReport(c.env, pub.id, 'post', pid)]);
   const canPublish = can(c.get('role'), 'publish');
   const rate = (a: number, b: number) => (b ? pct(a, b) : '—');
   return c.html(
@@ -203,6 +209,10 @@ app.get('/:id', async (c) => {
           </Card>
         ) : <div />}
       </div>
+      {post.platform !== 'web' && <>
+        {sends.length > 0 && <PostRevenueCard rev={postRev} windowDays={revWindow} tz={pub.timezone} />}
+        <HoldoutCard kind="post" action={`/app/posts/${pid}/holdout`} cfg={holdoutCfg} report={lift} locked={sends.some((x) => x.kind === 'post')} canEdit={canPublish} />
+      </>}
       {canPublish && post.platform !== 'web' && post.status === 'published' && (
         <Card title="Resend to non-openers">
           {nonOpeners ? (
@@ -217,6 +227,19 @@ app.get('/:id', async (c) => {
       {post.platform === 'web' && sends.length === 0 && <Card><Empty title="Web-only post" body="This post was published to your website only, so there are no email stats." /></Card>}
     </DashLayout>,
   );
+});
+
+// Holdout group for this post (set before sending; lib/holdout)
+app.post('/:id/holdout', async (c) => {
+  const pub = c.get('pub');
+  if (!can(c.get('role'), 'publish')) return back(c, `/app/posts/${c.req.param('id')}`, 'Not allowed', 'err');
+  const post = await loadPost(c, c.req.param('id'));
+  if (!post) return c.notFound();
+  if (await one(c.env, `SELECT 1 FROM sends WHERE post_id = ? AND kind = 'post'`, post.id)) return back(c, `/app/posts/${post.id}#holdout`, 'This post was already sent — its holdout can no longer change.', 'err');
+  const f = await form(c.req);
+  const cfg = await setHoldout(c.env, pub.id, 'post', post.id, Number(f.pct), Number(f.window_days));
+  await audit(c, 'post.holdout', post.id, { pct: cfg.pct });
+  return back(c, `/app/posts/${post.id}#holdout`, cfg.pct ? `${cfg.pct}% of readers will be held out when this post is sent` : 'Holdout turned off');
 });
 
 app.post('/:id/resend', async (c) => {

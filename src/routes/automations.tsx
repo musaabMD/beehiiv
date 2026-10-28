@@ -20,6 +20,9 @@ import { id, now, parseJSON, form, str, int, bool, ago, fmtDateTime, num, pct } 
 import { availableTemplates, templateByKey, templateTrigger, outline, CATEGORIES } from '../lib/automation-templates';
 import { GalleryAssets, TemplateCard } from './posts/templates';
 import { stepSummary, triggerSummary, flatten, stepLabel, normalizeSteps, normalizeTrigger, BRANCH_TYPES } from './automations/shared';
+import { automationRevenue, revenueByAutomation } from '../lib/attribution';
+import { getHoldout, setHoldout, liftReport } from '../lib/holdout';
+import { HoldoutCard, usd } from './revenue-ui';
 
 const dash = new Hono<AppEnv>();
 const site = new Hono<AppEnv>();
@@ -70,6 +73,7 @@ dash.get('/', async (c) => {
     pub.id,
   );
   const names = await nameMap(c);
+  const revenue = await revenueByAutomation(c.env, pub.id);
   const tot = rows.reduce((acc, r) => ({ active: acc.active + (r.status === 'active' ? 1 : 0), inprog: acc.inprog + r.in_progress, sent: acc.sent + r.sent, opened: acc.opened + r.opened }), { active: 0, inprog: 0, sent: 0, opened: 0 });
   const showArchived = c.req.query('archived') === '1';
   const visible = rows.filter((r) => showArchived || r.status !== 'archived');
@@ -80,6 +84,7 @@ dash.get('/', async (c) => {
         <Stat label="Subscribers in a journey" value={num(tot.inprog)} />
         <Stat label="Emails sent by automations" value={num(tot.sent)} />
         <Stat label="Average open rate" value={pct(tot.opened, tot.sent)} />
+        <Stat label="Revenue from automations" value={usd(Object.values(revenue).reduce((a, b) => a + b, 0))} sub="last-click attribution" href="/app/analytics/revenue#attribution" />
       </Stats>
       {visible.length ? (
         <Card pad={false} title="Your automations" actions={<a class="btn btn-ghost btn-sm" href={showArchived ? '/app/automations' : '/app/automations?archived=1'}>{showArchived ? 'Hide archived' : 'Show archived'}</a>}>
@@ -95,6 +100,7 @@ dash.get('/', async (c) => {
               { h: 'Emails sent', r: (r: any) => num(r.sent), class: 'right' },
               { h: 'Open rate', r: (r: any) => pct(r.opened, r.sent), class: 'right' },
               { h: 'Click rate', r: (r: any) => pct(r.clicked, r.sent), class: 'right' },
+              { h: 'Revenue', r: (r: any) => (revenue[r.id] ? usd(revenue[r.id]) : '—'), class: 'right' },
               {
                 h: '', class: 'right nowrap', r: (r: any) => (
                   <span class="row end" style="flex-wrap:nowrap;gap:4px">
@@ -716,6 +722,8 @@ dash.get('/:id/analytics', async (c) => {
   const emailById = new Map(s.emails.map((e) => [e.step_id, e]));
   const emailSteps = flat.filter((f) => f.step.type === 'send_email');
   const totals = s.emails.reduce((t, e) => ({ sent: t.sent + (e.sent || 0), opened: t.opened + (e.opened || 0), clicked: t.clicked + (e.clicked || 0) }), { sent: 0, opened: 0, clicked: 0 });
+  const pub = c.get('pub');
+  const [rev, holdoutCfg, lift] = await Promise.all([automationRevenue(c.env, a.id), getHoldout(c.env, 'automation', a.id, true), liftReport(c.env, pub.id, 'automation', a.id)]);
   return c.html(
     <DashLayout c={c} title={a.name} section="automations" wide crumbs={[['/app/automations', 'Automations']]} styles={['/static/automations.css']}>
       <AutomationTabs a={a} active={`/app/automations/${a.id}/analytics`} />
@@ -725,6 +733,8 @@ dash.get('/:id/analytics', async (c) => {
         <Stat label="Completed" value={num(s.runs.completed)} sub={`${pct(s.runs.completed, s.runs.enrolled)} completion rate`} />
         <Stat label="Exited early" value={num(s.runs.exited)} />
         <Stat label="Emails sent" value={num(totals.sent)} sub={`${pct(totals.opened, totals.sent)} open · ${pct(totals.clicked, totals.sent)} click`} />
+        <Stat label="Revenue" value={<span data-automation-revenue={String(rev.by_model.last_click.revenue)}>{usd(rev.by_model.last_click.revenue)}</span>} sub={`last click · ${num(rev.by_model.last_click.orders)} order${rev.by_model.last_click.orders === 1 ? '' : 's'} · linear ${usd(rev.by_model.linear.revenue)}`} />
+        <Stat label="Revenue per 1,000 emails" value={usd(totals.sent ? (rev.by_model.last_click.revenue / totals.sent) * 1000 : 0)} />
       </Stats>
       <Card title="Email performance" pad={false}>
         <Table
@@ -737,9 +747,11 @@ dash.get('/:id/analytics', async (c) => {
             { h: 'Clicks', r: (f) => { const e = emailById.get(f.step.id); return <span>{num(e?.clicked || 0)} <span class="muted small">{pct(e?.clicked || 0, e?.sent || 0)}</span></span>; }, class: 'right' },
             { h: 'Bounced', r: (f) => num(emailById.get(f.step.id)?.bounced || 0), class: 'right' },
             { h: 'Unsubscribed', r: (f) => num(emailById.get(f.step.id)?.unsubs || 0), class: 'right' },
+            { h: 'Revenue', r: (f) => { const x = rev.steps[f.step.id]; return x ? <span data-step-revenue={f.step.id}>{usd(x.revenue)} <span class="muted small">{num(x.orders)} order{x.orders === 1 ? '' : 's'}</span></span> : <span class="muted">—</span>; }, class: 'right' },
           ]}
         />
       </Card>
+      <HoldoutCard kind="automation" action={`/app/automations/${a.id}/holdout`} cfg={holdoutCfg} report={lift} canEdit={can(c.get('role'), 'publish')} />
       <Card title="Funnel — subscribers who reached each step">
         <Bars max={Math.max(1, s.runs.enrolled)} rows={[
           { label: <strong>Entered</strong>, value: s.runs.enrolled },
@@ -749,6 +761,16 @@ dash.get('/:id/analytics', async (c) => {
       </Card>
     </DashLayout>,
   );
+});
+
+// Holdout group for this automation (lib/holdout): a share of trigger-driven enrollments is held back.
+dash.post('/:id/holdout', requirePerm('publish'), async (c) => {
+  const a = await load(c);
+  if (!a) return c.notFound();
+  const f = await form(c.req);
+  const cfg = await setHoldout(c.env, a.pub_id, 'automation', a.id, Number(f.pct), Number(f.window_days));
+  await audit(c, 'automation.holdout', a.id, { pct: cfg.pct });
+  return back(c, `/app/automations/${a.id}/analytics#holdout`, cfg.pct ? `${cfg.pct}% of new enrollments will be held out` : 'Holdout turned off');
 });
 
 // ───────────────────────── incoming webhook entry point (public) ─────────────────────────

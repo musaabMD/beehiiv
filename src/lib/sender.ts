@@ -292,8 +292,10 @@ registerJob('send.batch', async (env, p) => {
   let processed = 0;
   let last = send.cursor as string | null;
   const queue: Array<{ sub: Subscriber; subject: string; variant: string | null; cohort: string | null; letter: string | null }> = [];
+  const held = await (await import('./holdout')).holdoutSet(env, send, recipients); // holdout group: deliberately not sent (lib/holdout)
   for (const sub of recipients) {
     last = sub.id;
+    if (held.has(sub.id)) continue;
     // A/B: test phase only takes the sample; main phase takes the rest
     const pick = await assignVariant(send.id, sub.id, o, o.subject || post.email_subject || post.title);
     if (!pick) continue;
@@ -380,7 +382,9 @@ async function planTimed(env: Env, pub: Publication, send: any, o: SendOptions) 
   // every recipient of one send is planned inside the same 24h window, starting when the timed phase began
   const from = Number(o.timing?.from) || now();
   const picks: Array<{ sub: Subscriber; variant: string | null }> = [];
+  const held = await (await import('./holdout')).holdoutSet(env, send, recipients);
   for (const sub of recipients) {
+    if (held.has(sub.id)) continue;
     const pick = await assignVariant(send.id, sub.id, o, '');
     if (pick) picks.push({ sub, variant: pick.variant });
   }

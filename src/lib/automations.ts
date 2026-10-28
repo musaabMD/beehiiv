@@ -37,6 +37,7 @@ export const TRIGGERS: Record<string, { label: string; event?: string; fields?: 
   api: { label: 'Enrolled via API or manually' },
   external_purchase: { label: 'Buys in your store (Shopify / WooCommerce / Stripe)', fields: ['platform', 'product_contains', 'min_total'] }, // matched + enrolled by lib/commerce
   cart_abandoned: { label: 'Abandons a cart (Shopify / WooCommerce)', fields: ['delay_hours', 'min_value'] }, // polled by lib/commerce (default 1h, 0)
+  custom_event: { label: 'Performs a custom event (Events API)', fields: ['name', 'properties'] }, // matched + enrolled by lib/customevents
   webhook: { label: 'Incoming webhook (Calendly, Typeform, Thinkific, Kajabi, Zapier…)', fields: ['email_path', 'name_path', 'tags', 'field_map', 'double_opt_in'] },
 };
 
@@ -114,6 +115,8 @@ export async function enroll(env: Env, automationId: string, subscriberId: strin
   if (['unsubscribed', 'bounced', 'complained'].includes(sub.status)) return { ok: false, reason: 'subscriber is not active' };
   const existing = await one<any>(env, `SELECT id, status FROM automation_runs WHERE automation_id = ? AND subscriber_id = ? ORDER BY created_at DESC LIMIT 1`, automationId, subscriberId);
   if (existing && (['active', 'waiting'].includes(existing.status) || (!a.allow_reentry && !opts.allowReentry))) return { ok: false, reason: 'already enrolled' };
+  // Holdout group (lib/holdout): a stable share of trigger-driven enrollments is deliberately not enrolled, for lift reporting.
+  if (!opts.force && (await (await import('./holdout')).holdoutEnroll(env, a, sub.id, data))) return { ok: false, reason: 'holdout' };
   const steps = parseJSON<Step[]>(a.steps, []);
   const rid = id();
   await insert(env, 'automation_runs', { id: rid, automation_id: a.id, pub_id: a.pub_id, subscriber_id: sub.id, status: steps.length ? 'active' : 'completed', step_path: '[0]', next_run_at: now(), data: JSON.stringify(data), created_at: now(), updated_at: now() });

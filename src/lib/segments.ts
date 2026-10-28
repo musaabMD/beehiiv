@@ -4,6 +4,7 @@ import type { Env } from '../types';
 import { one, all, run, val } from './db';
 import { now, DAY, parseJSON } from './util';
 import { COMMERCE_FIELDS, commerceRule } from './commerce-rules';
+import { CUSTOM_EVENT_FIELDS, customEventRule } from './customevent-rules';
 
 export interface Rule { field: string; cmp: string; value?: any }
 export interface RuleGroup { op: 'and' | 'or'; rules: Array<Rule | RuleGroup> }
@@ -47,6 +48,7 @@ export const FIELDS: Record<string, { label: string; kind: string; cmps: string[
   community_member: { label: 'Community member', kind: 'bool', cmps: ['is_true', 'is_false'] },
   condition_set: { label: 'Matches condition set', kind: 'condition_set', cmps: ['matches', 'not_matches'] },
   ...COMMERCE_FIELDS, // external store purchases + abandoned carts (lib/commerce-rules)
+  ...CUSTOM_EVENT_FIELDS, // performed custom event X (within N days, at least k times) — lib/customevent-rules
   // Subscriber Signals (public profile + email domain) and predictions (lib/signals.ts, lib/predict.ts)
   job_title: { label: 'Job title (Signals)', kind: 'text', cmps: ['contains', 'equals', 'is_empty', 'not_empty'] },
   company: { label: 'Company (Signals)', kind: 'text', cmps: ['contains', 'equals', 'is_empty', 'not_empty'] },
@@ -109,7 +111,7 @@ async function compileRule(env: Env, pubId: string, r: Rule, depth: number): Pro
       case 'after': return { sql: `${col} > ?`, params: [Date.parse(v)] };
     }
   }
-  const ext = commerceRule(r, t);
+  const ext = commerceRule(r, t) || customEventRule(r, t);
   if (ext) return ext;
   switch (r.field) {
     case 'tag':

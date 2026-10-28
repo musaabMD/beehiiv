@@ -20,6 +20,10 @@ import { sanitizeHtml } from './sanitize';
 import { APPLE_CATEGORIES } from './podcast';
 import { DOCS } from './docs-content';
 import { id, now, slugify, parseJSON, stripTags, money, clamp, int, DAY } from './util';
+import { trackEvent, serializeEvent, EventError } from './customevents';
+import { timeline, CATEGORIES } from './timeline';
+import { revenueSummary, revenueByEmail, postRevenue, automationRevenue, modelOf, MODELS } from './attribution';
+import { getHoldout, setHoldout, liftReport, MAX_HOLDOUT_PCT } from './holdout';
 
 export const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_INFO = { name: 'openhive', title: 'OpenHive', version: '1.0.0' };
@@ -770,6 +774,56 @@ export const TOOLS: Tool[] = [
     run: async (_env, _pub, a) => searchDocs(String(a.query || '')),
   },
 ];
+
+// ───────── revenue intelligence + unified customer data (lib/attribution, lib/holdout, lib/timeline, lib/customevents) ─────────
+TOOLS.push(
+  {
+    name: 'track_event', title: 'Track a custom event', description: 'Record a custom event for a subscriber (e.g. trial_started, course_completed). Exactly once per dedupe_key. Events appear on the subscriber timeline, in segments ("performed custom event") and can trigger automations ("Performs a custom event").',
+    inputSchema: S({ email: str('Subscriber email'), subscriber_id: str('Subscriber id (instead of email)'), name: str('Event name'), properties: obj('Event properties (≤ 8 KB)'), occurred_at: str('ISO 8601 time (default now)'), dedupe_key: str('Idempotency key: repeats return the original event') }, ['name']),
+    run: async (env, pub, a) => {
+      try { const r = await trackEvent(env, pub, a, 'mcp'); return serializeEvent(r.event, { duplicate: r.duplicate }); }
+      catch (e) { if (e instanceof EventError) throw new ToolError(e.message); throw e; }
+    },
+  },
+  {
+    name: 'subscriber_timeline', title: 'Subscriber timeline', description: `One chronological feed of everything a subscriber did: newsletter deliveries/opens/clicks, automation steps, transactional emails, orders (checkout + Shopify/WooCommerce/Stripe), carts, replies, page views, signups, event registrations, community posts and custom events. types filters: ${Object.keys(CATEGORIES).join(', ')}.`,
+    inputSchema: S({ email_or_id: str('Subscriber email or id'), types: arr('Categories to include'), cursor: str('next_cursor from a previous call'), limit: num('1-100 (default 30)') }, ['email_or_id']), annotations: { readOnlyHint: true },
+    run: async (env, pub, a) => {
+      const sub = await getSubscriber(env, pub.id, String(a.email_or_id || ''));
+      if (!sub) throw new ToolError('Subscriber not found.');
+      const r = await timeline(env, pub.id, sub, { cursor: a.cursor, types: Array.isArray(a.types) ? a.types : [], limit: Number(a.limit) || 30 });
+      return { subscriber: { id: sub.id, email: sub.email }, items: r.items.map((i) => ({ at: iso(i.at), category: i.category, type: i.type, title: i.title, detail: i.detail })), next_cursor: r.next_cursor };
+    },
+  },
+  {
+    name: 'revenue_attribution', title: 'Revenue by email', description: `Answer "which emails made money?": revenue attributed to emails (orders within the click window), per model (${MODELS.join(', ')}), per channel, revenue per 1,000 emails and the top earning emails. Pass post_id or automation_id for one email/flow.`,
+    inputSchema: S({ days: num('Look-back in days (default 30)'), model: str('last_click | first_touch | linear'), post_id: str('Only this post'), automation_id: str('Only this automation (per step)') }), annotations: { readOnlyHint: true },
+    run: async (env, pub, a) => {
+      const model = modelOf(a.model);
+      if (a.post_id) { if (!(await one(env, 'SELECT 1 FROM posts WHERE id = ? AND pub_id = ?', a.post_id, pub.id))) throw new ToolError('Post not found.'); return postRevenue(env, a.post_id); }
+      if (a.automation_id) { if (!(await one(env, 'SELECT 1 FROM automations WHERE id = ? AND pub_id = ?', a.automation_id, pub.id))) throw new ToolError('Automation not found.'); return automationRevenue(env, a.automation_id, model); }
+      const r = { from: now() - clamp(Number(a.days) || 30, 1, 730) * DAY, to: now() };
+      const [summary, top] = await Promise.all([revenueSummary(env, pub.id, r, model), revenueByEmail(env, pub.id, r, model, 10)]);
+      return { ...summary, top_emails: top.map(({ href, ...x }) => x) };
+    },
+  },
+  {
+    name: 'holdout_lift', title: 'Holdout lift', description: `Incremental lift of a post or automation measured against its holdout group (readers deliberately not sent / not enrolled): orders, revenue per reader, site visits, upgrades, with 95% intervals, p-values and a plain-English summary. Pass pct (0-${MAX_HOLDOUT_PCT}) to set the holdout (posts: before sending).`,
+    inputSchema: S({ post_id: str('Post id'), automation_id: str('Automation id'), pct: num('Set the holdout % (optional)'), window_days: num('Conversion window in days (optional)') }),
+    run: async (env, pub, a) => {
+      const kind = a.post_id ? 'post' : a.automation_id ? 'automation' : null;
+      if (!kind) throw new ToolError('Pass post_id or automation_id.');
+      const ref = String(a.post_id || a.automation_id);
+      if (!(await one(env, `SELECT 1 FROM ${kind === 'post' ? 'posts' : 'automations'} WHERE id = ? AND pub_id = ?`, ref, pub.id))) throw new ToolError(`${kind} not found.`);
+      if (a.pct !== undefined) {
+        if (kind === 'post' && (await one(env, `SELECT 1 FROM sends WHERE post_id = ? AND kind = 'post'`, ref))) throw new ToolError('This post was already sent; its holdout can no longer change.');
+        await setHoldout(env, pub.id, kind, ref, Number(a.pct), a.window_days);
+      }
+      const cfg = await getHoldout(env, kind, ref, true);
+      return { pct: cfg?.pct || 0, window_days: cfg?.window_days || 7, lift: await liftReport(env, pub.id, kind, ref) };
+    },
+  },
+);
 
 export function searchDocs(query: string) {
   const terms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 1);

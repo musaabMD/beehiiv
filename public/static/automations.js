@@ -142,6 +142,7 @@
     if (t.type === 'webhook') return [c.tags?.length ? `tags: ${[].concat(c.tags).join(', ')}` : '', c.email_path ? `email at ${c.email_path}` : 'email detected automatically'].filter(Boolean).join(' · ');
     const bits = [];
     if (c.sources?.length) bits.push(c.sources.join(', '));
+    if (t.type === 'custom_event') bits.push(c.name ? `event “${c.name}”` : 'any event');
     for (const k of ['tag', 'key', 'url_contains']) if (c[k]) bits.push(c[k]);
     for (const k of ['list_id', 'tier_id', 'product_id', 'event_id', 'survey_id', 'poll_id', 'post_id', 'segment_id']) if (c[k]) bits.push(n[c[k]] || c[k]);
     if (t.type === 'inactive') bits.push(`${c.days || 30} days`);
@@ -442,6 +443,7 @@
     inactive: (c) => [F.field('Days without opening', F.number(c, 'days', { min: 1, placeholder: '30' }))],
     external_purchase: (c) => [F.field('Store', F.select(c, 'platform', [['shopify', 'Shopify'], ['woocommerce', 'WooCommerce'], ['stripe', 'Stripe']], 'Any store')), F.field('Product name contains (or product id)', F.input(c, 'product_contains', { placeholder: 'e.g. Hoodie' })), F.field('Minimum order total', F.number(c, 'min_total', { min: 0, placeholder: '0' }))],
     cart_abandoned: (c) => [F.field('Wait (hours) after the checkout was last updated', F.number(c, 'delay_hours', { min: 0.25, step: 0.25, placeholder: '1' }), 'Only subscribers are emailed. The journey stops as soon as the order completes.'), F.field('Minimum cart value', F.number(c, 'min_value', { min: 0, placeholder: '0' })), F.note('Use {{cart.items}}, {{cart.total}} and a button linking to {{cart.recovery_url}} in your emails.')],
+    custom_event: (c) => [F.field('Event name', F.input(c, 'name', { placeholder: 'e.g. trial_started' }), 'Sent with POST /api/v2/publication/events. Leave empty for any event.'), F.field('Only when properties match (optional)', F.textarea(c, 'properties', 3, { placeholder: 'plan = pro\namount >= 100\nsku contains HOOD' }), 'One per line: key = value, != , > , >= , < , <= , contains, exists. Dots reach nested keys.')],
     api: () => [F.note(`Enroll subscribers from your app:<br><code>POST ${esc(meta.apiUrl)}</code><br><span class="small">Body: {"email": "reader@example.com"}. Authorization: Bearer &lt;API key&gt;.</span>`)],
     webhook: (c) => webhookFields(c),
   };

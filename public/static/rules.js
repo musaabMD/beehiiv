@@ -11,7 +11,7 @@
     before: 'before', after: 'after', has: 'has', not_has: 'does not have', exists: 'is set', not_exists: 'is not set', yes: 'yes', no: 'no', any: 'any product',
     started: 'has started', not_started: 'has not started', completed: 'has completed', active: 'is currently in', in: 'is in', not_in: 'is not in',
     answered: 'answered', not_answered: 'did not answer', chose: 'chose option', responded: 'responded', not_responded: 'did not respond', answer_equals: 'answer equals',
-    is_true: 'yes', is_false: 'no', matches: 'matches', not_matches: 'does not match',
+    is_true: 'yes', is_false: 'no', matches: 'matches', not_matches: 'does not match', performed: 'performed', not_performed: 'did not perform',
   };
   const NO_VALUE = new Set(['is_empty', 'not_empty', 'never', 'exists', 'is_true', 'is_false', 'any']);
 
@@ -43,6 +43,10 @@
       let h = `<select class="input r-survey">${surveys.map((x) => `<option value="${esc(x.id)}" ${s && x.id === s.id ? 'selected' : ''}>${esc(x.title)}</option>`).join('')}</select>`;
       if (rule.cmp === 'answer_equals' && s) h += `<select class="input r-sq">${(s.questions || []).map((q) => `<option value="${esc(q.id)}" ${v?.question_id === q.id ? 'selected' : ''}>${esc(q.label)}</option>`).join('')}</select><input class="input r-sval" value="${esc(v?.value ?? '')}" placeholder="answer">`;
       return h;
+    }
+    if (def.kind === 'custom_event') {
+      const o = v && typeof v === 'object' ? v : { name: v || '' };
+      return `<input class="input r-ev" value="${esc(o.name ?? '')}" placeholder="event name"><input class="input r-evd" type="number" min="0" style="width:90px" value="${esc(o.days ?? '')}" placeholder="any time" title="within the last N days (empty = ever)"><input class="input r-evc" type="number" min="1" style="width:70px" value="${esc(o.count ?? '')}" placeholder="1×" title="at least this many times">`;
     }
     const opts = optionsFor(cat, def.kind);
     if (opts) {
@@ -86,11 +90,12 @@
         const k = row.querySelector('.r-key');
         if (k) rule.value = { key: k.value, value: row.querySelector('.r-cval')?.value };
         else if (row.querySelector('.r-poll')) rule.value = { poll_id: row.querySelector('.r-poll').value, option_id: row.querySelector('.r-popt')?.value };
+        else if (row.querySelector('.r-ev')) rule.value = { name: row.querySelector('.r-ev').value.trim(), days: Number(row.querySelector('.r-evd').value) || undefined, count: Number(row.querySelector('.r-evc').value) || undefined };
         else if (row.querySelector('.r-survey')) rule.value = { survey_id: row.querySelector('.r-survey').value, question_id: row.querySelector('.r-sq')?.value, value: row.querySelector('.r-sval')?.value };
         else { const v = row.querySelector('.r-val'); rule.value = v ? v.value : undefined; }
         container.save();
       };
-      row.querySelectorAll('.r-val,.r-key,.r-cval,.r-sval').forEach((el) => el.addEventListener('input', sync));
+      row.querySelectorAll('.r-val,.r-key,.r-cval,.r-sval,.r-ev,.r-evd,.r-evc').forEach((el) => el.addEventListener('input', sync));
       row.querySelectorAll('select.r-val,.r-key').forEach((el) => el.addEventListener('change', sync));
       row.querySelectorAll('.r-poll,.r-survey').forEach((el) => el.addEventListener('change', () => { sync(); container.refresh(); }));
       row.querySelectorAll('.r-popt,.r-sq').forEach((el) => el.addEventListener('change', sync));

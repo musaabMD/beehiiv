@@ -20,6 +20,8 @@ import { Card, Grid, Stats, Stat, Table, LineChart, Bars, Badge, Status, Empty, 
 import { TrendChart, RangeBar, Kpi, FilterChips, parseFilters, normalizeChipQuery, CompareChart, csv, qsWith, fmtPct, fmtNum, fmtUsd, DASH_STYLE } from './parts';
 import { fmtDate, ago, id, now, parseJSON, str, form, esc } from '../../lib/util';
 import { StoreRevenueCard } from '../integrations-commerce';
+import { revenueSummary, revenueByEmail, revenueByCampaign, setWindowDays, reattribute, modelOf, MODEL_LABEL, type Model } from '../../lib/attribution';
+import { ModelPicker, usd as usd2 } from '../revenue-ui';
 
 const head = <style>{raw(DASH_STYLE)}</style>;
 
@@ -382,6 +384,13 @@ export function registerAnalytics(dash: App) {
   });
 
   // ───────── Revenue ─────────
+  dash.post('/analytics/revenue/attribution', async (c) => {
+    const pub = c.get('pub');
+    const f = await form(c.req);
+    if (f.recalculate) await reattribute(c.env, pub.id, 90);
+    else await setWindowDays(c.env, pub.id, Number(f.window_days));
+    return back(c, '/app/analytics/revenue#attribution', 'Saved — orders from the last 90 days are being re-credited.');
+  });
   dash.get('/analytics/revenue', async (c) => {
     const pub = c.get('pub');
     const r = parseRange(c.req.query(), '365d');
@@ -400,6 +409,11 @@ export function registerAnalytics(dash: App) {
     const recent = await all<any>(c.env, `SELECT kind, amount_cents, status, note, created_at FROM wallet_entries WHERE pub_id = ? ORDER BY created_at DESC LIMIT 10`, pub.id);
     const byTier = await all<any>(c.env, `SELECT t.name, COUNT(*) AS n, SUM(CASE WHEN s.interval = 'year' THEN s.amount_cents / 12.0 ELSE s.amount_cents END) AS mrr FROM subscriptions s JOIN tiers t ON t.id = s.tier_id WHERE s.pub_id = ? AND s.status IN ('active','past_due') GROUP BY t.name ORDER BY mrr DESC`, pub.id);
     const [pred, topClv, atRisk] = await Promise.all([predictionSummary(c.env, pub.id), topSubscribers(c.env, pub.id, { sort: 'clv', limit: 8 }), topSubscribers(c.env, pub.id, { sort: 'churn', limit: 8 })]);
+    // email revenue attribution (lib/attribution)
+    const model = modelOf(c.req.query('model'));
+    const [attr, byEmail, byCampaign] = await Promise.all([revenueSummary(c.env, pub.id, r, model), revenueByEmail(c.env, pub.id, r, model, 15), revenueByCampaign(c.env, pub.id, r, model)]);
+    const modelHref = (m: Model) => qsWith(c, { model: m }) + '#attribution';
+    const CH: Record<string, string> = { newsletter: 'Newsletter posts', automation: 'Automations', transactional: 'Transactional' };
     return c.html(
       <Page c={c} title="Revenue" sub="revenue">
         <RangeBar c={c} range={r} />
@@ -419,6 +433,37 @@ export function registerAnalytics(dash: App) {
         <Grid cols={2}>
           <Card title="Revenue split"><Bars rows={k.byKind.map((x) => ({ label: NAMES[x.kind] || x.kind, value: Number(x.v) }))} fmt={fmtUsd} /></Card>
           <Card title="MRR by tier"><Bars rows={byTier.map((x) => ({ label: `${x.name} (${x.n})`, value: Math.round(x.mrr) }))} fmt={fmtUsd} /></Card>
+        </Grid>
+        <h3 style="margin-top:8px" id="attribution">Revenue by email</h3>
+        <div class="row between wrap">
+          <p class="help" style="margin:0">Every paid order — subscriptions, products, tickets and store orders from Shopify, WooCommerce or Stripe — is credited to the emails the buyer clicked in the {attr.window_days} days before buying. <strong>{MODEL_LABEL[model]}</strong>{model === 'last_click' ? ': all credit to the last email clicked.' : model === 'first_touch' ? ': all credit to the first email clicked in the window.' : ': credit split evenly across every email clicked in the window.'}</p>
+          <ModelPicker model={model} href={modelHref} />
+        </div>
+        <div class="stats kpis4" data-attribution={String(attr.attributed_revenue)}>
+          <Stat label="Revenue by email" value={usd2(attr.attributed_revenue)} sub={`${fmtPct(attr.share * 100)} of ${usd2(attr.total_revenue)} total · ${fmtNum(attr.email_orders)} of ${fmtNum(attr.orders)} orders`} />
+          <Stat label="Revenue per 1,000 emails" value={<span data-rp1k={String(attr.revenue_per_1000)}>{usd2(attr.revenue_per_1000)}</span>} sub={`${fmtNum(attr.emails_sent)} emails sent in this period`} />
+          {attr.by_channel.length ? attr.by_channel.slice(0, 2).map((ch) => <Stat label={CH[ch.channel] || ch.channel} value={usd2(ch.revenue)} sub={`${fmtNum(ch.orders)} order${ch.orders === 1 ? '' : 's'}`} />) : <Stat label="By channel" value="—" sub="no email-driven orders yet" />}
+        </div>
+        <Grid cols={2}>
+          <Card title="Top earning emails" pad={false}>
+            <Table rows={byEmail} empty="No orders have been credited to an email in this period yet." cols={[
+              { h: 'Email', r: (x) => <div>{x.href ? <a href={x.href}>{x.name}</a> : x.name}<div class="small muted">{CH[x.channel] || x.channel}{x.automation_name ? ` · ${x.automation_name}` : ''}</div></div> },
+              { h: 'Orders', r: (x) => fmtNum(x.orders), class: 'right' },
+              { h: 'Revenue', r: (x) => <strong>{usd2(x.revenue)}</strong>, class: 'right' },
+              { h: 'Per 1,000', r: (x) => (x.sent ? usd2(x.revenue_per_1000) : '—'), class: 'right' },
+            ]} />
+          </Card>
+          <div>
+            <Card title="Revenue by channel"><Bars rows={attr.by_channel.map((x) => ({ label: CH[x.channel] || x.channel, value: x.revenue, sub: `${fmtNum(x.orders)} order${x.orders === 1 ? '' : 's'}` }))} fmt={fmtUsd} /></Card>
+            {byCampaign.length > 0 && <Card title="Revenue by campaign" pad={false}><Table rows={byCampaign} cols={[{ h: 'Campaign', r: (x) => <a href={`/app/campaigns/${x.id}`}>{x.name}</a> }, { h: 'Orders', r: (x) => fmtNum(x.orders), class: 'right' }, { h: 'Revenue', r: (x) => usd2(x.revenue), class: 'right' }]} /></Card>}
+            <Card title="Attribution settings">
+              <form method="post" action="/app/analytics/revenue/attribution" class="row">
+                <Field label="Count orders placed within (days of a click)" inline><Input name="window_days" type="number" min={1} max={90} value={attr.window_days} /></Field>
+                <Btn small kind="secondary">Save &amp; recalculate</Btn>
+              </form>
+              <p class="help">Changing the window re-credits the last 90 days of orders in the background. Holdout tests on a post or automation measure what the email <em>caused</em>, beyond what attribution credits.</p>
+            </Card>
+          </div>
         </Grid>
         <h3 style="margin-top:8px" id="predictions">Lifetime value &amp; predictions</h3>
         <p class="help">Customer lifetime value = revenue so far + predicted future revenue (monthly value × expected remaining months, adjusted for churn risk). Expected subscription length here is {pred.expectedTenure.toFixed(1)} months from your {fmtPct(pred.monthlyChurn * 100)} monthly churn (capped at {MAX_TENURE_MONTHS}). {pred.computedAt ? `Recomputed ${ago(pred.computedAt)}.` : 'Scores are computed in the background every few hours.'} <a href="/app/audience/top">How scores work →</a></p>

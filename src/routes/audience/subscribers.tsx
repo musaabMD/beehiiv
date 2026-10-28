@@ -14,6 +14,8 @@ import { Card, Btn, LinkBtn, Field, Input, Select, Check, Toggle, Table, Stat, S
 import { page, SOURCES, filtersFrom, filterGroup, filterQS, exportCSV } from './shared';
 import { form, str, int, now, DAY, ago, fmtDate, fmtDateTime, num, pct, parseJSON, chunk, id as newId } from '../../lib/util';
 import { StorePurchasesCard } from '../integrations-commerce';
+import { timeline } from '../../lib/timeline';
+import { TimelineCard } from '../revenue-ui';
 import { getSignals, enrichSubscriber, signalsEnabled, setSignalsEnabled, domainSignals } from '../../lib/signals';
 import {
   scoreSubscriber, scorePublication, topSubscribers, predictionSummary, lastScoredAt, queueScoring,
@@ -259,6 +261,9 @@ app.get('/s/:id', async (c) => {
     all<any>(c.env, `SELECT id, name, status FROM automations WHERE pub_id = ? AND status = 'active' ORDER BY name`, pub.id),
     all<{ tag: string }>(c.env, 'SELECT DISTINCT tag FROM subscriber_tags WHERE pub_id = ? ORDER BY tag LIMIT 300', pub.id),
   ]);
+  // unified customer timeline (lib/timeline): ?tl=email,order&tl_before=<cursor>
+  const tlTypes = String(c.req.query('tl') || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const tl = await timeline(c.env, pub.id, s, { cursor: c.req.query('tl_before'), types: tlTypes, limit: 30 });
   const sigOn = signalsEnabled(pub);
   const [scores, signals] = await Promise.all([scoreSubscriber(c.env, pub.id, s.id).catch(() => null), sigOn ? getSignals(c.env, s.id) : Promise.resolve(null)]);
   if (sigOn && !signals && s.status === 'active') c.executionCtx.waitUntil(enrichSubscriber(c.env, s).catch(() => {}));
@@ -296,6 +301,7 @@ app.get('/s/:id', async (c) => {
         <Stat label="Churn risk" value={scores.churn_risk ? <span data-churn={scores.churn_risk}><Badge tone={scores.churn_risk === 'high' ? 'red' : scores.churn_risk === 'medium' ? 'amber' : 'green'}>{scores.churn_risk}</Badge></span> : <Muted>—</Muted>} sub={scores.churn_risk ? <span title={scores.explain.churn.join(', ')}>{scores.churn_score}/100{scores.explain.churn.length ? ' · ' + scores.explain.churn.slice(0, 2).map((x) => x.replace(/^\+\d+ /, '')).join(', ') : ''}</span> : 'paid subscribers only'} />
       </Stats>
     )}
+    <TimelineCard base={`/app/audience/s/${s.id}`} items={tl.items} next={tl.next_cursor} types={tlTypes} tz={pub.timezone} />
     <div class="split">
       <div>
         <Card title="Engagement history" pad={false}>
