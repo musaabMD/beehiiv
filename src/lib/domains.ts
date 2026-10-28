@@ -10,7 +10,10 @@ export interface DnsRecord { key: string; type: 'TXT' | 'CNAME' | 'MX' | 'A'; ho
 export interface DnsCheck { key: string; ok: boolean; found: string[]; note?: string }
 
 export const SPF_INCLUDE = 'include:_spf.mx.cloudflare.net';
-export const DKIM_SELECTOR = 'cf2024-1';
+/** Cloudflare Email Sending publishes its DKIM key at cf-bounce._domainkey.<domain> and SPF on the cf-bounce.<domain>
+ *  return-path host; older setups used the cf2024-1 selector and a root SPF include. We accept either. */
+export const DKIM_SELECTOR = 'cf-bounce';
+const DKIM_SELECTORS = ['cf-bounce', 'cf2024-1'];
 
 async function doh(name: string, type: string): Promise<{ status: number; answers: string[] }> {
   try {
@@ -42,8 +45,8 @@ export function recordsFor(env: Env, d: { id?: string; hostname: string; kind: s
     recs.push({ key: 'cname', type: 'CNAME', host: h, value: appHost(env), purpose: 'Tracking domain — open pixels, click redirects and unsubscribe links in your emails use this host instead of ' + appHost(env), required: true });
   } else {
     recs.push(
-      { key: 'spf', type: 'TXT', host: h, value: `v=spf1 ${SPF_INCLUDE} ~all`, purpose: 'SPF — authorizes Cloudflare Email Sending to send for this domain (merge into an existing SPF record; only one v=spf1 record is allowed)', required: true },
-      { key: 'dkim', type: 'TXT', host: `${DKIM_SELECTOR}._domainkey.${h}`, value: 'Provided by Cloudflare when you run: npx wrangler email sending enable ' + h, purpose: 'DKIM — cryptographically signs your mail. Added automatically when the zone is on Cloudflare.', required: true },
+      { key: 'spf', type: 'TXT', host: `cf-bounce.${h}`, value: `v=spf1 ${SPF_INCLUDE} ~all`, purpose: 'SPF on the return-path host Cloudflare Email Sending uses. Added automatically by: npx wrangler email sending enable ' + h + ' (or Email → Email Sending in the Cloudflare dashboard).', required: true },
+      { key: 'dkim', type: 'TXT', host: `${DKIM_SELECTOR}._domainkey.${h}`, value: 'Provided by Cloudflare when you run: npx wrangler email sending enable ' + h, purpose: 'DKIM — signs your mail with your domain, which is what DMARC alignment checks. Added automatically with Email Sending.', required: true },
       { key: 'dmarc', type: 'TXT', host: `_dmarc.${h}`, value: `v=DMARC1; p=quarantine; rua=mailto:${rua}; adkim=s; aspf=s; pct=100`, purpose: 'DMARC — tells inboxes to reject unaligned mail and sends the daily reports to us, so the Domains page and the Guardian can show who sends as you. Already have a DMARC record? Add our address to its rua= list (comma-separated). adkim/aspf=s require strict alignment with your From domain.', required: true },
       { key: 'mx', type: 'MX', host: h, value: 'Any MX (needed to receive replies and bounces)', purpose: 'Lets the domain receive replies; also required by many inbox filters', required: false },
     );
@@ -68,10 +71,19 @@ export async function checkDomain(env: Env, d: { id: string; hostname: string; k
     cnameOk = ok;
     checks.push({ key: 'cname', ok, found: [...cname.answers, ...a.answers], note: cname.answers.length ? (ok ? undefined : `Points elsewhere — set the CNAME to ${target}`) : a.answers.length ? 'Resolves via A record (fine if proxied through Cloudflare)' : 'No record found' });
   } else {
-    const spf = rootTxt.answers.filter((x) => x.startsWith('v=spf1'));
-    checks.push({ key: 'spf', ok: spf.length === 1 && spf[0].includes('_spf.mx.cloudflare.net'), found: spf, note: spf.length > 1 ? 'Multiple SPF records — merge them into one' : spf.length && !spf[0].includes('_spf.mx.cloudflare.net') ? `Add ${SPF_INCLUDE}` : undefined });
-    const dkim = await doh(`${DKIM_SELECTOR}._domainkey.${h}`, 'TXT');
-    checks.push({ key: 'dkim', ok: dkim.answers.some((x) => x.includes('v=DKIM1') || x.includes('p=')), found: dkim.answers.map((x) => x.slice(0, 80) + (x.length > 80 ? '…' : '')) });
+    // SPF: Cloudflare Email Sending's return-path host first (what receivers actually check), then the root.
+    const bounceTxt = await doh(`cf-bounce.${h}`, 'TXT');
+    const bounceSpf = bounceTxt.answers.filter((x) => x.startsWith('v=spf1'));
+    const rootSpf = rootTxt.answers.filter((x) => x.startsWith('v=spf1'));
+    const spfOk = (bounceSpf.length === 1 && bounceSpf[0].includes('_spf.mx.cloudflare.net')) || (rootSpf.length === 1 && rootSpf[0].includes('_spf.mx.cloudflare.net'));
+    checks.push({ key: 'spf', ok: spfOk, found: [...bounceSpf.map((x) => `cf-bounce: ${x}`), ...rootSpf], note: spfOk ? undefined : rootSpf.length > 1 ? 'Multiple SPF records on the root — merge them into one' : `Enable Email Sending for ${h} in Cloudflare (it adds SPF on cf-bounce.${h})` });
+    let dkimFound: string[] = [];
+    for (const sel of DKIM_SELECTORS) {
+      const r = await doh(`${sel}._domainkey.${h}`, 'TXT');
+      const keys = r.answers.filter((x) => x.includes('v=DKIM1') || x.includes('p='));
+      if (keys.length) { dkimFound = keys.map((x) => `${sel}: ${x.slice(0, 70)}${x.length > 70 ? '…' : ''}`); break; }
+    }
+    checks.push({ key: 'dkim', ok: dkimFound.length > 0, found: dkimFound, note: dkimFound.length ? undefined : `Enable Email Sending for ${h} in Cloudflare (it publishes the DKIM key at cf-bounce._domainkey.${h})` });
     const dmarc = await doh(`_dmarc.${h}`, 'TXT');
     const dm = dmarc.answers.find((x) => x.startsWith('v=DMARC1'));
     checks.push({ key: 'dmarc', ok: !!dm && !/p=none/.test(dm), found: dmarc.answers, note: dm && /p=none/.test(dm) ? 'p=none only monitors — use quarantine or reject for full protection' : undefined });
